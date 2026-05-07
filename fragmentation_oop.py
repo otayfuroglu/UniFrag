@@ -1,6 +1,7 @@
 import argparse
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from pymatgen.core import Molecule, Structure
@@ -260,6 +261,112 @@ class BaseFragmenter:
                 coords[hidx] = new_h
 
 
+    def enforce_capped_oh_geometry(self, species, coords, capped_h_indices=None):
+        if not species or not capped_h_indices:
+            return
+        target_angle = np.deg2rad(109.5)
+        oh_len = self.cap_bond_length("O")
+
+        for hidx in capped_h_indices:
+            if hidx < 0 or hidx >= len(species) or species[hidx] != "H":
+                continue
+
+            hpos = np.array(coords[hidx], dtype=float)
+            parent_o = None
+            best = float("inf")
+            for i, sp in enumerate(species):
+                if sp != "O":
+                    continue
+                d = np.linalg.norm(hpos - np.array(coords[i], dtype=float))
+                if d < best and self.is_valid_bond("H", "O", d):
+                    best = d
+                    parent_o = i
+            if parent_o is None:
+                continue
+
+            opos = np.array(coords[parent_o], dtype=float)
+            heavy_neighbors = []
+            for j, sp in enumerate(species):
+                if j == parent_o or sp == "H":
+                    continue
+                d = np.linalg.norm(opos - np.array(coords[j], dtype=float))
+                if self.is_valid_bond("O", sp, d):
+                    heavy_neighbors.append((j, d))
+            if not heavy_neighbors:
+                continue
+            heavy_neighbors.sort(key=lambda x: (species[x[0]] != "C", x[1]))
+
+            anchor = heavy_neighbors[0][0]
+            anchor_pos = np.array(coords[anchor], dtype=float)
+            oa = anchor_pos - opos
+            oa_norm = np.linalg.norm(oa)
+            if oa_norm < 1e-12:
+                continue
+            e_a = oa / oa_norm
+
+            plane_ref = None
+            if species[anchor] == "C":
+                best_ref = float("inf")
+                for j, sp in enumerate(species):
+                    if j in {parent_o, anchor} or sp == "H":
+                        continue
+                    d = np.linalg.norm(anchor_pos - np.array(coords[j], dtype=float))
+                    if self.is_valid_bond("C", sp, d) and d < best_ref:
+                        plane_ref = j
+                        best_ref = d
+
+            if plane_ref is not None:
+                ref_vec = np.array(coords[plane_ref], dtype=float) - anchor_pos
+                perp = ref_vec - np.dot(ref_vec, e_a) * e_a
+                if np.linalg.norm(perp) > 1e-12:
+                    e_p = -perp / np.linalg.norm(perp)
+                else:
+                    e_p, _ = self._orthonormal_basis(e_a)
+            else:
+                e_p, _ = self._orthonormal_basis(e_a)
+
+            direction = np.cos(target_angle) * e_a + np.sin(target_angle) * e_p
+            norm = np.linalg.norm(direction)
+            if norm < 1e-12:
+                continue
+            candidate = opos + (direction / norm) * oh_len
+
+            alt_direction = np.cos(target_angle) * e_a - np.sin(target_angle) * e_p
+            alt_norm = np.linalg.norm(alt_direction)
+            if alt_norm > 1e-12:
+                alt = opos + (alt_direction / alt_norm) * oh_len
+
+                def score(pos):
+                    min_h = float("inf")
+                    min_heavy = float("inf")
+                    for k, sp in enumerate(species):
+                        if k in {hidx, parent_o}:
+                            continue
+                        d = np.linalg.norm(pos - np.array(coords[k], dtype=float))
+                        if sp == "H":
+                            min_h = min(min_h, d)
+                        else:
+                            min_heavy = min(min_heavy, d)
+                    return min_h, min_heavy
+
+                if score(alt) > score(candidate):
+                    candidate = alt
+
+            coords[hidx] = candidate
+
+    def optimize_capped_h_geometry_only(self, species, coords, capped_h_indices=None):
+        if not capped_h_indices:
+            return
+        capped_h_indices = [
+            i for i in capped_h_indices
+            if 0 <= i < len(species) and species[i] == "H"
+        ]
+        if not capped_h_indices:
+            return
+        self.enforce_sp2_capped_h_geometry(species, coords, capped_h_indices)
+        self.enforce_capped_oh_geometry(species, coords, capped_h_indices)
+
+
 class MOFFragmenter(BaseFragmenter):
     METALS = {"Mg", "Zn", "Cu", "Fe", "Co", "Ni", "Mn", "Zr", "Ti", "V", "Cr", "Al"}
     LARGE_NON_METALS = {"Br", "I", "S", "P", "Cl"}
@@ -273,8 +380,526 @@ class MOFFragmenter(BaseFragmenter):
             return dist < 2.2
         return dist < 1.8
 
+    @staticmethod
+    def _safe_name(text):
+        safe = []
+        for ch in str(text):
+            safe.append(ch if ch.isalnum() or ch in {"-", "_"} else "_")
+        return "".join(safe).strip("_") or "fragment"
+
+    @staticmethod
+    def _species_coords_unique_key(species, coords, decimals=3):
+        species = [str(sp) for sp in species]
+        coords = [np.array(c, dtype=float) for c in coords]
+        counts = tuple(sorted((sp, species.count(sp)) for sp in set(species)))
+        if len(coords) <= 1:
+            return counts, ()
+
+        distances = []
+        for i in range(len(coords)):
+            for j in range(i + 1, len(coords)):
+                pair = tuple(sorted((species[i], species[j])))
+                d = round(float(np.linalg.norm(coords[i] - coords[j])), decimals)
+                distances.append((pair[0], pair[1], d))
+        return counts, tuple(sorted(distances))
+
+    @classmethod
+    def _molecule_unique_key(cls, mol, decimals=3):
+        return cls._species_coords_unique_key(mol.species, mol.cart_coords, decimals=decimals)
+
+    @classmethod
+    def _xyz_unique_key(cls, path, decimals=3):
+        species = []
+        coords = []
+        for line in Path(path).read_text().splitlines()[2:]:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            species.append(parts[0])
+            coords.append(np.array([float(x) for x in parts[1:4]], dtype=float))
+        if not species:
+            return None
+        return cls._species_coords_unique_key(species, coords, decimals=decimals)
+
+    def _append_merged_atoms(self, species, coords, add_species, add_coords, tol=0.08):
+        for sp, coord in zip(add_species, add_coords):
+            c = np.array(coord, dtype=float)
+            duplicate = False
+            for i, old_sp in enumerate(species):
+                if old_sp != sp:
+                    continue
+                if np.linalg.norm(np.array(coords[i], dtype=float) - c) <= tol:
+                    duplicate = True
+                    break
+            if not duplicate:
+                species.append(sp)
+                coords.append(c)
+
+    def _cap_path_j_open_oxygens(self, species, coords, capped_h_flags):
+        heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
+        for i in list(heavy_idx):
+            if i >= len(species) or species[i] != "O":
+                continue
+            if self.oxygen_already_protonated(i, species, coords):
+                continue
+            opos = np.array(coords[i], dtype=float)
+            heavy_neighbors = []
+            has_metal = False
+            for j, spj in enumerate(species):
+                if i == j or spj == "H":
+                    continue
+                d = np.linalg.norm(opos - np.array(coords[j], dtype=float))
+                if self.is_valid_bond("O", spj, d):
+                    heavy_neighbors.append(j)
+                    if spj in self.METALS:
+                        has_metal = True
+            # Open carboxylate/terminal oxygens from helper linkers have only
+            # the carbonyl/carboxyl carbon left after the missing node was cut.
+            # Cap them with H using the same placement/refinement machinery as
+            # the legacy MOF path.
+            if has_metal or len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] != "C":
+                continue
+            base = opos - np.array(coords[heavy_neighbors[0]], dtype=float)
+            before = len(species)
+            self.place_capping_h(i, base, self.cap_bond_length("O"), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+            if len(species) == before and np.linalg.norm(base) > 1e-12:
+                self.place_capping_h(i, -base, self.cap_bond_length("O"), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+
+    def _first_connected_ring_fragment(self, linker_species, linker_coords, node_species, node_coords):
+        heavy = [i for i, sp in enumerate(linker_species) if sp != "H"]
+        if not heavy:
+            return [], [], []
+
+        hadj = {i: [] for i in heavy}
+        for a in range(len(heavy)):
+            i = heavy[a]
+            ci = np.array(linker_coords[i], dtype=float)
+            for b in range(a + 1, len(heavy)):
+                j = heavy[b]
+                d = np.linalg.norm(ci - np.array(linker_coords[j], dtype=float))
+                if self.is_valid_bond(linker_species[i], linker_species[j], d):
+                    hadj[i].append(j)
+                    hadj[j].append(i)
+
+        bridge_atoms = set()
+        for i in heavy:
+            ci = np.array(linker_coords[i], dtype=float)
+            for nsp, nco in zip(node_species, node_coords):
+                d = np.linalg.norm(ci - np.array(nco, dtype=float))
+                if self.is_valid_bond(linker_species[i], nsp, d):
+                    bridge_atoms.add(i)
+                    break
+        if not bridge_atoms:
+            return [], [], []
+
+        carbon = {i for i in heavy if linker_species[i] == "C"}
+        cadj = {i: [j for j in hadj[i] if j in carbon] for i in carbon}
+
+        def find_six_cycle(seeds):
+            if len(carbon) < 6:
+                return set()
+
+            def dfs(start, cur, path, used):
+                if len(path) == 6:
+                    if start in cadj[cur]:
+                        return list(path)
+                    return None
+                for nb in cadj[cur]:
+                    if nb in used:
+                        continue
+                    used.add(nb)
+                    path.append(nb)
+                    got = dfs(start, nb, path, used)
+                    if got is not None:
+                        return got
+                    path.pop()
+                    used.remove(nb)
+                return None
+
+            ordered = []
+            seen = set()
+            for seed in seeds:
+                q = deque([seed])
+                local_seen = {seed}
+                while q:
+                    u = q.popleft()
+                    if u in carbon and u not in seen:
+                        ordered.append(u)
+                        seen.add(u)
+                    for v in hadj.get(u, []):
+                        if v not in local_seen:
+                            local_seen.add(v)
+                            q.append(v)
+            for st in ordered or list(carbon):
+                got = dfs(st, st, [st], {st})
+                if got is not None:
+                    return set(got)
+            return set()
+
+        ring = find_six_cycle(bridge_atoms)
+        if not ring:
+            q = deque(bridge_atoms)
+            seen = set(bridge_atoms)
+            carbons = []
+            while q and len(carbons) < 6:
+                u = q.popleft()
+                if u in carbon:
+                    carbons.append(u)
+                for v in hadj.get(u, []):
+                    if v not in seen:
+                        seen.add(v)
+                        q.append(v)
+            ring = set(carbons)
+        if not ring:
+            return [], [], []
+
+        keep_heavy = set(bridge_atoms) | set(ring)
+        # Keep the shortest connector from node-bound atoms into the first ring.
+        q = deque(bridge_atoms)
+        parent = {i: None for i in bridge_atoms}
+        target = None
+        while q:
+            u = q.popleft()
+            if u in ring:
+                target = u
+                break
+            for v in hadj.get(u, []):
+                if v not in parent:
+                    parent[v] = u
+                    q.append(v)
+        while target is not None:
+            keep_heavy.add(target)
+            target = parent[target]
+
+        # Preserve hetero atoms attached to kept connector/ring atoms on the node side.
+        for i in heavy:
+            if i in keep_heavy:
+                continue
+            if linker_species[i] in {"O", "N", "S", "P", "B"}:
+                if any(nb in keep_heavy for nb in hadj.get(i, [])) and any(nb in bridge_atoms for nb in hadj.get(i, []) + [i]):
+                    keep_heavy.add(i)
+
+        removed_nbr_count = {i: sum(1 for nb in hadj.get(i, []) if nb not in keep_heavy) for i in keep_heavy}
+
+        keep = set(keep_heavy)
+        for i, sp in enumerate(linker_species):
+            if sp != "H":
+                continue
+            hpos = np.array(linker_coords[i], dtype=float)
+            for j in keep_heavy:
+                d = np.linalg.norm(hpos - np.array(linker_coords[j], dtype=float))
+                if self.is_valid_bond("H", linker_species[j], d):
+                    keep.add(i)
+                    break
+
+        ordered = [i for i in range(len(linker_species)) if i in keep]
+        out_species = [linker_species[i] for i in ordered]
+        out_coords = [np.array(linker_coords[i], dtype=float) for i in ordered]
+        out_flags = [False] * len(out_species)
+        old_to_new = {old_i: new_i for new_i, old_i in enumerate(ordered)}
+
+        # Cap aromatic/connector carbons that became unsaturated when the
+        # partial linker branch was trimmed to the first connected ring.
+        for old_i, n_removed in removed_nbr_count.items():
+            if n_removed <= 0 or linker_species[old_i] != "C":
+                continue
+            new_i = old_to_new.get(old_i)
+            if new_i is None:
+                continue
+
+            cpos = np.array(out_coords[new_i], dtype=float)
+            heavy_nbs = []
+            h_nbs = 0
+            for j, sp in enumerate(out_species):
+                if j == new_i:
+                    continue
+                d = np.linalg.norm(cpos - np.array(out_coords[j], dtype=float))
+                if sp == "H" and self.is_valid_bond("C", "H", d):
+                    h_nbs += 1
+                elif sp != "H" and self.is_valid_bond("C", sp, d):
+                    heavy_nbs.append(j)
+
+            # Aromatic/linker carbons should not be left below valence 3 in
+            # these first-ring partial branches. Add at most the number of
+            # heavy neighbors lost during trimming.
+            n_cap = min(n_removed, max(0, 3 - len(heavy_nbs) - h_nbs))
+            for _ in range(n_cap):
+                base = np.zeros(3)
+                if heavy_nbs:
+                    for nb in heavy_nbs:
+                        base -= np.array(out_coords[nb], dtype=float) - cpos
+                else:
+                    base = np.array([1.0, 0.0, 0.0])
+                before = len(out_species)
+                self.place_capping_h(new_i, base, self.cap_bond_length("C"), out_species, out_coords, min_hh=1.5, capped_h_flags=out_flags)
+                if len(out_species) == before:
+                    break
+                h_nbs += 1
+
+        return out_species, out_coords, out_flags
+
+    def _recover_open_node_linkers_from_structure(self, struct, node_species, node_coords, species, coords, minimize=False):
+        recovered = []
+        if struct is None or not species:
+            return recovered
+
+        def current_heavy_neighbors(idx):
+            out = []
+            ci = np.array(coords[idx], dtype=float)
+            for j, sp in enumerate(species):
+                if j == idx or sp == "H":
+                    continue
+                d = np.linalg.norm(ci - np.array(coords[j], dtype=float))
+                if self.is_valid_bond(species[idx], sp, d):
+                    out.append(j)
+            return out
+
+        open_carbons = []
+        for i, sp in enumerate(species):
+            if sp != "C":
+                continue
+            nbs = current_heavy_neighbors(i)
+            o_ct = sum(1 for nb in nbs if species[nb] == "O")
+            c_ct = sum(1 for nb in nbs if species[nb] == "C")
+            if o_ct >= 2 and c_ct == 0:
+                open_carbons.append(i)
+        if not open_carbons:
+            return recovered
+
+        lattice = np.array(struct.lattice.matrix, dtype=float)
+        image_atoms = []
+        for si, site in enumerate(struct):
+            sp = site.species_string
+            for ia in (-1, 0, 1):
+                for ib in (-1, 0, 1):
+                    for ic in (-1, 0, 1):
+                        shift = ia * lattice[0] + ib * lattice[1] + ic * lattice[2]
+                        image_atoms.append((sp, np.array(site.coords, dtype=float) + shift, si, (ia, ib, ic)))
+
+        existing_heavy = [np.array(c, dtype=float) for sp, c in zip(species, coords) if sp != "H"]
+
+        for cidx in open_carbons:
+            target = np.array(coords[cidx], dtype=float)
+            matches = [
+                (np.linalg.norm(pos - target), ai)
+                for ai, (sp, pos, _, _) in enumerate(image_atoms)
+                if sp == "C" and np.linalg.norm(pos - target) <= 0.35
+            ]
+            if not matches:
+                continue
+            _, match_ai = min(matches, key=lambda x: x[0])
+            match_pos = image_atoms[match_ai][1]
+
+            local = []
+            for ai, (sp, pos, si, img) in enumerate(image_atoms):
+                if np.linalg.norm(pos - target) <= 35.0:
+                    local.append((ai, sp, pos, si, img))
+            local_ids = {ai: li for li, (ai, _, _, _, _) in enumerate(local)}
+            match_li = local_ids.get(match_ai)
+            if match_li is None:
+                continue
+
+            start_candidates = []
+            for li, (ai, sp, pos, _, _) in enumerate(local):
+                if li == match_li or sp != "C":
+                    continue
+                d = np.linalg.norm(pos - match_pos)
+                if self.is_valid_bond("C", "C", d):
+                    # Prefer the carbon that is not already present in the assembled fragment.
+                    nearest_existing = min((np.linalg.norm(pos - old) for old in existing_heavy), default=float("inf"))
+                    start_candidates.append((nearest_existing, d, li))
+            start_candidates = [x for x in start_candidates if x[0] > 0.35]
+            if not start_candidates:
+                continue
+            _, _, start_li = min(start_candidates, key=lambda x: (x[1], -x[0]))
+
+            adj = {li: [] for li in range(len(local))}
+            for a in range(len(local)):
+                _, spa, posa, _, _ = local[a]
+                if spa in self.METALS:
+                    continue
+                for b in range(a + 1, len(local)):
+                    _, spb, posb, _, _ = local[b]
+                    if spb in self.METALS:
+                        continue
+                    d = np.linalg.norm(posa - posb)
+                    if self.is_valid_bond(spa, spb, d):
+                        adj[a].append(b)
+                        adj[b].append(a)
+
+            q = deque([start_li, match_li])
+            seen = {start_li, match_li}
+            comp = []
+            while q and len(comp) <= 120:
+                u = q.popleft()
+                comp.append(u)
+                for v in adj.get(u, []):
+                    if v not in seen:
+                        seen.add(v)
+                        q.append(v)
+            if len(comp) > 120:
+                continue
+
+            comp_species = [local[li][1] for li in comp]
+            comp_coords = [local[li][2] for li in comp]
+            if minimize:
+                psp, pco, pflags = self._first_connected_ring_fragment(comp_species, comp_coords, node_species, node_coords)
+                if psp:
+                    recovered.append((psp, pco, pflags))
+            else:
+                recovered.append((comp_species, comp_coords, [False] * len(comp_species)))
+        return recovered
+
+    def _export_moffragmentor_library(self, result, stem):
+        node_dir = Path("mof_nodes_lib")
+        linker_dir = Path("mof_linkers_lib")
+        node_dir.mkdir(exist_ok=True)
+        linker_dir.mkdir(exist_ok=True)
+        file_stem = self._safe_name(stem)
+
+        for collection, out_dir in ((getattr(result, "nodes", []), node_dir), (getattr(result, "linkers", []), linker_dir)):
+            if any(out_dir.glob(f"{file_stem}_*.xyz")):
+                continue
+
+            existing_keys = set()
+            for old in out_dir.glob("*.xyz"):
+                try:
+                    key = self._xyz_unique_key(old)
+                except Exception:
+                    key = None
+                if key is not None:
+                    existing_keys.add(key)
+
+            sbus = getattr(collection, "sbus", list(collection) if collection is not None else [])
+            seen = set(existing_keys)
+            out_idx = 0
+            for sbu in sbus:
+                mol = getattr(sbu, "molecule", None)
+                if mol is None:
+                    continue
+                key = self._molecule_unique_key(mol)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out = out_dir / f"{file_stem}_{out_idx:02d}.xyz"
+                while out.exists():
+                    out_idx += 1
+                    out = out_dir / f"{file_stem}_{out_idx:02d}.xyz"
+                mol.to(filename=str(out), fmt="xyz")
+                out_idx += 1
+
+    def _try_moffragmentor_node_linker_fragment(self, mof_path, output_path, minimize=False):
+        try:
+            from moffragmentor import MOF
+        except Exception as exc:
+            print(f"  moffragmentor unavailable: {exc}")
+            return None
+        try:
+            struct = Structure.from_file(mof_path)
+            result = MOF.from_cif(mof_path).fragment()
+        except Exception as exc:
+            print(f"  moffragmentor node+linker failed: {exc}")
+            return None
+
+        nodes = list(getattr(getattr(result, "nodes", []), "sbus", []))
+        linkers = list(getattr(getattr(result, "linkers", []), "sbus", []))
+        if not nodes or not linkers:
+            return None
+
+        stem = Path(mof_path).stem
+        self._export_moffragmentor_library(result, stem)
+
+        center = struct.lattice.get_cartesian_coords([0.5, 0.5, 0.5])
+        node = min(nodes, key=lambda s: np.linalg.norm(np.array(getattr(s, "center", np.mean(s.molecule.cart_coords, axis=0))) - center))
+        node_sp = [str(x) for x in node.molecule.species]
+        node_co = [np.array(c, dtype=float) for c in node.molecule.cart_coords]
+        node_ctr = np.mean(node_co, axis=0)
+
+        image_vectors = []
+        for ia in (-1, 0, 1):
+            for ib in (-1, 0, 1):
+                for ic in (-1, 0, 1):
+                    image_vectors.append(
+                        ia * np.array(struct.lattice.matrix[0], dtype=float)
+                        + ib * np.array(struct.lattice.matrix[1], dtype=float)
+                        + ic * np.array(struct.lattice.matrix[2], dtype=float)
+                    )
+
+        def linker_image_score(linker, image_shift):
+            lsp = [str(x) for x in linker.molecule.species]
+            lco = [np.array(c, dtype=float) + image_shift for c in linker.molecule.cart_coords]
+            metal_bonds = 0
+            min_d = float("inf")
+            for i, si in enumerate(node_sp):
+                for j, sj in enumerate(lsp):
+                    d = float(np.linalg.norm(node_co[i] - lco[j]))
+                    min_d = min(min_d, d)
+                    if (si in self.METALS) != (sj in self.METALS) and self.is_valid_bond(si, sj, d):
+                        metal_bonds += 1
+            lctr = np.mean(lco, axis=0)
+            return (metal_bonds, -min_d, -float(np.linalg.norm(lctr - node_ctr)))
+
+        scored_images = []
+        for linker in linkers:
+            for image_shift in image_vectors:
+                score = linker_image_score(linker, image_shift)
+                if score[0] > 0:
+                    scored_images.append((score, linker, image_shift))
+        if not scored_images:
+            return None
+        scored_images.sort(key=lambda x: x[0], reverse=True)
+        selected_images = scored_images[:1] if minimize else scored_images
+        partial_images = scored_images[1:] if minimize else []
+
+        species = []
+        coords = []
+        partial_capped_h = []
+        self._append_merged_atoms(species, coords, node_sp, node_co)
+        for _, linker, image_shift in selected_images:
+            lsp = [str(x) for x in linker.molecule.species]
+            lco = [np.array(c, dtype=float) + image_shift for c in linker.molecule.cart_coords]
+            self._append_merged_atoms(species, coords, lsp, lco)
+        for _, linker, image_shift in partial_images:
+            lsp = [str(x) for x in linker.molecule.species]
+            lco = [np.array(c, dtype=float) + image_shift for c in linker.molecule.cart_coords]
+            psp, pco, pflags = self._first_connected_ring_fragment(lsp, lco, node_sp, node_co)
+            for p_sp, p_coord, p_flag in zip(psp, pco, pflags):
+                before = len(species)
+                self._append_merged_atoms(species, coords, [p_sp], [p_coord])
+                if p_flag and len(species) > before and species[-1] == "H":
+                    partial_capped_h.append(len(species) - 1)
+
+        recovered_branches = self._recover_open_node_linkers_from_structure(struct, node_sp, node_co, species, coords, minimize=minimize)
+        for rsp, rco, rflags in recovered_branches:
+            for r_sp, r_coord, r_flag in zip(rsp, rco, rflags):
+                before = len(species)
+                self._append_merged_atoms(species, coords, [r_sp], [r_coord])
+                if r_flag and len(species) > before and species[-1] == "H":
+                    partial_capped_h.append(len(species) - 1)
+
+        capped_h_flags = [False] * len(species)
+        for hidx in partial_capped_h:
+            if 0 <= hidx < len(capped_h_flags):
+                capped_h_flags[hidx] = True
+        self._cap_path_j_open_oxygens(species, coords, capped_h_flags)
+        capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
+        # Path J keeps helper node/linker heavy atoms fixed. Only capped H
+        # coordinates are locally adjusted.
+        self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+
+        mol = Molecule(species, coords)
+        mol.to(filename=output_path, fmt="xyz")
+        print("  -> MOF Path J (moffragmentor node+linker combine).")
+        print(f"  -> Helper fragments available in mof_nodes_lib/ and mof_linkers_lib/.")
+        print(f"Final size: {len(species)} atoms.")
+        print(f"Saved: {output_path}")
+        return FragmentResult(species=species, coords=coords)
+
     def extract(self, mof_path, center_idx=-1, nmetals=3, output_path="fragment.xyz", minimize=False):
         print(f"Loading '{mof_path}'...")
+        combined = self._try_moffragmentor_node_linker_fragment(mof_path, output_path, minimize=minimize)
+        if combined is not None:
+            return combined
         struct = Structure.from_file(mof_path)
         if nmetals < 1:
             raise ValueError(f"--nmetals must be >= 1 (got {nmetals}).")
@@ -368,6 +993,11 @@ class MOFFragmenter(BaseFragmenter):
                 if n.species_string not in metals:
                     initial_indices.add(n.index)
 
+        is_cu_paddlewheel_pair = (
+            len(sbu_metals) == 2
+            and all(supercell[m].species_string == "Cu" for m in sbu_metals)
+        )
+
         if is_infinite_sbu:
             print(f"  -> Path B (Infinite). Metals: {nmetals}")
             all_sc_m = []
@@ -382,7 +1012,7 @@ class MOFFragmenter(BaseFragmenter):
                 )
             initial_indices.update(core_metals)
             is_path_c = False
-        elif len(sbu_metals) == 2 and not minimize:
+        elif len(sbu_metals) == 2 and not minimize and not is_cu_paddlewheel_pair:
             print(f"  -> Path C (Discrete, 2 SBUs). Auto-detected small SBU size: {len(sbu_metals)}")
             c0 = np.mean([supercell[m].coords for m in sbu_metals], axis=0)
             q = deque([(list(sbu_metals)[0], 0)])
@@ -540,8 +1170,7 @@ class MOFFragmenter(BaseFragmenter):
                 zif_mode,
             )
 
-        self.refine_h_geometry_with_rdkit(final_species, final_coords, getattr(self, "_last_capped_h_indices", None))
-        self.enforce_sp2_capped_h_geometry(final_species, final_coords, getattr(self, "_last_capped_h_indices", None))
+        self.optimize_capped_h_geometry_only(final_species, final_coords, getattr(self, "_last_capped_h_indices", None))
         print(f"Final size: {len(final_species)} atoms.")
         mol = Molecule(final_species, final_coords)
         mol.to(filename=output_path, fmt="xyz")
@@ -1834,8 +2463,7 @@ class COFFragmenter(BaseFragmenter):
                 capped_h_flags = [x for i, x in enumerate(capped_h_flags) if i in keep]
 
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
-        self.refine_h_geometry_with_rdkit(species, coords, capped_h_indices=capped_h_indices)
-        self.enforce_sp2_capped_h_geometry(species, coords, capped_h_indices)
+        self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
         print(f"Final size: {len(species)} atoms")
         mol = Molecule(species, coords)
         mol.to(filename=output_path, fmt="xyz")
