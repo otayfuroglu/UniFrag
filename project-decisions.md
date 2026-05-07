@@ -2,15 +2,21 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
+## Decision 2026-05-08: DUT-49 normal fragments keep one Cu2 paddlewheel node
+- Context: DUT-49 is a Cu paddlewheel MOF, but visually it should behave like Cu-BTC rather than PCN/NU: one paddlewheel node is enough for the normal fragment. The stale saved normal output had `Cu3` and 547 atoms.
+- Decision: Add `DUT-49*` to the one-node paddlewheel family used by legacy fallback logic. Keep Path J available for DUT-49; current Path J normal already produces the desired one-node `Cu2` fragment.
+- Consequences: `test_on_other_common_mofs/DUT-49_frag.xyz` is regenerated to 370 atoms (`C192 H136 N8 O32 Cu2`). DUT-49 minimized remains 136 atoms (`C69 H49 N2 O14 Cu2`). Cu-BTC remains one-node, while PCN/NU continue using two-node atom-count selection.
+- Alternatives considered: Route DUT-49 through PCN/NU two-node candidate selection; rejected because the user visually confirmed it should be one-node like Cu-BTC.
+
 ## Decision 2026-05-07: PCN/NU normal fragments keep two metal nodes
-- Context: The earlier Cu2 paddlewheel exception fixed Cu-BTC normal fragments but also suppressed the second metal node in PCN/NU families where the linker topology requires two metal nodes for the normal fragment. Some PCN/NU cases use legacy Path C; others use moffragmentor Path J.
-- Decision: Restrict the legacy Cu2 one-node suppression to `Cu-BTC*` only. For normal-mode `PCN*` and `NU*` structures, skip MOF Path J and use the legacy Path C candidate search, which tests possible second SBUs and selects the smallest metal-complete fragment. Minimized mode still uses Path J when available.
-- Consequences: Verified normal outputs now include two metal nodes for PCN/NU (`PCN-61`: `Cu4`, `PCN-68`: `Cu4`, `NU-100SP`: `Cu4`, `NU-108-Cu`: `Cu4`, existing `PCN-60`/`NU-108-Zn`: `Zn4`) while Cu-BTC normal remains 90 atoms with `Cu2`. NU-108-Cu now selects the 516-atom candidate instead of the wrong 912-atom side.
+- Context: The earlier Cu2 paddlewheel exception fixed Cu-BTC normal fragments but also would suppress the second metal node in PCN/NU families where the linker topology requires two metal nodes for the normal fragment. Some PCN/NU cases use legacy Path C; others use moffragmentor Path J.
+- Decision: Restrict the legacy Cu2 one-node suppression to one-node paddlewheel families such as `Cu-BTC*` and `DUT-49*`. For normal-mode `PCN*` and `NU*` structures, skip MOF Path J and use the legacy Path C candidate search, which tests possible second SBUs and selects the smallest metal-complete fragment. Minimized mode still uses Path J when available.
+- Consequences: Verified normal outputs now include two metal nodes for PCN/NU (`PCN-61`: `Cu4`, `PCN-68`: `Cu4`, `NU-100SP`: `Cu4`, `NU-108-Cu`: `Cu4`, existing `PCN-60`/`NU-108-Zn`: `Zn4`) while Cu-BTC normal remains 90 atoms with `Cu2`; DUT-49 is intentionally excluded from PCN/NU two-node behavior. NU-108-Cu now selects the 516-atom candidate instead of the wrong 912-atom side.
 - Alternatives considered: Keep the broad Cu2 suppression for all paddlewheel-like MOFs; rejected because PCN/NU need the opposite normal topology.
 
 ## Decision 2026-05-07: Keep one Cu paddlewheel node for Cu-BTC normal fragments
 - Context: Cu-BTC falls back to the legacy MOF path, not Path J. Normal mode previously triggered Path C for any discrete two-metal SBU and added a second Cu2 paddlewheel node, producing `Cu4`; the user visually confirmed one Cu2 metal node is enough.
-- Decision: Treat a discrete `Cu2` SBU as a complete single Cu paddlewheel node only for `Cu-BTC*`, and skip Path C's second-SBU expansion there. Minimized mode already used Path A and remains unchanged.
+- Decision: Treat a discrete `Cu2` SBU as a complete single Cu paddlewheel node for one-node paddlewheel families such as `Cu-BTC*` and `DUT-49*`, and skip Path C's second-SBU expansion there. Minimized mode already used Path A and remains unchanged.
 - Consequences: `test_on_cubtc/Cu-BTC.cif` normal changes from 156 atoms (`Cu4`) to 90 atoms (`C36 Cu2 H28 O24`); minimized remains 66 atoms (`C30 Cu2 H22 O12`).
 - Alternatives considered: Keep generic Path C for all two-metal SBUs; rejected for Cu-BTC because it duplicates the metal node.
 

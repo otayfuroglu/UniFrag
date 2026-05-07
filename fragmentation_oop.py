@@ -754,6 +754,10 @@ class MOFFragmenter(BaseFragmenter):
         name = self._safe_name(stem).upper()
         return name.startswith("PCN-") or name.startswith("PCN_") or name.startswith("NU-") or name.startswith("NU_")
 
+    def _one_node_paddlewheel_family(self, stem):
+        name = self._safe_name(stem).upper()
+        return name.startswith("CU-BTC") or name.startswith("DUT-49")
+
     def _export_moffragmentor_library(self, result, stem):
         node_dir = Path("mof_nodes_lib")
         linker_dir = Path("mof_linkers_lib")
@@ -1002,9 +1006,9 @@ class MOFFragmenter(BaseFragmenter):
                 if n.species_string not in metals:
                     initial_indices.add(n.index)
 
-        is_cubtc_structure = self._safe_name(structure_stem).upper().startswith("CU-BTC")
+        is_one_node_paddlewheel = self._one_node_paddlewheel_family(structure_stem)
         is_cu_paddlewheel_pair = (
-            is_cubtc_structure
+            is_one_node_paddlewheel
             and len(sbu_metals) == 2
             and all(supercell[m].species_string == "Cu" for m in sbu_metals)
         )

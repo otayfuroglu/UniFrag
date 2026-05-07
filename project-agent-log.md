@@ -12,6 +12,28 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 
 
 
+
+## 2026-05-08 - DUT-49 one-node normal paddlewheel
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-memory.md`
+  - `project-decisions.md`
+  - `project-agent-log.md`
+  - `test_on_other_common_mofs/DUT-49_frag.xyz`
+  - `mof_nodes_lib/DUT-49_00.xyz`
+  - `mof_linkers_lib/DUT-49_00.xyz`
+  - `mof_linkers_lib/DUT-49_01.xyz`
+- Summary:
+  - Added `DUT-49*` to the one-node paddlewheel family with Cu-BTC so fallback logic will not choose a second Cu paddlewheel node.
+  - Regenerated DUT-49 normal output with current Path J, replacing the stale 547-atom `Cu3` output with a 370-atom `Cu2` one-node fragment.
+  - Left minimized DUT-49 behavior unchanged; the existing minimized output already matches the current 136-atom Path J result.
+- Validation:
+  - `python -m py_compile fragmentation_oop.py coffragmentor.py` passes.
+  - DUT-49 normal: Path J, 370 atoms, `Cu2`; DUT-49 minimized: existing/current Path J, 136 atoms, `Cu2`.
+  - Regression checks: Cu-BTC normal remains 90 atoms, `Cu2`; PCN-61 normal remains two-node Path C, 276 atoms, `Cu4`.
+- Follow-up risks:
+  - Visual inspection should confirm the 370-atom DUT-49 normal output has the desired one-node paddlewheel orientation.
+
 ## 2026-05-07 - Cu-BTC normal keeps one Cu2 node
 - Changed files:
   - `fragmentation_oop.py`
