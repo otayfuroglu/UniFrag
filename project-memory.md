@@ -10,7 +10,7 @@ Use this file as a persistent engineering memory for this project. Keep entries 
 - Repository URL:
 - Default branch:
 - Primary language(s):
-- Last updated:
+- Last updated: 2026-05-07
 - Maintainer(s):
 
 ## 1) Project Purpose
@@ -151,9 +151,15 @@ For each item:
 - Consequences:
 - Alternatives considered:
 
+### Decision 2026-05-07: PCN/NU normal fragments keep two metal nodes
+- Context: PCN and NU families can have linker structures where the chemically meaningful normal fragment spans two metal nodes, opposite to Cu-BTC where one Cu2 paddlewheel node is sufficient.
+- Decision: Keep the Cu2 one-node suppression only for `Cu-BTC*`. For PCN/NU normal fragments, skip Path J and use the legacy Path C candidate search to choose the smallest metal-complete two-node fragment. Minimized mode remains one-node/one-linker focused and can still use Path J.
+- Consequences: PCN/NU normal Cu paddlewheel cases now report `Cu4` or `Zn4` as appropriate, and NU-108-Cu selects 516 atoms instead of 912; `test_on_cubtc/Cu-BTC.cif` normal remains `Cu2` and 90 atoms.
+- Alternatives considered: Apply the Cu2 suppression to every Cu paddlewheel family; rejected because PCN/NU need the opposite normal-fragment topology.
+
 ### Decision 2026-05-07: Cu-BTC normal uses one Cu2 paddlewheel node
 - Context: Cu-BTC uses the legacy MOF path. Path C duplicated the discrete Cu2 paddlewheel in normal mode, but one metal node is the desired normal fragment.
-- Decision: For discrete `Cu2` SBUs, skip normal Path C second-SBU expansion and keep Path A with the single Cu paddlewheel node.
+- Decision: For `Cu-BTC*` discrete `Cu2` SBUs, skip normal Path C second-SBU expansion and keep Path A with the single Cu paddlewheel node.
 - Consequences: Cu-BTC normal is now `C36 Cu2 H28 O24` (90 atoms); minimized remains `C30 Cu2 H22 O12` (66 atoms).
 - Alternatives considered: Generic two-SBU Path C; rejected for Cu-BTC visual correctness.
 

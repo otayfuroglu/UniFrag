@@ -750,6 +750,10 @@ class MOFFragmenter(BaseFragmenter):
                 recovered.append((comp_species, comp_coords, [False] * len(comp_species)))
         return recovered
 
+    def _path_j_second_node_family(self, stem):
+        name = self._safe_name(stem).upper()
+        return name.startswith("PCN-") or name.startswith("PCN_") or name.startswith("NU-") or name.startswith("NU_")
+
     def _export_moffragmentor_library(self, result, stem):
         node_dir = Path("mof_nodes_lib")
         linker_dir = Path("mof_linkers_lib")
@@ -897,9 +901,14 @@ class MOFFragmenter(BaseFragmenter):
 
     def extract(self, mof_path, center_idx=-1, nmetals=3, output_path="fragment.xyz", minimize=False):
         print(f"Loading '{mof_path}'...")
-        combined = self._try_moffragmentor_node_linker_fragment(mof_path, output_path, minimize=minimize)
-        if combined is not None:
-            return combined
+        structure_stem = Path(mof_path).stem
+        use_candidate_count_path = (not minimize) and self._path_j_second_node_family(structure_stem)
+        if use_candidate_count_path:
+            print("  -> Skipping MOF Path J so normal PCN/NU can use two-node atom-count selection.")
+        else:
+            combined = self._try_moffragmentor_node_linker_fragment(mof_path, output_path, minimize=minimize)
+            if combined is not None:
+                return combined
         struct = Structure.from_file(mof_path)
         if nmetals < 1:
             raise ValueError(f"--nmetals must be >= 1 (got {nmetals}).")
@@ -993,8 +1002,10 @@ class MOFFragmenter(BaseFragmenter):
                 if n.species_string not in metals:
                     initial_indices.add(n.index)
 
+        is_cubtc_structure = self._safe_name(structure_stem).upper().startswith("CU-BTC")
         is_cu_paddlewheel_pair = (
-            len(sbu_metals) == 2
+            is_cubtc_structure
+            and len(sbu_metals) == 2
             and all(supercell[m].species_string == "Cu" for m in sbu_metals)
         )
 

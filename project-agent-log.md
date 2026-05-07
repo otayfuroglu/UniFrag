@@ -180,6 +180,27 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Follow-up risks:
   - This checkout did not contain the earlier COF fixture folders, so COF smoke tests could not be rerun here; the COF finalization call site is routed through the same shared helper and should be tested again when those fixtures are available.
 
+## 2026-05-07 - PCN/NU normal fragments keep two metal nodes
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-memory.md`
+  - `project-decisions.md`
+  - `project-agent-log.md`
+  - `test_on_pcn_series/PCN-61_frag_mof.xyz`
+  - `test_on_pcn_series/PCN-68_frag_mof.xyz`
+  - `test_on_nu_series/NU-100SP_frag_mof.xyz`
+  - `test_on_nu_series/NU-108-Cu_frag_mof.xyz`
+- Summary:
+  - Narrowed the legacy Cu2 paddlewheel one-node suppression so it only applies to `Cu-BTC*`.
+  - Routed normal PCN/NU MOFs around Path J so the legacy Path C candidate-count selector tests possible second nodes and keeps the smallest metal-complete fragment. Minimized fragments are unchanged.
+- Validation:
+  - `python -m py_compile fragmentation_oop.py coffragmentor.py` passes.
+  - Normal metal counts: PCN-60 `Zn4` (276 atoms), PCN-61 `Cu4` (276 atoms), PCN-68 `Cu4` (420 atoms), NU-100SP `Cu4` (420 atoms), NU-108-Cu `Cu4` (516 atoms), NU-108-Zn `Zn4` (764 atoms).
+  - Cu-BTC normal regression remains `Cu2` and 90 atoms.
+  - Minimized smoke checks remain Path J without second-node completion: PCN-61 114 atoms; NU-108-Cu 174 atoms.
+- Follow-up risks:
+  - Visual inspection should confirm the 516-atom NU-108-Cu candidate is the intended opposite-side two-node fragment.
+
 ## 2026-05-06 - MOF moffragmentor Path J for IRMOF-1
 - Changed files:
   - `fragmentation_oop.py`
