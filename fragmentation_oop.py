@@ -1,6 +1,8 @@
 import argparse
+import os
 from collections import deque
 from dataclasses import dataclass
+import networkx as nx
 from pathlib import Path
 
 import numpy as np
@@ -114,6 +116,99 @@ class BaseFragmenter:
             if np.linalg.norm(opos - np.array(coords[i])) <= oh_cutoff:
                 return True
         return False
+
+    def _warn_possible_impurity_components(self, struct, framework_kind="framework"):
+        """Warn when CIF appears to contain detached small ionic/solvent components."""
+        try:
+            symbols = []
+            for site in struct:
+                try:
+                    symbols.append(site.specie.symbol)
+                except Exception:
+                    symbols.append(max(site.species.items(), key=lambda kv: kv[1])[0].symbol)
+
+            if len(symbols) < 2:
+                return
+
+            all_neigh = struct.get_all_neighbors(r=2.6)
+            graph = [[] for _ in range(len(struct))]
+            for i, neighs in enumerate(all_neigh):
+                si = symbols[i]
+                ci = struct[i].coords
+                for n in neighs:
+                    j = n.index
+                    if j <= i:
+                        continue
+                    d = float(np.linalg.norm(ci - n.coords))
+                    if self.is_valid_bond(si, symbols[j], d):
+                        graph[i].append(j)
+                        graph[j].append(i)
+
+            comps = []
+            seen = set()
+            for i in range(len(symbols)):
+                if i in seen:
+                    continue
+                q = deque([i])
+                seen.add(i)
+                comp = {i}
+                while q:
+                    u = q.popleft()
+                    for v in graph[u]:
+                        if v not in seen:
+                            seen.add(v)
+                            comp.add(v)
+                            q.append(v)
+                comps.append(comp)
+
+            if len(comps) <= 1:
+                return
+
+            metals = getattr(self, "METALS", set())
+
+            def comp_meta(comp):
+                idx = list(comp)
+                sp = [symbols[k] for k in idx]
+                heavy = sum(1 for x in sp if x != "H")
+                metal = sum(1 for x in sp if x in metals)
+                return {
+                    "idx": idx,
+                    "atoms": len(idx),
+                    "heavy": heavy,
+                    "metal": metal,
+                    "sp": sp,
+                }
+
+            meta = [comp_meta(c) for c in comps]
+            largest_heavy = max((m["heavy"] for m in meta), default=0)
+            if largest_heavy <= 0:
+                return
+
+            suspicious = []
+            for m in meta:
+                if m["heavy"] == largest_heavy:
+                    continue
+                is_small = m["heavy"] <= 14 or m["heavy"] <= int(0.25 * largest_heavy)
+                is_guest_like = m["metal"] == 0 and m["atoms"] <= 60
+                if is_small and is_guest_like:
+                    suspicious.append(m)
+
+            if not suspicious:
+                return
+
+            preview = []
+            for m in sorted(suspicious, key=lambda x: (x["heavy"], x["atoms"]))[:3]:
+                from collections import Counter
+                c = Counter(m["sp"])
+                formula = " ".join(f"{el}{c[el]}" for el in sorted(c))
+                preview.append(f"{m['atoms']} atoms ({formula})")
+
+            print(f"WARNING: {framework_kind} CIF has {len(comps)} disconnected components; {len(suspicious)} look like solvent/ionic guests.")
+            print("  -> Guest-like components detected: " + "; ".join(preview))
+            print("  -> Fragment quality can be affected. Consider cleaning/removing guests before fragmentation.")
+        except Exception:
+            # Warning path must never break fragmentation.
+            return
 
     def refine_h_geometry_with_rdkit(self, species, coords, capped_h_indices=None, max_iters=300):
         if not species or "H" not in species:
@@ -492,64 +587,76 @@ class MOFFragmenter(BaseFragmenter):
         if not bridge_atoms:
             return [], [], []
 
-        carbon = {i for i in heavy if linker_species[i] == "C"}
-        cadj = {i: [j for j in hadj[i] if j in carbon] for i in carbon}
-
-        def find_six_cycle(seeds):
-            if len(carbon) < 6:
-                return set()
-
-            def dfs(start, cur, path, used):
-                if len(path) == 6:
-                    if start in cadj[cur]:
-                        return list(path)
-                    return None
-                for nb in cadj[cur]:
-                    if nb in used:
+        def shortest_path_without_edge(start, target, banned_edge):
+            q = deque([start])
+            parent = {start: None}
+            while q:
+                u = q.popleft()
+                if u == target:
+                    break
+                for v in hadj.get(u, []):
+                    if {u, v} == banned_edge or v in parent:
                         continue
-                    used.add(nb)
-                    path.append(nb)
-                    got = dfs(start, nb, path, used)
-                    if got is not None:
-                        return got
-                    path.pop()
-                    used.remove(nb)
+                    parent[v] = u
+                    q.append(v)
+            if target not in parent:
                 return None
+            path = []
+            u = target
+            while u is not None:
+                path.append(u)
+                u = parent[u]
+            return list(reversed(path))
 
-            ordered = []
-            seen = set()
-            for seed in seeds:
-                q = deque([seed])
-                local_seen = {seed}
-                while q:
-                    u = q.popleft()
-                    if u in carbon and u not in seen:
-                        ordered.append(u)
-                        seen.add(u)
-                    for v in hadj.get(u, []):
-                        if v not in local_seen:
-                            local_seen.add(v)
-                            q.append(v)
-            for st in ordered or list(carbon):
-                got = dfs(st, st, [st], {st})
-                if got is not None:
-                    return set(got)
-            return set()
+        def distance_from_bridge(atoms):
+            q = deque((seed, 0) for seed in bridge_atoms)
+            seen = set(bridge_atoms)
+            while q:
+                u, dist = q.popleft()
+                if u in atoms:
+                    return dist
+                for v in hadj.get(u, []):
+                    if v not in seen:
+                        seen.add(v)
+                        q.append((v, dist + 1))
+            return 999
 
-        ring = find_six_cycle(bridge_atoms)
+        def find_first_cycle(max_cycle=8):
+            cycles = []
+            seen_cycles = set()
+            for u in heavy:
+                for v in hadj.get(u, []):
+                    if u >= v:
+                        continue
+                    path = shortest_path_without_edge(u, v, {u, v})
+                    if not path:
+                        continue
+                    cycle = set(path)
+                    if len(cycle) < 3 or len(cycle) > max_cycle:
+                        continue
+                    key = tuple(sorted(cycle))
+                    if key in seen_cycles:
+                        continue
+                    seen_cycles.add(key)
+                    cycles.append(cycle)
+            if not cycles:
+                return set()
+            cycles.sort(key=lambda cyc: (distance_from_bridge(cyc), len(cyc), sum(sorted(cyc))))
+            return cycles[0]
+
+        ring = find_first_cycle()
         if not ring:
             q = deque(bridge_atoms)
             seen = set(bridge_atoms)
-            carbons = []
-            while q and len(carbons) < 6:
+            fallback = []
+            while q and len(fallback) < 6:
                 u = q.popleft()
-                if u in carbon:
-                    carbons.append(u)
+                fallback.append(u)
                 for v in hadj.get(u, []):
                     if v not in seen:
                         seen.add(v)
                         q.append(v)
-            ring = set(carbons)
+            ring = set(fallback)
         if not ring:
             return [], [], []
 
@@ -906,6 +1013,16 @@ class MOFFragmenter(BaseFragmenter):
     def extract(self, mof_path, center_idx=-1, nmetals=3, output_path="fragment.xyz", minimize=False):
         print(f"Loading '{mof_path}'...")
         structure_stem = Path(mof_path).stem
+        if minimize:
+            probe_output = str(Path("/private/tmp") / f"{self._safe_name(structure_stem)}_normal_probe.xyz")
+            normal_probe = self.extract(mof_path, center_idx=center_idx, nmetals=nmetals, output_path=probe_output, minimize=False)
+            if normal_probe is not None and len(normal_probe.species) < 80:
+                Molecule(normal_probe.species, normal_probe.coords).to(filename=output_path, fmt="xyz")
+                print(f"  -> Normal fragment has {len(normal_probe.species)} atoms (<80); using normal as minimized fragment.")
+                print(f"Final size: {len(normal_probe.species)} atoms.")
+                print(f"Saved: {output_path}")
+                return normal_probe
+
         use_candidate_count_path = (not minimize) and self._path_j_second_node_family(structure_stem)
         if use_candidate_count_path:
             print("  -> Skipping MOF Path J so normal PCN/NU can use two-node atom-count selection.")
@@ -914,6 +1031,7 @@ class MOFFragmenter(BaseFragmenter):
             if combined is not None:
                 return combined
         struct = Structure.from_file(mof_path)
+        self._warn_possible_impurity_components(struct, framework_kind="MOF")
         if nmetals < 1:
             raise ValueError(f"--nmetals must be >= 1 (got {nmetals}).")
 
@@ -1643,6 +1761,13 @@ class COFFragmenter(BaseFragmenter):
         "I": 1.39,
     }
 
+    def __init__(self, radius=6.0, layer_mode="auto"):
+        super().__init__(radius=radius)
+        allowed = {"auto", "monomer", "dimer"}
+        if layer_mode not in allowed:
+            raise ValueError(f"layer_mode must be one of {sorted(allowed)}")
+        self.layer_mode = layer_mode
+
     def _rad(self, sym):
         return self.COV_RAD.get(sym, 0.77)
 
@@ -1653,8 +1778,434 @@ class COFFragmenter(BaseFragmenter):
         cutoff = min(2.2, max(1.1, cutoff))
         return dist <= cutoff
 
+    def _limit_to_single_helical_period(self, scored_images, node_ctr, lattice):
+        """
+        For helical COFs, keep linker images within ~one lattice period along
+        the dominant lattice axis to avoid over-extended Path J assemblies.
+        """
+        if len(scored_images) < 3:
+            return scored_images
+
+        centers = []
+        for _, _, linker, shift in scored_images:
+            lco = [np.array(c, dtype=float) + shift for c in linker.molecule.cart_coords]
+            centers.append(np.mean(lco, axis=0))
+        centers = np.array(centers, dtype=float)
+        if centers.size == 0:
+            return scored_images
+
+        axis_idx = None
+        best_span = 0.0
+        for i in range(3):
+            vec = np.array(lattice[i], dtype=float)
+            nrm = float(np.linalg.norm(vec))
+            if nrm < 1e-6:
+                continue
+            u = vec / nrm
+            proj = centers @ u
+            span = float(np.max(proj) - np.min(proj))
+            if span > best_span:
+                best_span = span
+                axis_idx = i
+
+        if axis_idx is None:
+            return scored_images
+
+        axis = np.array(lattice[axis_idx], dtype=float)
+        axis_len = float(np.linalg.norm(axis))
+        if axis_len < 1e-6:
+            return scored_images
+        if best_span <= 1.05 * axis_len:
+            return scored_images
+
+        u = axis / axis_len
+        node_proj = float(np.dot(node_ctr, u))
+        kept = []
+        for entry, ctr in zip(scored_images, centers):
+            dproj = float(abs(np.dot(ctr, u) - node_proj))
+            if dproj <= 0.55 * axis_len:
+                kept.append(entry)
+
+        if len(kept) >= 1:
+            print(f"  -> COF Path J helical limiter kept {len(kept)}/{len(scored_images)} linker images (~1 period).")
+            return kept
+        return scored_images
+
+    def _coffragmentor_retry_clean_cif(self, cif_path):
+        """Try to sanitize problematic CIF occupancy/disorder for coffragmentor."""
+        try:
+            parser = CifParser(cif_path, occupancy_tolerance=2.1)
+            structs = parser.get_structures(primitive=False)
+            if not structs:
+                return None
+            cleaned = structs[0]
+            tmp_path = Path('/private/tmp') / f"{Path(cif_path).stem}_cof_clean_for_pathj.cif"
+            cleaned.to(filename=str(tmp_path), fmt='cif')
+            return str(tmp_path)
+        except Exception:
+            return None
+
+    def _try_strict_helix_node_linker_path(self, struct, output_path, minimize=False):
+        """Strict helix COF rule: detect exactly two repeating building blocks
+        (node/linker) and build fragment only by node + attached linker combine."""
+        n = len(struct)
+        dbg = os.environ.get("UNIFRAG_DEBUG_HELIX", "0") == "1"
+        if dbg:
+            print(f"  [helix] atoms={n}")
+        if n < 8:
+            if dbg:
+                print("  [helix] reject: too few atoms")
+            return None
+
+        sym = []
+        for site in struct:
+            try:
+                sym.append(site.specie.symbol)
+            except Exception:
+                sym.append(max(site.species.items(), key=lambda kv: kv[1])[0].symbol)
+
+        all_neigh = struct.get_all_neighbors(r=2.4)
+        graph = [[] for _ in range(n)]
+        for i, neighs in enumerate(all_neigh):
+            ci = struct[i].coords
+            si = sym[i]
+            for nn in neighs:
+                j = nn.index
+                if j <= i:
+                    continue
+                d = float(np.linalg.norm(ci - nn.coords))
+                if self.is_valid_bond(si, sym[j], d):
+                    graph[i].append(j)
+                    graph[j].append(i)
+
+        heavy_deg = {}
+        for i in range(n):
+            heavy_deg[i] = sum(1 for j in graph[i] if sym[j] != 'H')
+
+        def in_small_ring(u, v, max_len=8):
+            q = deque([(u, 0)])
+            seen = {u}
+            while q:
+                x, dep = q.popleft()
+                if dep >= max_len:
+                    continue
+                for y in graph[x]:
+                    if (x == u and y == v) or (x == v and y == u):
+                        continue
+                    if y == v:
+                        return True
+                    if y not in seen:
+                        seen.add(y)
+                        q.append((y, dep + 1))
+            return False
+
+        cut_edges = set()
+        for i in range(n):
+            if sym[i] != 'C':
+                continue
+            for j in graph[i]:
+                if j <= i or sym[j] != 'C':
+                    continue
+                if heavy_deg[i] >= 3 and heavy_deg[j] >= 3 and (not in_small_ring(i, j)):
+                    cut_edges.add((i, j))
+
+        if dbg:
+            print(f"  [helix] cut_edges={len(cut_edges)}")
+        if not cut_edges:
+            if dbg:
+                print("  [helix] reject: no cut edges")
+            return None
+
+        kept_graph = [[] for _ in range(n)]
+        for i in range(n):
+            for j in graph[i]:
+                a, b = (i, j) if i < j else (j, i)
+                if (a, b) in cut_edges:
+                    continue
+                kept_graph[i].append(j)
+
+        comp_id = [-1] * n
+        comps = []
+        cid = 0
+        for i in range(n):
+            if comp_id[i] != -1:
+                continue
+            q = deque([i])
+            comp_id[i] = cid
+            comp = {i}
+            while q:
+                u = q.popleft()
+                for v in kept_graph[u]:
+                    if comp_id[v] == -1:
+                        comp_id[v] = cid
+                        comp.add(v)
+                        q.append(v)
+            comps.append(comp)
+            cid += 1
+
+        if dbg:
+            print(f"  [helix] comps={len(comps)}")
+        if len(comps) < 3:
+            if dbg:
+                print("  [helix] reject: too few components")
+            return None
+
+        def comp_hash(comp):
+            nodes = sorted(comp)
+            idx = {g: k for k, g in enumerate(nodes)}
+            g2 = nx.Graph()
+            for g in nodes:
+                g2.add_node(idx[g], sp=sym[g])
+            for g in nodes:
+                for h in kept_graph[g]:
+                    if h in comp and g < h:
+                        g2.add_edge(idx[g], idx[h])
+            return nx.weisfeiler_lehman_graph_hash(g2, node_attr='sp')
+
+        hash_to_comps = {}
+        for k, comp in enumerate(comps):
+            h = comp_hash(comp)
+            hash_to_comps.setdefault(h, []).append(k)
+
+        if dbg:
+            print(f"  [helix] hash classes={len(hash_to_comps)}")
+        if len(hash_to_comps) < 2:
+            if dbg:
+                print("  [helix] reject: <2 hash classes")
+            return None
+
+        # Helix strict rule: use the two dominant repeating building blocks
+        # and ignore minor residual classes from disorder/symmetry artifacts.
+        ranked_classes = sorted(
+            hash_to_comps.items(),
+            key=lambda kv: (len(kv[1]), np.mean([len(comps[c]) for c in kv[1]]) if kv[1] else 0.0),
+            reverse=True,
+        )
+        major = ranked_classes[:2]
+        hash_to_comps = {k: v for k, v in major}
+
+        comp_graph = {k: set() for k in range(len(comps))}
+        for i, j in cut_edges:
+            ci, cj = comp_id[i], comp_id[j]
+            if ci != cj:
+                comp_graph[ci].add(cj)
+                comp_graph[cj].add(ci)
+
+        groups = list(hash_to_comps.values())
+        g0_deg = np.mean([len(comp_graph[c]) for c in groups[0]]) if groups[0] else 0.0
+        g1_deg = np.mean([len(comp_graph[c]) for c in groups[1]]) if groups[1] else 0.0
+        node_group = groups[0] if g0_deg >= g1_deg else groups[1]
+        linker_group = groups[1] if node_group is groups[0] else groups[0]
+
+        ctr = np.array(struct.lattice.get_cartesian_coords([0.5, 0.5, 0.5]), dtype=float)
+        def comp_center(comp_idx):
+            pts = [np.array(struct[i].coords, dtype=float) for i in comps[comp_idx]]
+            return np.mean(pts, axis=0)
+
+        node_comp = min(node_group, key=lambda c: float(np.linalg.norm(comp_center(c) - ctr)))
+        linker_set = set(linker_group)
+        attached_linkers = [c for c in comp_graph[node_comp] if c in linker_set]
+        if dbg:
+            print(f"  [helix] node_group={len(node_group)} linker_group={len(linker_group)}")
+            print(f"  [helix] attached before fallback={len(attached_linkers)}")
+        if not attached_linkers:
+            # If class filtering breaks direct adjacency, pick nearest linker block.
+            candidates = list(linker_set)
+            if not candidates:
+                if dbg:
+                    print("  [helix] reject: no linker candidates")
+                return None
+            nc = comp_center(node_comp)
+            nearest = min(candidates, key=lambda c: float(np.linalg.norm(comp_center(c) - nc)))
+            attached_linkers = [nearest]
+
+        if minimize:
+            attached_linkers = attached_linkers[:1]
+
+        keep_comps = {node_comp} | set(attached_linkers)
+        keep_atoms = set()
+        for c in keep_comps:
+            keep_atoms |= set(comps[c])
+
+        species = [sym[i] for i in sorted(keep_atoms)]
+        coords = [np.array(struct[i].coords, dtype=float) for i in sorted(keep_atoms)]
+
+        # Cap open cut sites after node+linker combine.
+        local = {g: k for k, g in enumerate(sorted(keep_atoms))}
+        capped_h_flags = [False] * len(species)
+        for i, j in cut_edges:
+            gi = i if (i in keep_atoms and j not in keep_atoms) else (j if (j in keep_atoms and i not in keep_atoms) else None)
+            gj = j if gi == i else (i if gi == j else None)
+            if gi is None or gj is None:
+                continue
+            li = local.get(gi)
+            if li is None:
+                continue
+            sp = species[li]
+            if sp not in {'C', 'B', 'O', 'N'}:
+                continue
+            base = np.array(coords[li]) - np.array(struct[gj].coords, dtype=float)
+            self.place_capping_h(li, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+
+        capped_h_indices = [i for i, f in enumerate(capped_h_flags) if f and species[i] == 'H']
+        self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+
+        mol = Molecule(species, coords)
+        mol.to(filename=output_path, fmt='xyz')
+        print('  -> COF Path J (strict helix node+linker).')
+        print(f'Final size: {len(species)} atoms.')
+        print(f'Saved: {output_path}')
+        return FragmentResult(species=species, coords=coords)
+
+    def _try_coffragmentor_path_j(self, cif_path, output_path, minimize=False):
+        try:
+            from coffragmentor import COF
+        except Exception as exc:
+            print(f"  coffragmentor unavailable: {exc}")
+            return None
+        try:
+            struct = Structure.from_file(cif_path)
+            self._warn_possible_impurity_components(struct, framework_kind="COF")
+            # First-class strict helix rule: if we can detect two repeating
+            # building blocks (node/linker), always build by direct node+linker
+            # combine and return immediately.
+            strict = self._try_strict_helix_node_linker_path(struct, output_path, minimize=minimize)
+            if strict is not None:
+                return strict
+            result = COF.from_cif(cif_path).fragment()
+        except Exception as exc:
+            clean_cif = self._coffragmentor_retry_clean_cif(cif_path)
+            if clean_cif is None:
+                print(f"  coffragmentor COF Path J failed: {exc}")
+                return None
+            try:
+                struct = Structure.from_file(clean_cif)
+                self._warn_possible_impurity_components(struct, framework_kind="COF")
+                strict = self._try_strict_helix_node_linker_path(struct, output_path, minimize=minimize)
+                if strict is not None:
+                    return strict
+                result = COF.from_cif(clean_cif).fragment()
+                print("  -> COF Path J recovered via cleaned CIF retry.")
+            except Exception as exc2:
+                print(f"  coffragmentor COF Path J failed: {exc2}")
+                return None
+
+        nodes = list(getattr(result, "nodes", []))
+        linkers = list(getattr(result, "linkers", []))
+        if not nodes or not linkers:
+            strict = self._try_strict_helix_node_linker_path(struct, output_path, minimize=minimize)
+            if strict is not None:
+                return strict
+            return None
+
+        metals = {"Zn", "Cu", "Fe", "Co", "Ni", "Mn"}
+        cell_ctr = np.array(struct.lattice.get_cartesian_coords([0.5, 0.5, 0.5]), dtype=float)
+
+        def node_score(sbu):
+            sp = [str(x) for x in sbu.molecule.species]
+            return (sum(1 for x in sp if x in metals), sp.count("N"), len(sp))
+
+        pc_nodes = [sbu for sbu in nodes if node_score(sbu)[0] >= 1 and node_score(sbu)[1] >= 4]
+        is_metallo_pc = bool(pc_nodes)
+        if is_metallo_pc:
+            node = max(pc_nodes, key=node_score)
+            node_kind = "metallo-PC"
+        else:
+            node = min(
+                nodes,
+                key=lambda sbu: float(np.linalg.norm(np.mean(sbu.molecule.cart_coords, axis=0) - cell_ctr)),
+            )
+            node_kind = "general"
+
+        node_sp = [str(x) for x in node.molecule.species]
+        node_co = [np.array(c, dtype=float) for c in node.molecule.cart_coords]
+        node_ctr = np.mean(node_co, axis=0)
+
+        lattice = np.array(struct.lattice.matrix, dtype=float)
+        image_vectors = []
+        for ia in (-1, 0, 1):
+            for ib in (-1, 0, 1):
+                for ic in (-1, 0, 1):
+                    image_vectors.append(ia * lattice[0] + ib * lattice[1] + ic * lattice[2])
+
+        scored_images = []
+        for linker_idx, linker in enumerate(linkers):
+            lsp = [str(x) for x in linker.molecule.species]
+            lco0 = [np.array(c, dtype=float) for c in linker.molecule.cart_coords]
+            best = None
+            for shift in image_vectors:
+                lco = [c + shift for c in lco0]
+                contact_pairs = 0
+                bo_contacts = 0
+                min_d = float("inf")
+                for i, si in enumerate(node_sp):
+                    if si == "H":
+                        continue
+                    for j, sj in enumerate(lsp):
+                        if sj == "H":
+                            continue
+                        d = float(np.linalg.norm(node_co[i] - lco[j]))
+                        min_d = min(min_d, d)
+                        if self.is_valid_bond(si, sj, d):
+                            contact_pairs += 1
+                            if {si, sj} == {"B", "O"}:
+                                bo_contacts += 1
+                if contact_pairs <= 0 or min_d > 2.2:
+                    continue
+                lctr = np.mean(lco, axis=0)
+                score = (contact_pairs, -min_d, -float(np.linalg.norm(lctr - node_ctr)))
+                entry = (score, linker_idx, linker, shift)
+                if is_metallo_pc:
+                    if bo_contacts > 0:
+                        scored_images.append(entry)
+                else:
+                    if best is None or score > best[0]:
+                        best = entry
+            if (not is_metallo_pc) and best is not None:
+                scored_images.append(best)
+
+        if not scored_images:
+            return None
+
+        scored_images.sort(key=lambda item: item[0], reverse=True)
+        if (not is_metallo_pc) and (not minimize):
+            scored_images = self._limit_to_single_helical_period(scored_images, node_ctr, lattice)
+        selected_images = scored_images[:1] if minimize else scored_images
+
+        species = list(node_sp)
+        coords = [np.array(c, dtype=float) for c in node_co]
+        for _, _, linker, shift in selected_images:
+            lsp = [str(x) for x in linker.molecule.species]
+            lco = [np.array(c, dtype=float) + shift for c in linker.molecule.cart_coords]
+            species.extend(lsp)
+            coords.extend(lco)
+
+        base_species = list(species)
+        base_coords = [np.array(c, dtype=float) for c in coords]
+        layer_mode = self.layer_mode
+        if layer_mode == "auto":
+            layer_mode = "dimer" if is_metallo_pc else "monomer"
+
+        if layer_mode == "dimer":
+            stack_vec = min(lattice, key=lambda v: float(np.linalg.norm(v)))
+            species = base_species + base_species
+            coords = base_coords + [c + stack_vec for c in base_coords]
+        else:
+            species = base_species
+            coords = base_coords
+
+        mol = Molecule(species, coords)
+        mol.to(filename=output_path, fmt="xyz")
+        print(f"  -> COF Path J ({node_kind} node+linker {layer_mode}).")
+        print(f"Final size: {len(species)} atoms.")
+        print(f"Saved: {output_path}")
+        return FragmentResult(species=species, coords=coords)
+
     def extract(self, cif_path, output_path="cof_fragment.xyz", center_idx=-1, minimize=False):
         print(f"Loading '{cif_path}'...")
+        direct = self._try_coffragmentor_path_j(cif_path, output_path, minimize=minimize)
+        if direct is not None:
+            return direct
         try:
             struct = Structure.from_file(cif_path)
         except Exception as exc:
@@ -1665,6 +2216,7 @@ class COFFragmenter(BaseFragmenter):
             if not structs:
                 raise
             struct = structs[0]
+        self._warn_possible_impurity_components(struct, framework_kind="COF")
         print("Creating supercell...")
         dims = [max(1, int(np.ceil(28.0 / a))) for a in struct.lattice.abc]
         dims = [max(3, d) if a < 15.0 else d for d, a in zip(dims, struct.lattice.abc)]
@@ -1860,6 +2412,8 @@ class COFFragmenter(BaseFragmenter):
                             min_d = d
                 layered_candidates.append((min_d, comp))
 
+            node_component_by_atom = {i: comp for comp in node_comps for i in comp}
+
             layered_component_count = 1
             if path_mode == "A" and layered_candidates:
                 layered_candidates.sort(key=lambda x: x[0])
@@ -1875,7 +2429,8 @@ class COFFragmenter(BaseFragmenter):
                     path_mode = "B"
 
             if path_mode == "B":
-                print(f"  -> COF Path B (Layered set). Node components: {layered_component_count}, spacing: {best_d:.2f} A")
+                layer_mode = "dimer" if self.layer_mode == "auto" else self.layer_mode
+                print(f"  -> COF Path B (Layered set {layer_mode}). Node components: {layered_component_count}, spacing: {best_d:.2f} A")
             elif path_mode == "A":
                 print(f"  -> COF Path A (Single node). Node component size: {len(center_comp)}")
 
@@ -2020,6 +2575,14 @@ class COFFragmenter(BaseFragmenter):
                 continue
             for v in graph[u]:
                 if v in node_atoms and v not in core_nodes:
+                    if path_mode == "B" and not minimize:
+                        terminal_node = set(node_component_by_atom.get(v, {v}))
+                        final |= terminal_node
+                        visited |= terminal_node
+                    else:
+                        broken.append((u, np.array(unwrapped[v]) - np.array(unwrapped[u])))
+                    continue
+                if v not in sphere:
                     broken.append((u, np.array(unwrapped[v]) - np.array(unwrapped[u])))
                     continue
                 if v in visited:
@@ -2225,10 +2788,46 @@ class COFFragmenter(BaseFragmenter):
                                 bridge_atoms.add(u)
                     comp_info.append((comp, touching_nodes, bridge_atoms))
 
-                # Choose one whole linker branch to keep fully.
+                # Choose one whole linker branch to keep fully. For Path B
+                # dimers, do this once per disconnected layer so one layer does
+                # not get the full linker while the other is only ring-trimmed.
+                primary_indices = set()
                 if comp_info:
-                    primary = max(comp_info, key=lambda x: (len(x[1]), len(x[0])))
-                    keep_heavy = set(local_nodes) | set(primary[0])
+                    layer_mode = "dimer" if self.layer_mode == "auto" else self.layer_mode
+                    if path_mode == "B" and layer_mode != "monomer":
+                        heavy_comp_id = {}
+                        vis_h = set()
+                        comp_id = 0
+                        for seed in heavy_idx:
+                            if seed in vis_h:
+                                continue
+                            qh = deque([seed])
+                            vis_h.add(seed)
+                            while qh:
+                                u = qh.popleft()
+                                heavy_comp_id[u] = comp_id
+                                for v in hadj.get(u, []):
+                                    if v not in vis_h:
+                                        vis_h.add(v)
+                                        qh.append(v)
+                            comp_id += 1
+
+                        best_by_layer = {}
+                        for idx, (comp, touching_nodes, bridge_atoms) in enumerate(comp_info):
+                            layer_ids = [heavy_comp_id.get(u) for u in comp]
+                            layer_ids = [x for x in layer_ids if x is not None]
+                            layer_id = layer_ids[0] if layer_ids else idx
+                            key = (len(touching_nodes), len(comp))
+                            if layer_id not in best_by_layer or key > best_by_layer[layer_id][0]:
+                                best_by_layer[layer_id] = (key, idx)
+                        primary_indices = {idx for _, idx in best_by_layer.values()}
+                    else:
+                        primary_idx = max(range(len(comp_info)), key=lambda idx: (len(comp_info[idx][1]), len(comp_info[idx][0])))
+                        primary_indices = {primary_idx}
+
+                    keep_heavy = set(local_nodes)
+                    for idx in primary_indices:
+                        keep_heavy |= set(comp_info[idx][0])
                 else:
                     keep_heavy = set(local_nodes) if local_nodes else {heavy_idx[0]}
 
@@ -2265,31 +2864,12 @@ class COFFragmenter(BaseFragmenter):
                             return set(got)
                     return set()
 
-                # For non-primary branches keep first benzene ring only.
-                for comp, touching_nodes, bridge_atoms in comp_info:
-                    if primary and comp is primary[0]:
+                # General COF rule: do not cut rings in minimized fragments.
+                # Keep all non-primary linker components intact.
+                for comp_idx, (comp, touching_nodes, bridge_atoms) in enumerate(comp_info):
+                    if comp_idx in primary_indices:
                         continue
-                    ring = find_six_cycle(comp, bridge_atoms)
-                    if ring:
-                        keep_heavy |= ring
-                    else:
-                        # Fallback if no clear benzene ring found: keep up to
-                        # six nearest carbons from bridge atoms.
-                        seeds = list(bridge_atoms) if bridge_atoms else list(comp)[:1]
-                        q = deque(seeds)
-                        dist = {u: 0 for u in seeds}
-                        seen = set(seeds)
-                        carbons = []
-                        while q and len(carbons) < 6:
-                            u = q.popleft()
-                            if u in comp and species[u] == "C":
-                                carbons.append(u)
-                            for v in hadj[u]:
-                                if v in comp and v not in seen:
-                                    seen.add(v)
-                                    dist[v] = dist[u] + 1
-                                    q.append(v)
-                        keep_heavy |= set(carbons)
+                    keep_heavy |= set(comp)
 
                 # Preserve adjacent C atoms for Path A COFs (e.g., COF-102) so
                 # linker carbons are not over-pruned before capping.
@@ -2470,12 +3050,72 @@ class COFFragmenter(BaseFragmenter):
                     return (node_ct, len(comp))
                 if path_mode == "B":
                     ranked = sorted(comps, key=comp_key, reverse=True)
-                    keep = set().union(*ranked[:2])
+                    layer_mode = "dimer" if self.layer_mode == "auto" else self.layer_mode
+                    keep_n = 1 if layer_mode == "monomer" else 2
+                    keep = set().union(*ranked[:keep_n])
                 else:
-                    keep = max(comps, key=comp_key)
+                    ranked = sorted(comps, key=comp_key, reverse=True)
+                    # General COF fallback rule: keep two principal building
+                    # blocks in normal mode when disconnected components exist.
+                    keep_n = 2 if (not minimize and len(ranked) >= 2) else 1
+                    keep = set().union(*ranked[:keep_n])
                 species = [x for i, x in enumerate(species) if i in keep]
                 coords = [x for i, x in enumerate(coords) if i in keep]
                 capped_h_flags = [x for i, x in enumerate(capped_h_flags) if i in keep]
+
+        # Final edge-site capping after all pruning: ensure terminal B/O sites
+        # at fragment boundaries are protonated/capped when undercoordinated.
+        if species:
+            heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
+            hadj_bo = {i: [] for i in heavy_idx}
+            for a in range(len(heavy_idx)):
+                i = heavy_idx[a]
+                ci = np.array(coords[i])
+                for b in range(a + 1, len(heavy_idx)):
+                    j = heavy_idx[b]
+                    d = np.linalg.norm(ci - np.array(coords[j]))
+                    if self.is_valid_bond(species[i], species[j], d):
+                        hadj_bo[i].append(j)
+                        hadj_bo[j].append(i)
+
+            for i, sp in list(enumerate(species)):
+                if sp not in {"B", "O"}:
+                    continue
+
+                cpos = np.array(coords[i])
+                heavy_nbs = hadj_bo.get(i, [])
+                h_nbs = 0
+                for j, sj in enumerate(species):
+                    if sj != "H":
+                        continue
+                    d = np.linalg.norm(cpos - np.array(coords[j]))
+                    hcut = 1.5 if sp == "O" else 1.7
+                    if d <= hcut:
+                        h_nbs += 1
+
+                if sp == "O":
+                    if self.oxygen_already_protonated(i, species, coords):
+                        continue
+                    if len(heavy_nbs) >= 2:
+                        continue
+                    n_cap = min(1, max(0, 2 - len(heavy_nbs) - h_nbs))
+                else:
+                    if len(heavy_nbs) >= 3:
+                        continue
+                    n_cap = min(1, max(0, 3 - len(heavy_nbs) - h_nbs))
+
+                if n_cap <= 0:
+                    continue
+
+                base = np.zeros(3)
+                if heavy_nbs:
+                    for nb in heavy_nbs:
+                        base -= (np.array(coords[nb]) - cpos)
+                else:
+                    base = np.array([1.0, 0.0, 0.0])
+
+                for _ in range(n_cap):
+                    self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
@@ -2493,13 +3133,19 @@ def main():
     parser.add_argument("--nmetals", type=int, default=3)
     parser.add_argument("--output", default="fragment.xyz")
     parser.add_argument("--minimize", action="store_true")
+    parser.add_argument(
+        "--cof-layer",
+        choices=["auto", "monomer", "dimer"],
+        default="auto",
+        help="COF layer output for layered COFs. auto preserves existing dimer behavior.",
+    )
     args = parser.parse_args()
 
     if args.kind == "mof":
         frag = MOFFragmenter(radius=args.radius)
         frag.extract(args.cif_path, center_idx=args.center, nmetals=args.nmetals, output_path=args.output, minimize=args.minimize)
     else:
-        frag = COFFragmenter(radius=args.radius)
+        frag = COFFragmenter(radius=args.radius, layer_mode=args.cof_layer)
         frag.extract(args.cif_path, center_idx=args.center, output_path=args.output, minimize=args.minimize)
 
 
