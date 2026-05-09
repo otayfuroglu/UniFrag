@@ -2,6 +2,30 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
+## Decision 2026-05-08: Path B normal fragments retain terminal B/O node components
+- Context: COF-10 normal dimer visually missed terminal chemistry because generic layered Path B stopped traversal when it reached the next B/O node and capped the linker-side atom instead.
+- Decision: For Path B normal mode only, when growth reaches a neighboring non-core B/O node component, retain that terminal node component but do not continue growing beyond it. Minimized Path B remains unchanged.
+- Consequences: COF-10 normal dimer grows from 104 atoms (`B2 C60 H38 O4`) to 112 atoms (`B8 C60 H28 O16`), split as two equal 56-atom layers. COF-10 minimized remains 66 atoms. Other generic 2-layer normal fragments also gain terminal B/O node chemistry; minimized counts stay unchanged.
+- Alternatives considered: Increase radius or keep more disconnected layers; rejected because the missing part was at the node/linker boundary, not the layer count.
+
+## Decision 2026-05-08: Make metallo-PC COF monomer and dimer outputs explicit
+- Context: ZnPc-family COFs can represent two stacked layers, but visual checking now needs monomer and dimer fragments as separate outputs rather than one implicit dimer file.
+- Decision: Add `--cof-layer auto|monomer|dimer` to COF extraction for layered COFs. `auto` remains the accepted dimer behavior for compatibility; metallo-PC Path J monomer skips shortest-axis duplication, while generic Path B monomer keeps one principal disconnected layer instead of two.
+- Consequences: ZnPc-DPB and generic 2-layer Path B COFs can be generated as normal/minimized monomer files and normal/minimized dimer files. `run_cof_family.sh` also supports a `both` mode that writes `_monomer` and `_dimer` suffixed files.
+- Alternatives considered: Always write both files from the core extractor; rejected because single-output CLI calls and existing test scripts should stay predictable.
+
+## Decision 2026-05-08: Restore ZnPc/metallo-PC COF Path J before generic COF paths
+- Context: ZnPc-DPB regenerated through generic COF Path B after the direct coffragmentor Path J machinery was absent from the active COF extraction code, producing a 92-atom minimized fragment where one dimer layer missed linker context.
+- Decision: COF extraction again tries direct coffragmentor metallo-PC Path J before generic COF paths. It selects the Zn/N-rich phthalocyanine node, attaches coffragmentor linker images through B-O contacts, and duplicates the whole node+linker set along the shortest lattice vector so both dimer layers receive identical linker context.
+- Consequences: ZnPc-DPB returns to Path J sizes: normal 322 atoms (`Zn2 B16 C192 H80 N16 O16`) and minimized 166 atoms (`Zn2 B4 C96 H32 N16 O16`), split as two equal 83-atom layers.
+- Alternatives considered: Patch generic Path B minimization; rejected because accepted ZnPc behavior depends on direct coffragmentor node+linker assembly.
+
+## Decision 2026-05-08: ZIF/minimum fragments preserve the first linker ring
+- Context: ZIF minimum fragments exposed that the first linker ring may be a pentagon/heterocycle, while the previous helper looked for a six-carbon ring and could cut the actual first ring. The user also clarified that if the normal fragment is already below 80 atoms, no separate minimum is needed.
+- Decision: Replace the six-carbon-only partial-linker ring detector with nearest heavy-cycle detection (cycle size 3-8) so the whole first ring is retained. Before any minimized MOF extraction, compute the normal fragment; if it has fewer than 80 atoms, write the normal fragment as the minimized output and skip further minimization.
+- Consequences: ZIF min outputs whose normals are under 80 atoms now equal their normal outputs: ZIF-1/ZIF-10/ZIF-2 33 atoms, ZIF-11/ZIF-12 56 atoms, ZIF-20 49 atoms. Larger normal fragments still continue into the minimum Path J/legacy logic with first-ring preservation.
+- Alternatives considered: Only special-case ZIF filenames; rejected because first-ring preservation and the <80 rule are general MOF minimum-fragment rules.
+
 ## Decision 2026-05-08: DUT-49 normal fragments keep one Cu2 paddlewheel node
 - Context: DUT-49 is a Cu paddlewheel MOF, but visually it should behave like Cu-BTC rather than PCN/NU: one paddlewheel node is enough for the normal fragment. The stale saved normal output had `Cu3` and 547 atoms.
 - Decision: Add `DUT-49*` to the one-node paddlewheel family used by legacy fallback logic. Keep Path J available for DUT-49; current Path J normal already produces the desired one-node `Cu2` fragment.
@@ -67,3 +91,21 @@ Durable implementation and architecture decisions for UniFrag. This file is the 
 - Decision: MOF extraction now first tries `moffragmentor.MOF.from_cif(...).fragment()`. When nodes and linkers are found, Path J exports all helper nodes to `mof_nodes_lib/` and linkers to `mof_linkers_lib/`, selects the node nearest the unit-cell center, combines all chemically attached linker images for normal mode or the nearest attached linker image for minimized mode, and merges overlapping same-element boundary atoms. If moffragmentor is unavailable or no node/linker result is usable, the old MOF paths run unchanged.
 - Consequences: `test_on_irmof1/IRMOF-1.cif` normal Path J gives 113 atoms (`Zn4 C48 H36 O25`); minimized gives 38 atoms (`Zn4 C13 H6 O15`). Visual review can inspect generated helper fragments in `mof_nodes_lib/` and `mof_linkers_lib/`.
 - Alternatives considered: Keep MOF Path J separate from the main extraction path; rejected for this branch because the goal is to test node+linker as the first approximation.
+
+## Decision 2026-05-08: Export COF helper node/linker libraries for visual QA
+- Context: The COF workflow now needs the same eye-check helper libraries used for MOFs, so each COF run should save node/linker fragments for manual inspection.
+- Decision: Add coffragmentor-based helper export to COF extraction. On each COF run, attempt `coffragmentor` fragmentation and export helper nodes/linkers to `cof_nodes_lib/` and `cof_linkers_lib/` with compact names (`<stem>_00.xyz`) and duplicate filtering based on composition + internal distance fingerprint. If same-stem files already exist in a given folder, skip writing in that folder.
+- Consequences: COF helper libraries are now generated/maintained automatically during COF extraction without changing primary fragment output logic.
+- Alternatives considered: Manual one-off helper exports; rejected because recurring visual QA needs automated, consistent exports.
+
+## Decision 2026-05-09: Node+linker-first strategy is mandatory for both MOF and COF
+- Context: Project direction requires helper fragmentation output (node + linker) to be the fundamental first attempt for every framework type.
+- Decision: MOF extraction always attempts moffragmentor Path J first (no family skip gate). COF extraction now attempts a generic coffragmentor Path J node+linker combine first, then falls back to existing COF-specific paths when helper assembly is unavailable.
+- Consequences: Path ordering is now unified across MOF/COF. Legacy family heuristics remain as fallback safety paths.
+- Alternatives considered: Keep family-specific bypasses before Path J; rejected because the project’s core strategy is node+linker-first.
+
+## Decision 2026-05-09: COF path selection prioritizes node/linker topology similarity over structure name
+- Context: COF-6 and COF-66 regressions showed filename-specific routing is brittle and can misroute layered dimer assembly.
+- Decision: Prefer topology-driven routing: detect node/linker character from cut-component signatures (node similarity first, linker similarity second). Use boroxine-like B-rich aromatic node signatures for strict boroxine node+linker handling; otherwise use generic graph/coffragmentor node+linker paths.
+- Consequences: COF branching now starts from node/linker similarity rather than structure stem naming. Layered dimer construction should preserve crystal-based placement for selected node/linker components.
+- Alternatives considered: Keep explicit per-structure filename gates; rejected as non-general and error-prone.

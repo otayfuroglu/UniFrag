@@ -10,7 +10,7 @@ Use this file as a persistent engineering memory for this project. Keep entries 
 - Repository URL:
 - Default branch:
 - Primary language(s):
-- Last updated: 2026-05-08
+- Last updated: 2026-05-09
 - Maintainer(s):
 
 ## 1) Project Purpose
@@ -89,7 +89,11 @@ Use this file as a persistent engineering memory for this project. Keep entries 
 
 ### 5.3 Test
 ```bash
-# run tests
+# Run MOF family smoke tests
+./run_mof_family.sh test_on_irmof_series 4.0
+
+# Run COF family smoke tests
+./run_cof_family.sh test_on_cof_zn_pc_series 4.0
 ```
 
 ### 5.4 Lint/format
@@ -150,6 +154,18 @@ For each item:
 - Decision:
 - Consequences:
 - Alternatives considered:
+
+### Decision 2026-05-08: Restore ZnPc/metallo-PC COF Path J before generic COF paths
+- Context: ZnPc-DPB was using generic COF Path B instead of the accepted direct coffragmentor Path J, causing minimized dimer imbalance.
+- Decision: COF extraction should try direct coffragmentor metallo-PC Path J first: combine the Zn/N-rich node with attached linker images and duplicate the full set along the shortest lattice vector for the dimer.
+- Consequences: ZnPc-DPB normal/min are restored to 322/166 atoms; minimized has two identical 83-atom layers (`Zn1 B2 C48 H16 N8 O8` each).
+- Alternatives considered: Fixing generic Path B for ZnPc; rejected because Path J is the established ZnPc rule.
+
+### Decision 2026-05-08: ZIF/minimum fragments preserve the first linker ring
+- Context: ZIF linkers can have first rings that are pentagons/heterocycles, not six-carbon phenyl rings. Minimum trimming must not cut that first connected ring. Also, when the normal fragment is already small, a separate minimum is unnecessary.
+- Decision: MOF Path J first-ring trimming now detects the nearest heavy-atom cycle of size 3-8 and preserves the whole ring, including hetero atoms. For any MOF minimized extraction, first generate/probe the normal fragment; if the normal fragment has fewer than 80 atoms, write that normal fragment as the minimized output.
+- Consequences: ZIF generated min outputs with normal sizes under 80 atoms are identical to normal outputs (e.g. ZIF-1/ZIF-10/ZIF-2 at 33 atoms, ZIF-11/ZIF-12 at 56 atoms, ZIF-20 at 49 atoms). Larger MOFs still use the first-ring minimum logic.
+- Alternatives considered: Keep six-carbon-ring-only trimming; rejected because it can truncate imidazolate/pentagon rings.
 
 ### Decision 2026-05-08: DUT-49 normal uses one Cu2 paddlewheel node
 - Context: DUT-49 has a Cu paddlewheel structure where the normal fragment should follow Cu-BTC behavior, not PCN/NU behavior. The old saved normal output had `Cu3` and 547 atoms.
@@ -251,3 +267,20 @@ For each item:
 
 Use this section only if you want this template to include a concrete reference snapshot.
 
+
+
+### 2026-05-08 COF metallo-PC layer output
+- `fragmentation_oop.py --kind cof` accepts `--cof-layer auto|monomer|dimer` for layered COFs.
+- For metallo-PC Path J, `monomer` writes one coffragmentor node+linker layer and `dimer` duplicates along the shortest lattice vector.
+- For generic Path B layered COFs, `monomer` keeps one principal layer and `dimer`/`auto` keeps two principal layers.
+- `run_cof_family.sh <folder> [radius] both` writes separate `_monomer` and `_dimer` normal/minimized outputs for visual comparison.
+
+### 2026-05-08 COF Path B normal boundary
+- Generic layered COF Path B normal mode keeps terminal neighboring B/O node components at linker cut sites. This fixed COF-10 normal dimer missing terminal chemistry.
+- Minimized Path B still trims as before.
+- COF-10 auto normal/min now: 112/66 atoms; explicit normal monomer/dimer: 56/112 atoms.
+
+### Decision 2026-05-09: COF layered routing by topology similarity (node first, linker second)
+- Context: Filename-based routing caused regressions for COF-6/66/8 layered dimers.
+- Decision: Route COF strict/fallback paths by node/linker topology signatures rather than structure stem names; keep node+linker-first, then fallback.
+- Consequences: Better transfer across COF families, fewer structure-name special cases.

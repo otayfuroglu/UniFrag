@@ -85,23 +85,10 @@ class COF:
                 edges_to_remove.append((u, v))
             elif bond_pair == {'C', 'N'}:
                 # Cut on the aromatic C side (degree >= 3) so that N stays with the linker.
-                # E.g. in imine COFs: BDA-CH=N-Ar(node) -> cut Ar(node)-N bond.
+                # E.g. in imine COFs: BDA-CH=N-Ar(node) → cut Ar(node)-N bond.
                 # Protect C-N bonds that are part of small rings (porphyrin, triazine, pyridine).
                 c_idx = u if atom_u == 'C' else v
                 if heavy_degree(c_idx) >= 3 and not in_small_ring(u, v):
-                    edges_to_remove.append((u, v))
-
-        # Fallback for helix-like/all-organic COFs where no B-O/C-N cuts are found.
-        # Split non-ring bridge C-C bonds between highly connected carbons.
-        if not edges_to_remove:
-            for u, v, data in undirected_graph.edges(data=True):
-                atom_u = self.structure[u].specie.symbol
-                atom_v = self.structure[v].specie.symbol
-                if atom_u != 'C' or atom_v != 'C':
-                    continue
-                if in_small_ring(u, v):
-                    continue
-                if heavy_degree(u) >= 3 and heavy_degree(v) >= 3:
                     edges_to_remove.append((u, v))
                 
         # 3. Cleave the bonds in the graph
