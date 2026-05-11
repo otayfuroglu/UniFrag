@@ -1828,6 +1828,23 @@ class COFFragmenter(BaseFragmenter):
             if len(species) == before and np.linalg.norm(base) > 1e-12:
                 self.place_capping_h(i, -base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
+    def _prune_duplicate_cof_helper_files(self, out_dir, decimals=1):
+        seen = {}
+        removed = 0
+        for old in sorted(Path(out_dir).glob("*.xyz")):
+            try:
+                key = MOFFragmenter._xyz_unique_key(old, decimals=decimals)
+            except Exception:
+                key = None
+            if key is None:
+                continue
+            if key in seen:
+                old.unlink()
+                removed += 1
+            else:
+                seen[key] = old
+        return removed
+
     def _export_coffragmentor_library(self, result, stem):
         node_dir = Path("cof_nodes_lib")
         linker_dir = Path("cof_linkers_lib")
@@ -1836,13 +1853,14 @@ class COFFragmenter(BaseFragmenter):
         file_stem = MOFFragmenter._safe_name(stem)
 
         for collection, out_dir in ((getattr(result, "nodes", []), node_dir), (getattr(result, "linkers", []), linker_dir)):
+            self._prune_duplicate_cof_helper_files(out_dir)
             if any(out_dir.glob(f"{file_stem}_*.xyz")):
                 continue
 
             existing_keys = set()
             for old in out_dir.glob("*.xyz"):
                 try:
-                    key = MOFFragmenter._xyz_unique_key(old)
+                    key = MOFFragmenter._xyz_unique_key(old, decimals=1)
                 except Exception:
                     key = None
                 if key is not None:
@@ -1855,7 +1873,7 @@ class COFFragmenter(BaseFragmenter):
                 mol = getattr(sbu, "molecule", None)
                 if mol is None:
                     continue
-                key = MOFFragmenter._molecule_unique_key(mol)
+                key = MOFFragmenter._molecule_unique_key(mol, decimals=1)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -1871,19 +1889,20 @@ class COFFragmenter(BaseFragmenter):
         out_dir.mkdir(exist_ok=True)
         file_stem = MOFFragmenter._safe_name(stem)
 
+        self._prune_duplicate_cof_helper_files(out_dir)
         if any(out_dir.glob(f"{file_stem}_*.xyz")):
             return False
 
         existing_keys = set()
         for old in out_dir.glob("*.xyz"):
             try:
-                key = MOFFragmenter._xyz_unique_key(old)
+                key = MOFFragmenter._xyz_unique_key(old, decimals=1)
             except Exception:
                 key = None
             if key is not None:
                 existing_keys.add(key)
 
-        key = MOFFragmenter._species_coords_unique_key(species, coords)
+        key = MOFFragmenter._species_coords_unique_key(species, coords, decimals=1)
         if key in existing_keys:
             return False
 

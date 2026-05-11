@@ -2,6 +2,12 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
+## Decision 2026-05-11: COF helper libraries remove chemically duplicate building blocks globally
+- Context: Visual QA found duplicate COF helper building blocks across different COF stems, including `COF-LZU8_00.xyz`/`COF-LZU8_01.xyz`. Exact coordinate comparison was too strict because chemically identical helper fragments can differ slightly in coordinates or orientation.
+- Decision: COF helper export now treats duplicate nodes/linkers globally per folder using composition plus internal pair-distance fingerprints rounded to `0.1 A`. Before writing any new COF helper node or linker, the full target folder (`cof_nodes_lib/` or `cof_linkers_lib/`) is pruned with the same chemically aggressive fingerprint, then the new candidate is checked against all existing helpers.
+- Consequences: COF helper libraries are intended to contain one representative per chemically equivalent building block, even across different COF names. This rule is global for COF helper export and is not filename-specific. A looser `0.1 A` fingerprint may merge near-identical conformers by design because the user wants chemically duplicate building blocks removed.
+- Alternatives considered: Keep the safer `0.01 A` duplicate tolerance; rejected because it left visually/chemically identical building blocks such as COF-LZU8 duplicated.
+
 ## Decision 2026-05-08: Path B normal fragments retain terminal B/O node components
 - Context: COF-10 normal dimer visually missed terminal chemistry because generic layered Path B stopped traversal when it reached the next B/O node and capped the linker-side atom instead.
 - Decision: For Path B normal mode only, when growth reaches a neighboring non-core B/O node component, retain that terminal node component but do not continue growing beyond it. Minimized Path B remains unchanged.

@@ -10,7 +10,7 @@ Use this file as a persistent engineering memory for this project. Keep entries 
 - Repository URL:
 - Default branch:
 - Primary language(s):
-- Last updated: 2026-05-09
+- Last updated: 2026-05-11
 - Maintainer(s):
 
 ## 1) Project Purpose
@@ -148,6 +148,12 @@ For each item:
 - Status:
 
 ## 9) Decisions Log (ADR-lite)
+
+### Decision 2026-05-11: COF helper libraries use global chemical duplicate pruning
+- Context: COF node/linker helper folders are used for visual QA, and duplicate building blocks can appear under different COF stems. Exact/near-exact coordinate matching was too strict for chemically identical blocks such as COF-LZU8 nodes.
+- Decision: COF helper export prunes/checks duplicates across the whole `cof_nodes_lib/` or `cof_linkers_lib/` folder using composition plus internal pair-distance fingerprints rounded to `0.1 A`. This applies globally to every COF helper export before new node/linker files are written.
+- Consequences: Helper libraries keep one representative for chemically identical COF building blocks across stems; intentionally similar conformers may be merged.
+- Alternatives considered: `0.01 A` duplicate matching; rejected because chemically identical helper blocks remained duplicated.
 
 ### Decision YYYY-MM-DD: Title
 - Context:

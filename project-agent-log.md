@@ -2,6 +2,23 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-11 - Global chemical duplicate pruning for COF helper libraries
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-memory.md`
+  - `project-decisions.md`
+  - `project-agent-log.md`
+  - pruned duplicate untracked helper outputs in `cof_nodes_lib/` and `cof_linkers_lib/`
+- Summary:
+  - Made COF helper node/linker duplicate detection global per helper folder, using a chemically aggressive composition + internal pair-distance fingerprint rounded to `0.1 A`.
+  - COF helper export now prunes existing duplicates in `cof_nodes_lib/` or `cof_linkers_lib/` before writing/checking new candidates, so duplicate suppression applies across different COF stems.
+  - Removed duplicate helper files: `cof_nodes_lib/COF-LZU8_01.xyz` (duplicate of `COF-LZU8_00.xyz`) and `cof_linkers_lib/COF-TpAzo_01.xyz` (duplicate of `COF-TpAzo_00.xyz`). Earlier conservative cleanup also removed COF-TpAzo copies matching existing SDU/TpAzo linker chemistry.
+- Validation:
+  - `python -m py_compile fragmentation_oop.py` passes.
+  - Aggressive duplicate rescan reports `cof_nodes_lib duplicate_groups 0` and `cof_linkers_lib duplicate_groups 0`.
+- Follow-up risks:
+  - The `0.1 A` helper fingerprint intentionally merges chemically identical near-conformers; if future visual QA needs conformer-distinct helper outputs, this tolerance should be revisited.
+
 
 
 
