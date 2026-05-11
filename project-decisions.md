@@ -109,3 +109,9 @@ Durable implementation and architecture decisions for UniFrag. This file is the 
 - Decision: Prefer topology-driven routing: detect node/linker character from cut-component signatures (node similarity first, linker similarity second). Use boroxine-like B-rich aromatic node signatures for strict boroxine node+linker handling; otherwise use generic graph/coffragmentor node+linker paths.
 - Consequences: COF branching now starts from node/linker similarity rather than structure stem naming. Layered dimer construction should preserve crystal-based placement for selected node/linker components.
 - Alternatives considered: Keep explicit per-structure filename gates; rejected as non-general and error-prone.
+
+## Decision 2026-05-11: Path J COFs must produce dimers when face-to-face layers exist
+- Context: COF-LZU1 and COF-LZU8 visually had correct monomer fragments, but their dimer outputs were identical to monomer outputs because coffragmentor Path J returned before the later layer-aware COF fallback paths. The user reiterated the global rule: detect face-to-face layers before finishing, and produce dimer versions when layers exist.
+- Decision: In COF coffragmentor Path J finalization, when output mode is not `monomer` and the shortest lattice vector is a plausible face-to-face stacking distance (2.5-5.0 A), duplicate the completed capped monomer fragment by that stacking vector. This keeps node+linker-first Path J behavior while enforcing layered dimer generation globally for stacked 2D COFs.
+- Consequences: COF-LZU1 dimer/min-dimer now double monomer/min atom counts and use 3.729 A layer spacing. COF-LZU8 dimer/min-dimer now double monomer/min atom counts and use 4.093 A layer spacing.
+- Alternatives considered: Let only later Path A/B layer detection handle dimers; rejected because Path J can return early for valid node+linker COFs and must still honor the dimer rule.

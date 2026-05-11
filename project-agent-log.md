@@ -491,3 +491,20 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
   - COF-6 and COF-66 were repeatedly regenerated under `test_on_cof6xx_family/` while iterating on dimer placement, wrapping, and edge capping behavior.
 - Follow-up risks:
   - Layered dimer geometry for edge cases should still be visually verified; topology-driven routing is in progress and may need one more stabilization pass for universal layered spacing/wrapping robustness.
+
+## 2026-05-11 - Path J layered dimer fallback for face-to-face COFs
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-decisions.md`
+  - `project-agent-log.md`
+  - `project-memory.md`
+- Summary:
+  - Added a global Path J layered-COF dimer fallback for coffragmentor node+linker outputs.
+  - If `--cof-layer dimer`/auto requests a non-monomer output and the shortest lattice vector is a plausible face-to-face stacking spacing (2.5-5.0 A), the completed capped monomer fragment is duplicated by that stacking vector.
+  - This addresses COF-LZU1 and COF-LZU8 where Path J previously produced dimer files with monomer-only atom counts.
+- Validation:
+  - `python -m py_compile fragmentation_oop.py` passes.
+  - COF-LZU1 dimer: 102 atoms, centroid layer spacing 3.729 A; min dimer: 62 atoms, spacing 3.729 A.
+  - COF-LZU8 dimer: 348 atoms, centroid layer spacing 4.093 A; min dimer: 148 atoms, spacing 4.093 A.
+- Follow-up risks:
+  - The fallback is conservative and uses the shortest lattice vector for Path J layered COFs; visually verify unusual non-layered COFs with a short lattice axis.

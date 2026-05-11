@@ -2476,6 +2476,22 @@ class COFFragmenter(BaseFragmenter):
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
 
+        # Global layered-COF rule for Path J: if a face-to-face layer spacing is
+        # present and dimer output is requested, duplicate the completed fragment
+        # by the nearest stacking vector from the crystal.
+        layer_mode = getattr(self, "layer_mode", "auto")
+        abc = np.array(struct.lattice.abc, dtype=float)
+        stack_axis = int(np.argmin(abc))
+        stack_len = float(abc[stack_axis])
+        if layer_mode != "monomer" and 2.5 <= stack_len <= 5.0 and len(species) > 0:
+            layer_vec = np.array(struct.lattice.matrix[stack_axis], dtype=float)
+            base_species = list(species)
+            base_coords = [np.array(c, dtype=float) for c in coords]
+            base_flags = list(capped_h_flags)
+            species = base_species + base_species
+            coords = base_coords + [c + layer_vec for c in base_coords]
+            capped_h_flags = base_flags + base_flags
+
         mol = Molecule(species, coords)
         mol.to(filename=output_path, fmt="xyz")
         print("  -> COF Path J (coffragmentor node+linker combine).")

@@ -284,3 +284,6 @@ Use this section only if you want this template to include a concrete reference 
 - Context: Filename-based routing caused regressions for COF-6/66/8 layered dimers.
 - Decision: Route COF strict/fallback paths by node/linker topology signatures rather than structure stem names; keep node+linker-first, then fallback.
 - Consequences: Better transfer across COF families, fewer structure-name special cases.
+
+
+- 2026-05-11: COF Path J layered dimer rule added. For coffragmentor node+linker COFs, non-monomer output now duplicates the completed capped fragment along the shortest lattice vector when that vector is a plausible face-to-face layer spacing (2.5-5.0 A). Validated on COF-LZU1 (3.729 A) and COF-LZU8 (4.093 A), normal and min dimers.
