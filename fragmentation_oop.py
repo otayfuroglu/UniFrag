@@ -368,6 +368,9 @@ class BaseFragmenter:
         # Global rule: RDKit/UFF relaxation for capped H only, with all
         # non-capped atoms fixed.
         self.refine_h_geometry_with_rdkit(species, coords, capped_h_indices=capped_h_indices)
+        # RDKit can slightly pull aromatic C-H caps out of the phenyl plane;
+        # enforce the final sp2 direction again before writing coordinates.
+        self.enforce_sp2_capped_h_geometry(species, coords, capped_h_indices)
 
 
 class MOFFragmenter(BaseFragmenter):
@@ -1774,6 +1777,57 @@ class COFFragmenter(BaseFragmenter):
         cutoff = min(2.2, max(1.1, cutoff))
         return dist <= cutoff
 
+    def _cap_open_oxygens(self, species, coords, capped_h_flags):
+        heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
+        for i in list(heavy_idx):
+            if i >= len(species) or species[i] not in {"O", "N", "C"}:
+                continue
+            sp = species[i]
+            pos = np.array(coords[i], dtype=float)
+            h_cut = 1.25 if sp in {"N", "O"} else 1.20
+            has_h = any(
+                spj == "H" and np.linalg.norm(pos - np.array(coords[j], dtype=float)) <= h_cut
+                for j, spj in enumerate(species)
+            )
+            if has_h:
+                continue
+            if sp == "O" and self.oxygen_already_protonated(i, species, coords):
+                continue
+
+            heavy_neighbors = []
+            for j, spj in enumerate(species):
+                if i == j or spj == "H":
+                    continue
+                d = np.linalg.norm(pos - np.array(coords[j], dtype=float))
+                if self.is_valid_bond(sp, spj, d):
+                    heavy_neighbors.append(j)
+
+            if sp == "O":
+                if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "B", "Si", "P", "S", "N"}:
+                    continue
+                base = pos - np.array(coords[heavy_neighbors[0]], dtype=float)
+            elif sp == "N":
+                if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "N"}:
+                    continue
+                base = pos - np.array(coords[heavy_neighbors[0]], dtype=float)
+            else:
+                # Phenyl/aromatic edge C: two retained heavy neighbors but no H.
+                # Avoid carbonyl-like C by requiring C/N neighbors only.
+                if len(heavy_neighbors) != 2:
+                    continue
+                if not all(species[j] in {"C", "N"} for j in heavy_neighbors):
+                    continue
+                base = np.zeros(3)
+                for nb in heavy_neighbors:
+                    base -= np.array(coords[nb], dtype=float) - pos
+                if np.linalg.norm(base) < 1e-12:
+                    base = pos - np.mean([np.array(coords[nb], dtype=float) for nb in heavy_neighbors], axis=0)
+
+            before = len(species)
+            self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+            if len(species) == before and np.linalg.norm(base) > 1e-12:
+                self.place_capping_h(i, -base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+
     def _export_coffragmentor_library(self, result, stem):
         node_dir = Path("cof_nodes_lib")
         linker_dir = Path("cof_linkers_lib")
@@ -2418,6 +2472,7 @@ class COFFragmenter(BaseFragmenter):
                     self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
         # Keep helper heavy atoms fixed; only adjust capped H atoms.
+        self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
 
@@ -2877,6 +2932,7 @@ class COFFragmenter(BaseFragmenter):
                     print(f"  -> COF Path I (COF-108 tetra-C node SBU). cores: {len(i_cores)}, core size: {len(center_core)}")
 
             layered_candidates = []
+            single_block_layer_vec = None
             center_list = list(center_comp)
             for comp in node_comps:
                 if comp is center_comp:
@@ -2889,22 +2945,29 @@ class COFFragmenter(BaseFragmenter):
                     continue
 
                 min_d = float("inf")
+                min_pair = None
                 for i in center_list:
                     ci = supercell[i].coords
                     for j in comp:
                         d = np.linalg.norm(ci - supercell[j].coords)
                         if d < min_d:
                             min_d = d
-                layered_candidates.append((min_d, comp))
+                            min_pair = (i, j)
+                layered_candidates.append((min_d, comp, min_pair))
 
             layered_component_count = 1
             if path_mode == "A" and layered_candidates:
                 layered_candidates.sort(key=lambda x: x[0])
-                best_d, best_comp = layered_candidates[0]
+                best_d, best_comp, best_pair = layered_candidates[0]
                 if 1.0 <= best_d <= 4.5:
+                    if best_pair is not None:
+                        single_block_layer_vec = np.array(supercell[best_pair[1]].coords) - np.array(supercell[best_pair[0]].coords)
                     layer_mode = getattr(self, "layer_mode", "auto")
-                    if layer_mode == "monomer":
-                        # Keep single-layer node set.
+                    is_single_block_topology = len(center_comp) <= 2
+                    if layer_mode == "monomer" or is_single_block_topology:
+                        # Keep single-layer node set. Single-building-block COFs
+                        # build dimers later by duplicating the finished fragment
+                        # with the closest-layer vector.
                         pass
                     else:
                         # Keep exactly one adjacent layer (dimer-like), not all
@@ -3114,6 +3177,260 @@ class COFFragmenter(BaseFragmenter):
                     final.add(v)
                     queue.append(v)
 
+        single_block_keep_heavy = None
+
+        # Helper export for single-building-block Path-A COFs (e.g., COF-JLU2):
+        # keep one ring-centered motif with C/N arms and two O groups.
+        try:
+            if path_mode == "A" and len(core_nodes) <= 2:
+                center_cart = np.array(unwrapped[sc_center_idx], dtype=float)
+                node_set = set(node_atoms)
+                non_node = [i for i in final if i not in node_set and sc_sym[i] != "H"]
+                # Single-block COFs may classify nearly all atoms as node; in that
+                # case, fall back to all heavy atoms in final for motif extraction.
+                if not non_node:
+                    non_node = [i for i in final if sc_sym[i] != "H"]
+                non_node_set = set(non_node)
+
+                # pick nearest non-node component touching core
+                seen_nn = set()
+                best_comp = set()
+                best_key = None
+                for seed in non_node:
+                    if seed in seen_nn:
+                        continue
+                    qn = deque([seed])
+                    seen_nn.add(seed)
+                    comp = {seed}
+                    touches = False
+                    while qn:
+                        u = qn.popleft()
+                        for v in graph[u]:
+                            if v in core_nodes:
+                                touches = True
+                            if v in non_node_set and v not in seen_nn:
+                                seen_nn.add(v)
+                                comp.add(v)
+                                qn.append(v)
+                    if not touches:
+                        continue
+                    c_count = sum(1 for i in comp if sc_sym[i] == "C")
+                    if c_count < 6:
+                        continue
+                    cctr = np.mean([np.array(unwrapped[i], dtype=float) for i in comp], axis=0)
+                    key = (-c_count, float(np.linalg.norm(cctr - center_cart)), -len(comp))
+                    if best_key is None or key < best_key:
+                        best_key = key
+                        best_comp = comp
+
+                if best_comp:
+                    carb = [i for i in best_comp if sc_sym[i] == "C"]
+                    carb.sort(key=lambda i: float(np.linalg.norm(np.array(unwrapped[i], dtype=float) - center_cart)))
+                    ring = set(carb[:6])
+
+                    # extend ring to connected carbons if needed
+                    qext = deque(list(ring))
+                    while qext and len(ring) < 6:
+                        u = qext.popleft()
+                        for v in graph[u]:
+                            if v in best_comp and sc_sym[v] == "C" and v not in ring:
+                                ring.add(v)
+                                qext.append(v)
+                                if len(ring) >= 6:
+                                    break
+
+                    # Keep a local motif around the aromatic ring seeds by graph
+                    # distance. This preserves nearby functional groups (N/O arms)
+                    # without extending into the full periodic chain.
+                    keep_heavy = set(ring)
+                    qloc = deque([(i, 0) for i in ring])
+                    seen_loc = set(ring)
+                    max_hops = 2
+                    allowed = {"C", "N", "O", "B", "Si", "P", "S", "F", "Cl", "Br", "I"}
+                    while qloc:
+                        u, depth = qloc.popleft()
+                        if depth >= max_hops:
+                            continue
+                        for v in graph[u]:
+                            if v in seen_loc or v not in best_comp:
+                                continue
+                            sv = sc_sym[v]
+                            if sv not in allowed:
+                                continue
+                            seen_loc.add(v)
+                            keep_heavy.add(v)
+                            qloc.append((v, depth + 1))
+
+                    # Ensure terminal hetero atoms on this local block are kept
+                    # even when component partitioning classifies them as node-side.
+                    extra_hetero = set()
+                    for u in list(keep_heavy):
+                        if sc_sym[u] != "C":
+                            continue
+                        for v in graph[u]:
+                            if sc_sym[v] in {"N", "O", "B"}:
+                                extra_hetero.add(v)
+                    keep_heavy |= extra_hetero
+
+                    # Prune duplicated N-N terminal pairs on side arms: keep the N
+                    # connected to the carbon framework, drop the distal extra N.
+                    drop_n = set()
+                    for nidx in list(keep_heavy):
+                        if sc_sym[nidx] != "N":
+                            continue
+                        nn_in_keep = [nb for nb in graph[nidx] if nb in keep_heavy and sc_sym[nb] == "N"]
+                        if not nn_in_keep:
+                            continue
+                        has_c_anchor = any(nb in keep_heavy and sc_sym[nb] == "C" for nb in graph[nidx])
+                        if not has_c_anchor:
+                            drop_n.add(nidx)
+                    keep_heavy -= drop_n
+                    if keep_heavy:
+                        single_block_keep_heavy = set(keep_heavy)
+
+                    keep = set(keep_heavy)
+                    # hydrogens bonded to retained heavy atoms
+                    for i in range(len(supercell)):
+                        if sc_sym[i] != "H":
+                            continue
+                        for nb in graph[i]:
+                            if nb in keep_heavy:
+                                keep.add(i)
+                                break
+
+                    blk = sorted(keep)
+                    if blk:
+                        blk_sp = [sc_sym[i] for i in blk]
+                        blk_co = [np.array(unwrapped[i], dtype=float) for i in blk]
+                        self._export_cof_component_library(blk_sp, blk_co, structure_stem, "node")
+        except Exception:
+            pass
+
+        # For single-building-block COFs, construct the actual fragment directly
+        # from extracted block(s), then proceed with standard edge capping.
+        if single_block_keep_heavy:
+            final = set(single_block_keep_heavy)
+
+            def _extract_neighbor_single_block(v0, base_final):
+                # Extract a full neighboring block from an attachment seed,
+                # mirroring the center ring + functional-group rule.
+                outside_heavy = {i for i in range(len(supercell)) if sc_sym[i] != "H" and i not in base_final}
+                comp2 = set()
+                qn2 = deque([v0])
+                seen2 = {v0}
+                while qn2:
+                    u = qn2.popleft()
+                    if u not in outside_heavy:
+                        continue
+                    comp2.add(u)
+                    for w in graph[u]:
+                        if w in seen2:
+                            continue
+                        if w in outside_heavy:
+                            seen2.add(w)
+                            qn2.append(w)
+
+                if not comp2:
+                    return set()
+
+                v0_pos = np.array(unwrapped[v0], dtype=float)
+                carb2 = [i for i in comp2 if sc_sym[i] == "C"]
+                carb2.sort(key=lambda i: float(np.linalg.norm(np.array(unwrapped[i], dtype=float) - v0_pos)))
+                ring2 = set(carb2[:6])
+
+                qext2 = deque(list(ring2))
+                while qext2 and len(ring2) < 6:
+                    u = qext2.popleft()
+                    for w in graph[u]:
+                        if w in comp2 and sc_sym[w] == "C" and w not in ring2:
+                            ring2.add(w)
+                            qext2.append(w)
+                            if len(ring2) >= 6:
+                                break
+
+                keep2 = set(ring2)
+                qloc2 = deque([(i, 0) for i in ring2])
+                seen_loc2 = set(ring2)
+                allowed2 = {"C", "N", "O", "B", "Si", "P", "S", "F", "Cl", "Br", "I"}
+                max_hops2 = 2
+                while qloc2:
+                    u, depth = qloc2.popleft()
+                    if depth >= max_hops2:
+                        continue
+                    for w in graph[u]:
+                        if w in seen_loc2 or w not in comp2:
+                            continue
+                        sw = sc_sym[w]
+                        if sw not in allowed2:
+                            continue
+                        seen_loc2.add(w)
+                        keep2.add(w)
+                        qloc2.append((w, depth + 1))
+
+                extra2 = set()
+                for u in list(keep2):
+                    if sc_sym[u] != "C":
+                        continue
+                    for w in graph[u]:
+                        if sc_sym[w] in {"N", "O", "B"} and w in comp2:
+                            extra2.add(w)
+                keep2 |= extra2
+
+                drop_n2 = set()
+                for nidx in list(keep2):
+                    if sc_sym[nidx] != "N":
+                        continue
+                    nn_in = [nb for nb in graph[nidx] if nb in keep2 and sc_sym[nb] == "N"]
+                    if not nn_in:
+                        continue
+                    has_c_anchor = any(nb in keep2 and sc_sym[nb] == "C" for nb in graph[nidx])
+                    if not has_c_anchor:
+                        drop_n2.add(nidx)
+                keep2 -= drop_n2
+                return keep2
+
+            # Min: center + 1 attached block. Normal: center + 3 attached blocks.
+            boundary_pairs = []
+            center_final = set(final)
+            for u in center_final:
+                for v in graph[u]:
+                    if sc_sym[v] == "H" or v in center_final:
+                        continue
+                    boundary_pairs.append((u, v))
+
+            if boundary_pairs:
+                center_cart = np.array(unwrapped[sc_center_idx], dtype=float)
+                nn_pairs = [(u, v) for (u, v) in boundary_pairs if sc_sym[u] == "N" and sc_sym[v] == "N"]
+                cand_pairs = nn_pairs if nn_pairs else boundary_pairs
+                cand_pairs = sorted(
+                    cand_pairs,
+                    key=lambda uv: float(np.linalg.norm(np.array(unwrapped[uv[1]], dtype=float) - center_cart)),
+                )
+                target_count = 1 if minimize else 3
+                selected_pairs = []
+                used_center_atoms = set()
+                used_neighbor_atoms = set()
+                for u, v in cand_pairs:
+                    if u in used_center_atoms or v in used_neighbor_atoms:
+                        continue
+                    selected_pairs.append((u, v))
+                    used_center_atoms.add(u)
+                    used_neighbor_atoms.add(v)
+                    if len(selected_pairs) >= target_count:
+                        break
+
+                for _, v0 in selected_pairs:
+                    final |= _extract_neighbor_single_block(v0, center_final)
+
+            broken = []
+            for u in list(final):
+                for v in graph[u]:
+                    if sc_sym[v] == "H":
+                        continue
+                    if v in final:
+                        continue
+                    broken.append((u, np.array(unwrapped[v]) - np.array(unwrapped[u])))
+
         ordered = sorted(final)
         local = {gi: li for li, gi in enumerate(ordered)}
         species = [sc_sym[i] for i in ordered]
@@ -3180,6 +3497,10 @@ class COFFragmenter(BaseFragmenter):
 
                 for _ in range(n_cap):
                     self.place_capping_h(li, dir_vec, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+
+        # COF fragments can leave terminal O atoms without a broken heavy-atom
+        # edge marker; cap those O sites with H before geometry refinement.
+        self._cap_open_oxygens(species, coords, capped_h_flags)
 
         if minimize and species and path_mode == "H":
             heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
@@ -3627,6 +3948,17 @@ class COFFragmenter(BaseFragmenter):
                 coords = [x for i, x in enumerate(coords) if i in keep]
                 capped_h_flags = [x for i, x in enumerate(capped_h_flags) if i in keep]
 
+        if single_block_keep_heavy and getattr(self, "layer_mode", "auto") == "dimer":
+            layer_vec = locals().get("single_block_layer_vec")
+            if layer_vec is not None:
+                base_species = list(species)
+                base_coords = [np.array(c, dtype=float) for c in coords]
+                base_flags = list(capped_h_flags)
+                species = base_species + base_species
+                coords = base_coords + [c + np.array(layer_vec, dtype=float) for c in base_coords]
+                capped_h_flags = base_flags + base_flags
+
+        self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
         print(f"Final size: {len(species)} atoms")
