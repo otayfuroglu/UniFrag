@@ -4001,10 +4001,696 @@ class COFFragmenter(BaseFragmenter):
         mol.to(filename=output_path, fmt="xyz")
         print(f"Saved: {output_path}")
         return FragmentResult(species=species, coords=coords)
+
+
+# ---------------------------------------------------------------------------
+# BioMolFragmenter — sliding-window fragmenter for single-chain PDB structures
+# ---------------------------------------------------------------------------
+
+class BioMolFragmenter(BaseFragmenter):
+    """Sliding-window fragmenter for biological macromolecules (PDB format).
+
+    Strategy
+    --------
+    - Parse residues from a PDB ATOM record chain.
+    - Slide a window of ``window_size`` residues along the sequence with
+      ``stride`` residue steps.
+    - For each window:
+        * Collect all heavy atoms from the selected residues.
+        * Add geometry-estimated H atoms for every heavy atom using standard
+          bond lengths and idealized angles (no external force-field needed).
+        * Cap the N-terminal cut with an ACE group (CH3-C(=O)-) attached to
+          the window's first backbone N.
+        * Cap the C-terminal cut with an NME group (-NH-CH3) attached to the
+          window's last backbone C.
+        * Write the window as an XYZ file.
+    - Write a summary CSV with residue range, sequence, and atom counts.
+
+    Parameters
+    ----------
+    window_size : int
+        Number of residues per fragment window (default 5).
+    stride : int
+        Step size in residues between consecutive windows (default 1).
+
+    H atoms are added **only** at the two severed peptide bonds (a single H cap
+    on the N-terminal cut, and a single H cap on the C-terminal cut). Interior
+    heavy atoms are taken directly from the PDB coordinates and are not modified.
+    """
+
+    # Standard covalent radii (Å) for bio elements
+    COV_RAD = {
+        "H": 0.31, "C": 0.76, "N": 0.71, "O": 0.66,
+        "S": 1.05, "P": 1.07, "Se": 1.20,
+    }
+
+    # Ideal bond lengths (Å) used when adding H atoms
+    _BL = {"C": 1.09, "N": 1.01, "O": 0.96, "S": 1.34}
+
+    # Expected heavy-atom valence for H-addition counting
+    _VALENCE = {"C": 4, "N": 3, "O": 2, "S": 2}
+
+    # Backbone atom names (PDB naming)
+    _BACKBONE = {"N", "CA", "C", "O", "OXT"}
+
+    # Three-letter → one-letter amino acid code
+    _AA1 = {
+        "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+        "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+        "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+        "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+        "HSD": "H", "HSE": "H", "HSP": "H", "HIE": "H", "HID": "H",
+        "HIP": "H", "MSE": "M", "SEC": "U",
+    }
+
+    def __init__(self, window_size=5, stride=1, use_pdbfixer=True, ph=7.0):
+        """Initialise the fragmenter.
+
+        Parameters
+        ----------
+        window_size : int
+            Number of residues per sliding window (default 5).
+        stride : int
+            Step size in residues between consecutive windows (default 1).
+        use_pdbfixer : bool
+            If True (default), run PDBFixer on the input PDB before parsing
+            to add missing heavy atoms and hydrogens.  Requires the
+            ``pdbfixer`` and ``openmm`` packages.
+        ph : float
+            pH used by PDBFixer when adding missing hydrogens (default 7.0).
+        """
+        super().__init__(radius=0.0)
+        if window_size < 1:
+            raise ValueError("window_size must be >= 1")
+        if stride < 1:
+            raise ValueError("stride must be >= 1")
+        self.window_size = int(window_size)
+        self.stride = int(stride)
+        self.use_pdbfixer = bool(use_pdbfixer)
+        self.ph = float(ph)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def extract(self, pdb_path, output_dir=None, chain=None):
+        """Fragment a PDB file into sliding-window XYZ files.
+
+        Parameters
+        ----------
+        pdb_path : str | Path
+            Path to the input PDB file.
+        output_dir : str | Path | None
+            Directory for output XYZ files and summary CSV.
+            Defaults to a ``bio_fragments/`` sub-folder next to the PDB.
+        chain : str | None
+            Chain ID to extract (e.g. ``"B"``).  If None, the first chain
+            with ATOM records is used.
+
+        Returns
+        -------
+        list[FragmentResult]
+            One entry per window.
+        """
+        pdb_path = Path(pdb_path)
+        if output_dir is None:
+            output_dir = pdb_path.parent / "bio_fragments"
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- optional PDBFixer pre-processing ----------------------------
+        parse_path = pdb_path
+        pdb_has_h = False          # True once PDBFixer has added H atoms
+        if self.use_pdbfixer:
+            fixed_pdb_str = self._fix_with_pdbfixer(pdb_path, self.ph)
+            if fixed_pdb_str is not None:
+                fixed_path = output_dir / (pdb_path.stem + "_fixed.pdb")
+                fixed_path.write_text(fixed_pdb_str)
+                parse_path = fixed_path
+                pdb_has_h = True
+                print(f"PDBFixer: fixed PDB written to {fixed_path.name}")
+            else:
+                print("PDBFixer unavailable or failed — using original PDB.")
+        # -----------------------------------------------------------------
+
+        residues = self._parse_pdb(parse_path, chain=chain, keep_h=pdb_has_h)
+        if not residues:
+            raise ValueError(f"No ATOM records found in {pdb_path} (chain={chain!r})")
+
+
+        stem = pdb_path.stem
+        results = []
+        csv_rows = [["window", "res_start", "res_end", "sequence",
+                     "n_residues", "n_heavy", "n_total", "xyz_file"]]
+
+        n_res = len(residues)
+        win_idx = 0
+        start = 0
+        seen_keys = set()
+        while start < n_res:
+            end = min(start + self.window_size, n_res)
+            window_res = residues[start:end]
+
+            species, coords, capped_h_flags = self._build_window(
+                window_res,
+                is_nterm=(start == 0),
+                is_cterm=(end == n_res),
+            )
+
+            res_ids   = [r["res_seq"] for r in window_res]
+            res_names = [r["res_name"] for r in window_res]
+            seq1 = "".join(self._AA1.get(rn, "X") for rn in res_names)
+            n_heavy = sum(1 for s in species if s != "H")
+
+            key = MOFFragmenter._species_coords_unique_key(species, coords, decimals=1)
+            if key in seen_keys:
+                print(
+                    f"Window {win_idx:3d}  res {res_ids[0]:3d}-{res_ids[-1]:<3d}"
+                    f"  seq={seq1}  (Skipped, duplicate)"
+                )
+                csv_rows.append([
+                    win_idx, res_ids[0], res_ids[-1], seq1,
+                    len(window_res), n_heavy, len(species), "duplicate",
+                ])
+            else:
+                seen_keys.add(key)
+                fname = f"{stem}_w{win_idx:03d}_r{res_ids[0]}-{res_ids[-1]}.xyz"
+                out_path = output_dir / fname
+
+                # write XYZ
+                mol = Molecule(species, coords)
+                mol.to(filename=str(out_path), fmt="xyz")
+
+                print(
+                    f"Window {win_idx:3d}  res {res_ids[0]:3d}-{res_ids[-1]:3d}"
+                    f"  seq={seq1}  heavy={n_heavy}  total={len(species)}"
+                    f"  → {out_path.name}"
+                )
+
+                csv_rows.append([
+                    win_idx, res_ids[0], res_ids[-1], seq1,
+                    len(window_res), n_heavy, len(species), fname,
+                ])
+                results.append(FragmentResult(species=species, coords=coords))
+
+            win_idx += 1
+            start += self.stride
+            if end == n_res:
+                break  # last window already processed
+
+        # write summary CSV
+        csv_path = output_dir / f"{stem}_windows.csv"
+        with open(csv_path, "w") as fh:
+            for row in csv_rows:
+                fh.write(",".join(str(v) for v in row) + "\n")
+        print(f"\nSummary CSV: {csv_path}")
+        print(f"Total windows: {len(results)}")
+        return results
+
+    # ------------------------------------------------------------------
+    # PDBFixer pre-processing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fix_with_pdbfixer(pdb_path, ph=7.0):
+        """Run PDBFixer on *pdb_path* and return the fixed PDB as a string.
+
+        Performs, in order:
+        1. Find and fill missing residues in loops/termini.
+        2. Find and add missing heavy atoms (side-chain and backbone).
+        3. Add missing hydrogen atoms at the requested pH.
+
+        Returns the fixed PDB text as a ``str``, or ``None`` if PDBFixer or
+        OpenMM is not installed or if fixing fails for any reason.
+        """
+        try:
+            import io
+            from pdbfixer import PDBFixer
+            from openmm.app import PDBFile
+        except ImportError:
+            return None
+
+        try:
+            fixer = PDBFixer(filename=str(pdb_path))
+
+            # Fill in missing residues (inserts template coords for gaps)
+            fixer.findMissingResidues()
+            # Find and add missing heavy atoms (e.g. incomplete side chains)
+            fixer.findMissingAtoms()
+            fixer.addMissingAtoms()
+            # Add H at the requested pH
+            fixer.addMissingHydrogens(pH=ph)
+
+            buf = io.StringIO()
+            PDBFile.writeFile(fixer.topology, fixer.positions, buf)
+            return buf.getvalue()
+
+        except Exception as exc:
+            print(f"PDBFixer warning: {exc}  — continuing without fixing.")
+            return None
+
+    # ------------------------------------------------------------------
+    # PDB parser
+    # ------------------------------------------------------------------
+
+    def _parse_pdb(self, pdb_path, chain=None, keep_h=False):
+        """Return ordered list of residue dicts from ATOM records.
+
+        Each dict has keys: ``res_seq``, ``res_name``, ``chain_id``,
+        ``atoms``  (list of ``{"name", "element", "coord"}``).
+
+        Parameters
+        ----------
+        keep_h : bool
+            If True, include H atoms found in the PDB (e.g. from a PDBFixer
+            fixed file).  Default False (skip all H).
+        """
+        raw = {}        # (chain_id, res_seq, ins_code) → residue dict
+        order = []      # insertion-ordered keys
+
+        with open(pdb_path) as fh:
+            for line in fh:
+                rec = line[:6].strip()
+                if rec not in ("ATOM", "HETATM"):
+                    continue
+                # PDB column layout (1-indexed in spec, 0-indexed here)
+                chain_id  = line[21]
+                res_name  = line[17:20].strip()
+                try:
+                    res_seq = int(line[22:26].strip())
+                except ValueError:
+                    continue
+                ins_code  = line[26]
+                atom_name = line[12:16].strip()
+                try:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                except ValueError:
+                    continue
+                # element column (cols 77-78, 0-indexed 76-77)
+                element = line[76:78].strip() if len(line) >= 78 else ""
+                if not element:
+                    # fall back: first character of atom name that is alphabetic
+                    element = "".join(c for c in atom_name if c.isalpha())[:1]
+                element = element.capitalize()
+
+                # Skip H atoms from original PDB (no H) unless the file was
+                # produced by PDBFixer, in which case keep_h=True is passed.
+                if not keep_h and (element == "H" or atom_name.startswith("H")):
+                    continue
+                # Skip water, metals, HETATM non-amino-acids
+                if rec == "HETATM" and res_name not in self._AA1:
+                    continue
+
+                key = (chain_id, res_seq, ins_code)
+                if key not in raw:
+                    raw[key] = {
+                        "chain_id": chain_id,
+                        "res_seq": res_seq,
+                        "res_name": res_name,
+                        "atoms": [],
+                    }
+                    order.append(key)
+                raw[key]["atoms"].append({
+                    "name": atom_name,
+                    "element": element,
+                    "coord": np.array([x, y, z], dtype=float),
+                })
+
+        # select chain
+        if chain is None:
+            # pick chain with the most residues
+            from collections import Counter
+            cnt = Counter(k[0] for k in order)
+            if not cnt:
+                return []
+            chain = cnt.most_common(1)[0][0]
+
+        residues = [raw[k] for k in order if k[0] == chain]
+        return residues
+
+    # ------------------------------------------------------------------
+    # Window assembly
+    # ------------------------------------------------------------------
+
+    def _build_window(self, window_res, is_nterm=False, is_cterm=False):
+        """Collect atoms, add H, add ACE/NME caps.
+
+        Returns (species, coords, capped_h_flags).
+        """
+        species: list = []
+        coords:  list = []
+        capped_h_flags: list = []
+
+        # 1) collect heavy atoms from each residue (coordinates taken directly
+        #    from the PDB — no H added to interior atoms)
+        for res in window_res:
+            for atom in res["atoms"]:
+                species.append(atom["element"])
+                coords.append(atom["coord"].copy())
+                capped_h_flags.append(False)
+
+        # 2) Simple H cap at N-terminus of the window (if not the real N-term).
+        #    Only the bond that was severed between the previous residue's C
+        #    and this residue's N is capped.
+        if not is_nterm:
+            self._add_n_term_h_cap(window_res[0], species, coords, capped_h_flags)
+
+        # 3) Simple H cap at C-terminus of the window (if not the real C-term).
+        #    Only the bond that was severed between this residue's C and the
+        #    next residue's N is capped.
+        if not is_cterm:
+            self._add_c_term_h_cap(window_res[-1], species, coords, capped_h_flags)
+
+        # 4) Neutralize the fragment (adjust side-chain protonation states)
+        species, coords, capped_h_flags = self._neutralize_window(species, coords, capped_h_flags)
+
+        # 5) geometry-clean only the cap H atoms (per project decision)
+        cap_h_indices = [i for i, f in enumerate(capped_h_flags) if f and species[i] == "H"]
+        self.optimize_capped_h_geometry_only(species, coords, cap_h_indices)
+
+        return species, coords, capped_h_flags
+
+    # ------------------------------------------------------------------
+    # Neutralization
+    # ------------------------------------------------------------------
+
+    def _neutralize_window(self, species, coords, capped_h_flags):
+        """Ensure the fragment is formally neutral by adding/removing H atoms.
+        
+        Uses a distance-based bond graph to detect common charged functional groups
+        at pH 7 (carboxylates, ammonium, guanidinium, imidazolium) and adjusts
+        their protonation state to neutral.
+        """
+        import numpy as np
+
+        n = len(species)
+        adj = {i: [] for i in range(n)}
+        for i in range(n):
+            ci = coords[i]
+            for j in range(i + 1, n):
+                d = float(np.linalg.norm(ci - coords[j]))
+                if self.is_valid_bond(species[i], species[j], d):
+                    adj[i].append(j)
+                    adj[j].append(i)
+
+        to_remove = set()
+        to_add_sp = []
+        to_add_co = []
+        to_add_flags = []
+
+        # 1. Carboxylates (-COO-) -> add H
+        for i in range(n):
+            if species[i] == "C":
+                o_nbs = [j for j in adj[i] if species[j] == "O"]
+                if len(o_nbs) == 2 and len(adj[o_nbs[0]]) == 1 and len(adj[o_nbs[1]]) == 1:
+                    o_idx = o_nbs[0]
+                    c_pos = coords[i]
+                    o_pos = coords[o_idx]
+                    vec = o_pos - c_pos
+                    if np.linalg.norm(vec) < 1e-6:
+                        continue
+                    vec /= np.linalg.norm(vec)
+                    e1, e2 = self._orthonormal_basis(vec)
+                    angle = np.deg2rad(109.5)
+                    dv = np.cos(angle) * vec + np.sin(angle) * e1
+                    dv /= np.linalg.norm(dv)
+                    h_pos = o_pos + 0.96 * dv
+                    
+                    to_add_sp.append("H")
+                    to_add_co.append(h_pos)
+                    to_add_flags.append(True) # Flag as cap to optimize its angle
+                    adj[o_idx].append(-1) # Prevent double processing
+
+        # 2. Ammonium (-NH3+) -> remove one H
+        for i in range(n):
+            if species[i] == "N" and len(adj[i]) == 4:
+                h_nbs = [j for j in adj[i] if species[j] == "H"]
+                if len(h_nbs) >= 1:
+                    to_remove.add(h_nbs[0])
+
+        # 3. Guanidinium (Arg) -> remove one H
+        for i in range(n):
+            if species[i] == "C":
+                n_nbs = [j for j in adj[i] if species[j] == "N"]
+                if len(n_nbs) == 3:
+                    n_h_nbs = []
+                    for n_idx in n_nbs:
+                        n_h_nbs.extend([j for j in adj[n_idx] if species[j] == "H"])
+                    if len(n_h_nbs) == 5:
+                        for n_idx in n_nbs:
+                            hs = [j for j in adj[n_idx] if species[j] == "H"]
+                            if len(hs) == 2:
+                                to_remove.add(hs[0])
+                                break
+
+        # 4. Imidazolium (Protonated His) -> remove one H
+        his_n = []
+        for i in range(n):
+            if species[i] == "N" and len(adj[i]) == 3:
+                c_nbs = [j for j in adj[i] if species[j] == "C"]
+                h_nbs = [j for j in adj[i] if species[j] == "H"]
+                if len(c_nbs) == 2 and len(h_nbs) == 1:
+                    his_n.append((i, h_nbs[0]))
+        
+        for idx1, (n1, h1) in enumerate(his_n):
+            for idx2 in range(idx1 + 1, len(his_n)):
+                n2, h2 = his_n[idx2]
+                common_c = set(adj[n1]).intersection(adj[n2])
+                if common_c and any(species[c] == "C" for c in common_c):
+                    to_remove.add(h2)
+
+        if to_remove:
+            keep = [i for i in range(n) if i not in to_remove]
+            species = [species[i] for i in keep]
+            coords = [coords[i] for i in keep]
+            capped_h_flags = [capped_h_flags[i] for i in keep]
+
+        if to_add_sp:
+            species.extend(to_add_sp)
+            coords.extend(to_add_co)
+            capped_h_flags.extend(to_add_flags)
+
+        return species, coords, capped_h_flags
+
+    # ------------------------------------------------------------------
+    # Hydrogen addition
+    # ------------------------------------------------------------------
+
+    def _build_bond_graph(self, species, coords):
+        """Return adjacency dict of heavy-atom indices."""
+        n = len(species)
+        adj = {i: [] for i in range(n)}
+        for i in range(n):
+            if species[i] == "H":
+                continue
+            ci = coords[i]
+            for j in range(i + 1, n):
+                if species[j] == "H":
+                    continue
+                d = float(np.linalg.norm(ci - coords[j]))
+                if self.is_valid_bond(species[i], species[j], d):
+                    adj[i].append(j)
+                    adj[j].append(i)
+        return adj
+
+    def _add_heavy_hydrogens(self, species, coords, capped_h_flags):
+        """Add geometry-estimated H atoms to all heavy atoms.
+
+        Uses valence deficit: H_count = expected_valence − heavy_bond_count.
+        H directions are placed using idealized tetrahedral/trigonal geometry.
+        """
+        # snapshot of heavy-atom-only list for adjacency
+        heavy_idx = [i for i, s in enumerate(species) if s != "H"]
+        # build adjacency among heavy atoms
+        adj: dict[int, list] = {i: [] for i in heavy_idx}
+        for a, i in enumerate(heavy_idx):
+            ci = coords[i]
+            for b in range(a + 1, len(heavy_idx)):
+                j = heavy_idx[b]
+                d = float(np.linalg.norm(ci - coords[j]))
+                if self.is_valid_bond(species[i], species[j], d):
+                    adj[i].append(j)
+                    adj[j].append(i)
+
+        new_sp:    list = []
+        new_co:    list = []
+        new_flags: list = []
+
+        for i in heavy_idx:
+            el = species[i]
+            expected = self._VALENCE.get(el, 0)
+            if expected == 0:
+                continue
+            nbs = adj[i]
+            n_h_needed = expected - len(nbs)
+            if n_h_needed <= 0:
+                continue
+
+            bl = self._BL.get(el, 1.09)
+            pi = coords[i]
+
+            if len(nbs) == 0:
+                # isolated atom — place H along x
+                dirs = [np.array([1.0, 0.0, 0.0])]
+            elif len(nbs) == 1:
+                # one heavy neighbor: use tetrahedral/trigonal directions
+                pj = coords[nbs[0]]
+                u = pi - pj
+                u /= np.linalg.norm(u)
+                e1, e2 = self._orthonormal_basis(u)
+                if el == "C" and expected == 3:
+                    # sp2 — one H in plane, bisecting the 120° gap
+                    dirs = [u]
+                elif n_h_needed == 1:
+                    # sp3-like: tetrahedral off-axis
+                    angle = np.deg2rad(109.5)
+                    dirs = [np.cos(angle) * u + np.sin(angle) * e1]
+                else:
+                    # sp3 with multiple H: distribute around axis
+                    angle = np.deg2rad(109.5)
+                    phi_step = 2 * np.pi / n_h_needed
+                    dirs = []
+                    for k in range(n_h_needed):
+                        phi = k * phi_step
+                        d = (np.cos(angle) * u
+                             + np.sin(angle) * (np.cos(phi) * e1 + np.sin(phi) * e2))
+                        dirs.append(d / np.linalg.norm(d))
+            elif len(nbs) == 2:
+                # two heavy neighbors: bisector direction (sp3) or anti-bisector (sp2)
+                u1 = coords[nbs[0]] - pi
+                u2 = coords[nbs[1]] - pi
+                u1 /= np.linalg.norm(u1); u2 /= np.linalg.norm(u2)
+                bisect = -(u1 + u2)
+                nb = np.linalg.norm(bisect)
+                if nb < 1e-8:
+                    bisect, _ = self._orthonormal_basis(u1)
+                else:
+                    bisect /= nb
+                if n_h_needed == 1:
+                    dirs = [bisect]
+                else:
+                    e1, _ = self._orthonormal_basis(bisect)
+                    ang = np.deg2rad(109.5)
+                    phi_step = 2 * np.pi / n_h_needed
+                    dirs = []
+                    for k in range(n_h_needed):
+                        phi = k * phi_step
+                        d = np.cos(ang) * bisect + np.sin(ang) * np.cos(phi) * e1
+                        d /= np.linalg.norm(d)
+                        dirs.append(d)
+            else:
+                # 3+ neighbors: use sum-of-bonds direction
+                nb_sum = np.zeros(3)
+                for j in nbs:
+                    v = coords[j] - pi
+                    nb_sum += v / np.linalg.norm(v)
+                anti = -nb_sum
+                na = np.linalg.norm(anti)
+                if na < 1e-8:
+                    anti = np.array([0.0, 0.0, 1.0])
+                else:
+                    anti /= na
+                dirs = [anti]
+
+            for k, dv in enumerate(dirs[:n_h_needed]):
+                dv = np.array(dv, dtype=float)
+                dv /= np.linalg.norm(dv)
+                hp = pi + bl * dv
+                new_sp.append("H")
+                new_co.append(hp)
+                new_flags.append(False)   # native H, not a cap
+
+        species.extend(new_sp)
+        coords.extend(new_co)
+        capped_h_flags.extend(new_flags)
+
+    # ------------------------------------------------------------------
+    # Simple H capping
+    # ------------------------------------------------------------------
+
+    def _get_backbone(self, res, *names):
+        """Return coordinates of backbone atoms by PDB name."""
+        result = {}
+        for atom in res["atoms"]:
+            if atom["name"] in names:
+                result[atom["name"]] = atom["coord"]
+        return result
+
+    def _add_n_term_h_cap(self, first_res, species, coords, capped_h_flags):
+        """Add a simple H cap to the N-terminal cut of the window.
+        
+        The H is placed along the CA -> N bond extended backwards.
+        """
+        bb = self._get_backbone(first_res, "N", "CA")
+        if "N" not in bb or "CA" not in bb:
+            return
+
+        n_pos  = bb["N"]
+        ca_pos = bb["CA"]
+
+        # Direction from CA → N
+        bond_vec = n_pos - ca_pos
+        bond_len = np.linalg.norm(bond_vec)
+        if bond_len < 1e-6:
+            return
+        u = bond_vec / bond_len
+
+        # H placed 1.01 Å from N along the extension
+        h_pos = n_pos + u * 1.01
+
+        species.append("H")
+        coords.append(h_pos)
+        capped_h_flags.append(True)
+
+    def _add_c_term_h_cap(self, last_res, species, coords, capped_h_flags):
+        """Add a simple H cap to the C-terminal cut of the window.
+        
+        The H is placed along the CA -> C bond extended outward.
+        """
+        bb = self._get_backbone(last_res, "C", "CA")
+        if "C" not in bb or "CA" not in bb:
+            return
+
+        c_pos  = bb["C"]
+        ca_pos = bb["CA"]
+
+        # Direction from CA → C
+        bond_vec = c_pos - ca_pos
+        bond_len = np.linalg.norm(bond_vec)
+        if bond_len < 1e-6:
+            return
+        u = bond_vec / bond_len
+
+        # H placed 1.09 Å from C along extension (typical C-H bond length)
+        h_pos = c_pos + u * 1.09
+
+        species.append("H")
+        coords.append(h_pos)
+        capped_h_flags.append(True)
+
+    # ------------------------------------------------------------------
+    # Bond validity (organic molecules only, no metals)
+    # ------------------------------------------------------------------
+
+    def is_valid_bond(self, s1, s2, dist):
+        r1 = self.COV_RAD.get(s1, 0.77)
+        r2 = self.COV_RAD.get(s2, 0.77)
+        if s1 == "H" and s2 == "H":
+            return dist < 0.9
+        cutoff = 1.3 * (r1 + r2)
+        cutoff = min(2.0, max(0.9, cutoff))
+        return dist <= cutoff
+
+
 def main():
-    parser = argparse.ArgumentParser(description="OOP fragmenter core for MOF/COF")
-    parser.add_argument("cif_path")
-    parser.add_argument("--kind", choices=["mof", "cof"], default="mof")
+    parser = argparse.ArgumentParser(
+        description="OOP fragmenter core for MOF / COF / Bio-macromolecule"
+    )
+    parser.add_argument("input_path", help="CIF (MOF/COF) or PDB (bio) input file")
+    parser.add_argument("--kind", choices=["mof", "cof", "bio"], default="mof")
+    # MOF / COF shared
     parser.add_argument("--radius", type=float, default=6.0)
     parser.add_argument("--center", type=int, default=-1)
     parser.add_argument("--nmetals", type=int, default=3)
@@ -4016,14 +4702,49 @@ def main():
         default="auto",
         help="COF layer output mode for layered COFs.",
     )
+    # Bio-specific
+    parser.add_argument(
+        "--window-size", type=int, default=5,
+        help="Number of residues per sliding window (bio mode, default 5).",
+    )
+    parser.add_argument(
+        "--stride", type=int, default=1,
+        help="Residue step between consecutive windows (bio mode, default 1).",
+    )
+    parser.add_argument(
+        "--output-dir", default=None,
+        help="Output directory for bio-fragment XYZ files and summary CSV.",
+    )
+    parser.add_argument(
+        "--chain", default=None,
+        help="PDB chain ID to extract (bio mode). Default: largest chain.",
+    )
+    parser.add_argument(
+        "--ph", type=float, default=7.0,
+        help="pH for PDBFixer hydrogen placement (bio mode, default 7.0).",
+    )
+    parser.add_argument(
+        "--no-pdbfixer", dest="no_pdbfixer", action="store_true",
+        help="Skip PDBFixer pre-processing and use the PDB as-is (bio mode).",
+    )
     args = parser.parse_args()
 
     if args.kind == "mof":
         frag = MOFFragmenter(radius=args.radius)
-        frag.extract(args.cif_path, center_idx=args.center, nmetals=args.nmetals, output_path=args.output, minimize=args.minimize)
-    else:
+        frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
+                     output_path=args.output, minimize=args.minimize)
+    elif args.kind == "cof":
         frag = COFFragmenter(radius=args.radius, layer_mode=args.cof_layer)
-        frag.extract(args.cif_path, center_idx=args.center, output_path=args.output, minimize=args.minimize)
+        frag.extract(args.input_path, center_idx=args.center,
+                     output_path=args.output, minimize=args.minimize)
+    else:  # bio
+        frag = BioMolFragmenter(
+            window_size=args.window_size,
+            stride=args.stride,
+            use_pdbfixer=not args.no_pdbfixer,
+            ph=args.ph,
+        )
+        frag.extract(args.input_path, output_dir=args.output_dir, chain=args.chain)
 
 
 if __name__ == "__main__":

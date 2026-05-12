@@ -2,6 +2,109 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-12 - BioMolFragmenter: chemical deduplication of sliding windows
+- Changed files:
+  - `fragmentation_oop.py` — added chemical duplicate checking in `BioMolFragmenter.extract`
+  - `project-decisions.md`
+- Summary:
+  - The user requested that we check for duplicated fragments during bio-molecule extraction.
+  - Implemented the same chemical fingerprint strategy used in MOFs/COFs (`composition` + `internal pair distances rounded to 0.1 Å`).
+  - If a sliding window produces a geometry that is chemically identical to a previously extracted window in the same run (e.g. from highly repetitive sequences or overlapping identical structural motifs), the duplicate `.xyz` file is **not written**.
+  - The duplicate window is still logged to the console as `(Skipped, duplicate)` and recorded in the summary `.csv` file with the filename column set to `duplicate` to maintain the window index tracking.
+
+
+## 2026-05-12 - BioMolFragmenter: strict structural charge neutralization
+- Changed files:
+  - `fragmentation_oop.py` — added `_neutralize_window` method, called in `_build_window` before H-cap optimization
+  - `project-decisions.md`
+- Summary:
+  - The user requested that the final fragment must have a total formal charge of exactly zero, to ensure seamless QM calculations. PDBFixer assigns native pH 7 charges (e.g., Asp/Glu -1, Lys/Arg +1, N-term +1), leaving the window with a non-zero net charge depending on its sequence.
+  - Implemented `_neutralize_window` which uses a robust distance-based bond graph to structurally detect charged functional groups regardless of sequence naming:
+    - Carboxylates (`-COO-`): adds 1 H to make it neutral `COOH`.
+    - Primary Amines/Ammonium (`-NH3+`): removes 1 H to make it neutral `NH2`.
+    - Guanidinium (Arg sidechain): removes 1 H to make it neutral.
+    - Imidazolium (protonated His): removes 1 H to make it neutral.
+  - Any hydrogen added for neutralization (e.g. on carboxylates) is automatically flagged so `optimize_capped_h_geometry_only` rotates it into the ideal chemical geometry, fulfilling the user's requirement to only optimize modified H atoms and never the full molecule.
+- Validation:
+  - Window 0 (`ASAIV` with N-term NH3+) drops from 69 to 68 atoms (1 H removed).
+  - Window 1 (`SAIVD` with C-term Asp COO-) rises from 70 to 71 atoms (1 H added).
+
+
+## 2026-05-12 - BioMolFragmenter: simplify capping to single H atoms
+- Changed files:
+  - `fragmentation_oop.py` — removed `_add_ace_cap` and `_add_nme_cap`; added `_add_n_term_h_cap` and `_add_c_term_h_cap`
+  - `project-decisions.md`
+- Summary:
+  - The user requested that we do not grow or add heavy atoms (like ACE and NME caps) to the bio molecule fragments, but instead use simple hydrogen capping for the severed bonds.
+  - The N-terminal cut (where the prev CA->N bond is broken) is now capped by placing a single H atom 1.01 Å along the extended CA->N bond vector.
+  - The C-terminal cut (where the C->next N bond is broken) is now capped by placing a single H atom 1.09 Å along the extended CA->C bond vector.
+- Decisions made:
+  - Bio fragments are strictly sub-graphs of the original molecule plus single hydrogen caps at the breakpoints. No heavy atoms are added.
+
+
+## 2026-05-12 - BioMolFragmenter: PDBFixer integration for missing atoms/H
+- Changed files:
+  - `fragmentation_oop.py` — added `_fix_with_pdbfixer()`, `use_pdbfixer`/`ph` params, `keep_h` flag in `_parse_pdb`, `pdb_has_h` tracking in `extract()`; added `--ph`/`--no-pdbfixer` to `main()`
+  - `run_bio_family.sh` — added `PH` and `EXTRA_FLAG` args, threaded `--ph`/`--no-pdbfixer` into `run_one`
+  - `project-agent-log.md`
+- Summary:
+  - Installed `pdbfixer` via `conda-forge`.
+  - Added `_fix_with_pdbfixer(pdb_path, ph)` static method: calls `PDBFixer.findMissingResidues()`, `findMissingAtoms()`, `addMissingAtoms()`, `addMissingHydrogens(pH)`, writes the result to `<stem>_fixed.pdb` in the output dir, returns None gracefully if pdbfixer/openmm not installed.
+  - `extract()` now runs pdbfixer by default (`use_pdbfixer=True`) before `_parse_pdb`, sets `pdb_has_h=True` if fixing succeeded.
+  - `_parse_pdb` gained a `keep_h` parameter: when `True` (fixed PDB case), H atoms from the file are retained; when `False` (raw PDB with no H), H atoms are skipped as before.
+  - CLI: `--ph <float>` (default 7.0), `--no-pdbfixer` (skip pdbfixer pre-processing).
+  - Shell runner: 4th positional arg is pH (default 7.0); 5th positional arg is passed through as an extra flag (e.g. `--no-pdbfixer`).
+- Validation:
+  - `python -m py_compile fragmentation_oop.py` passes.
+  - `bash -n run_bio_family.sh` passes.
+  - `./run_bio_family.sh test_on_bio_mol 5 1 7.0` passes: PDBFixer adds 431 H atoms to the 427-heavy-atom structure; window 0 (ASAIV, 33 heavy) grows from 37 → 74 total atoms; window 1 (SAIVD, 39 heavy) → 80 total atoms.
+- Decisions made:
+  - pdbfixer is optional at runtime: if not installed, `_fix_with_pdbfixer` returns None and extraction falls back to the raw PDB (no H). This preserves backward compatibility.
+  - H atoms from the fixed PDB are treated as native (not cap-flagged), so `optimize_capped_h_geometry_only` does not move them.
+- Follow-up risks:
+  - PDBFixer adds H based on OpenMM residue templates; unusual modified residues (e.g. phosphoSer, pyroglutamate) may be skipped or templated incorrectly. Visual QA recommended.
+  - The fixed PDB is written to the output directory as `<stem>_fixed.pdb`; if the same run is rerun, pdbfixer still re-runs and overwrites it (no caching).
+
+## 2026-05-12 - BioMolFragmenter: fix H-capping to cut bonds only
+- Changed files:
+  - `fragmentation_oop.py` — removed `_add_heavy_hydrogens` call from `_build_window`; removed `add_h` parameter from `__init__`; updated class docstring
+  - `project-agent-log.md`
+- Summary:
+  - The initial implementation incorrectly added geometry-estimated H to every heavy atom in the window based on valence deficit. The correct behaviour is: take PDB heavy atom coordinates as-is, and only cap the two severed peptide bonds (ACE on N-terminal cut, NME on C-terminal cut).
+  - Removed `_add_heavy_hydrogens` call from `_build_window`. The `_add_heavy_hydrogens` method remains defined but is now unused (kept for potential future reuse).
+  - Removed `add_h` parameter from `__init__` and updated the class docstring to clearly state the cut-bond-only capping rule.
+- Validation:
+  - `python -m py_compile fragmentation_oop.py` passes.
+  - `./run_bio_family.sh test_on_bio_mol 5 1` passes: 47 windows, atoms 37-61 (avg 54.8). Before fix: atoms 84-134 (avg 117.1).
+  - Window 0 (`ASAIV`): heavy=33, total=37 → exactly 4 H added (from ACE methyl 3×H + nothing on C-term because window 0 is real N-term; one NME group = 1×N-H + 3×CH₃-H = 4 H). ✓
+- Follow-up risks:
+  - `_add_heavy_hydrogens` is now dead code; can be removed later if confirmed unneeded.
+
+## 2026-05-12 - BioMolFragmenter: sliding-window PDB fragmentation
+- Changed files:
+  - `fragmentation_oop.py` — added `BioMolFragmenter` class (~340 lines) and extended `main()` CLI
+  - `project-agent-log.md`
+- Summary:
+  - Added `BioMolFragmenter(BaseFragmenter)` for single-chain biological macromolecules (PDB input).
+  - Sliding-window strategy: window of N residues, stride S residues, scans the full chain.
+  - PDB parser reads ATOM records column-exactly; selects chain automatically (largest by residue count) or explicitly via `--chain`.
+  - Geometry-estimated H addition: valence-deficit counting per heavy atom, idealized tetrahedral/trigonal directions using `_orthonormal_basis` from `BaseFragmenter`.
+  - ACE cap (CH₃-C=O-) on N-terminal cut; NME cap (-NH-CH₃) on C-terminal cut; both flagged as capped H for `optimize_capped_h_geometry_only`.
+  - Writes one XYZ per window + summary CSV (window index, res range, 1-letter sequence, heavy count, total count, filename).
+  - CLI extended: `--kind bio`, `--window-size`, `--stride`, `--output-dir`, `--chain`; positional arg renamed from `cif_path` to `input_path`.
+- Validation:
+  - `python -m py_compile fragmentation_oop.py` passes.
+  - `python fragmentation_oop.py test_on_bio_mol/4c7n_clean_sigle.pdb --kind bio --window-size 5 --stride 1` produces 47 windows for a 51-residue helix; heavy atom counts range 33–54, total 84–134 atoms per window; CSV written correctly.
+  - UFF typing warnings from RDKit for `C_5`/`N_5`/`O_5` (peptide atoms without UFF params) are expected and non-fatal — same behavior seen in ZnPc COF runs; `refine_h_geometry_with_rdkit` exits gracefully when UFF params are missing.
+- Decisions made:
+  - `BioMolFragmenter` is sequence-linear (not radius/graph-based); `radius` parameter inherited from `BaseFragmenter` is set to 0.0 and unused.
+  - H addition uses pure geometry (no force field) so no external dependency is added.
+  - Cap atoms (ACE/NME heavy + H) are all flagged `capped_h_flags=True` so `optimize_capped_h_geometry_only` can refine only them.
+- Follow-up risks:
+  - RDKit UFF cap-H cleanup silently skips peptide fragments (missing C_5 params); ACE/NME cap H positions rely entirely on the geometric placement. Visual inspection recommended.
+  - H-count from valence deficit does not account for protonation state (e.g., ARG, LYS, HIS). For QM input, explicit protonation with a tool like OpenBabel/pdb2pqr may be preferred as a pre-processing step.
+  - The window stride=1 produces highly overlapping fragments (47 for a 51-residue helix). A non-overlapping scan uses `--stride` equal to `--window-size`.
+
 ## 2026-05-11 - Global chemical duplicate pruning for COF helper libraries
 - Changed files:
   - `fragmentation_oop.py`
