@@ -218,7 +218,7 @@ class BaseFragmenter:
                 if self.is_valid_bond("H", sp, d) and d < best:
                     best = d
                     parent = i
-            if parent is None or species[parent] != "C":
+            if parent is None or species[parent] not in ("C", "N"):
                 continue
 
             nbs = heavy_neighbors(parent)
@@ -242,23 +242,39 @@ class BaseFragmenter:
                 continue
             dvec = dvec / nd
 
-            bl = self.cap_bond_length("C")
-            new_h = p + bl * dvec
+            # --- GLOBAL AROMATIC PLANARITY ENFORCEMENT ---
+            # To ensure the H is perfectly planar with the entire ring (e.g. phenyl),
+            # we find all heavy atoms within 3 bonds to fit a best plane.
+            from collections import deque
+            q = deque([(parent, 0)])
+            seen_heavy = {parent}
+            ring_atoms = []
+            while q:
+                curr, depth = q.popleft()
+                ring_atoms.append(curr)
+                if depth < 3:
+                    for nb in heavy_neighbors(curr):
+                        if nb not in seen_heavy:
+                            seen_heavy.add(nb)
+                            q.append((nb, depth + 1))
+            
+            if len(ring_atoms) >= 5:
+                # Fit plane via SVD
+                pts = np.array([coords[idx] for idx in ring_atoms], dtype=float)
+                centroid = np.mean(pts, axis=0)
+                pts_centered = pts - centroid
+                _, _, vh = np.linalg.svd(pts_centered, full_matrices=False)
+                normal = vh[-1, :] # Normal vector (smallest singular value)
+                
+                # Project dvec perfectly onto the average ring plane
+                dvec = dvec - np.dot(dvec, normal) * normal
+                nd = np.linalg.norm(dvec)
+                if nd > 1e-8:
+                    dvec = dvec / nd
+            # ---------------------------------------------
 
-            # quick collision guard with other atoms
-            clash = False
-            for j, sp in enumerate(species):
-                if j in (hidx, parent):
-                    continue
-                dj = np.linalg.norm(new_h - np.array(coords[j], dtype=float))
-                if sp == "H" and dj < 1.4:
-                    clash = True
-                    break
-                if sp != "H" and dj < 0.9:
-                    clash = True
-                    break
-            if not clash:
-                coords[hidx] = new_h
+            bl = self.cap_bond_length(species[parent])
+            coords[hidx] = p + bl * dvec
 
 
     def enforce_capped_oh_geometry(self, species, coords, capped_h_indices=None):
@@ -354,6 +370,54 @@ class BaseFragmenter:
 
             coords[hidx] = candidate
 
+    def enforce_single_molecule(self, species, coords, flags=None):
+        """Keeps only the largest connected component in the molecule graph,
+        removing any disjoint/floating solvent or sub-fragments.
+        """
+        import numpy as np
+        from collections import deque
+        n = len(species)
+        if n <= 1:
+            return (species, coords, flags) if flags is not None else (species, coords)
+            
+        adj = {i: [] for i in range(n)}
+        for i in range(n):
+            ci = np.array(coords[i], dtype=float)
+            for j in range(i + 1, n):
+                d = float(np.linalg.norm(ci - np.array(coords[j], dtype=float)))
+                if self.is_valid_bond(species[i], species[j], d):
+                    adj[i].append(j)
+                    adj[j].append(i)
+                    
+        visited = set()
+        components = []
+        for i in range(n):
+            if i not in visited:
+                comp = []
+                q = deque([i])
+                visited.add(i)
+                while q:
+                    curr = q.popleft()
+                    comp.append(curr)
+                    for nb in adj[curr]:
+                        if nb not in visited:
+                            visited.add(nb)
+                            q.append(nb)
+                components.append(comp)
+                
+        if len(components) <= 1:
+            return (species, coords, flags) if flags is not None else (species, coords)
+            
+        largest = set(max(components, key=len))
+        
+        new_sp = [s for i, s in enumerate(species) if i in largest]
+        new_co = [c for i, c in enumerate(coords) if i in largest]
+        
+        if flags is not None:
+            new_fl = [f for i, f in enumerate(flags) if i in largest]
+            return new_sp, new_co, new_fl
+        return new_sp, new_co
+
     def optimize_capped_h_geometry_only(self, species, coords, capped_h_indices=None):
         if not capped_h_indices:
             return
@@ -426,6 +490,8 @@ class MOFFragmenter(BaseFragmenter):
         if not species:
             return None
         return cls._species_coords_unique_key(species, coords, decimals=decimals)
+
+
 
     def _append_merged_atoms(self, species, coords, add_species, add_coords, tol=0.08):
         for sp, coord in zip(add_species, add_coords):
@@ -1302,7 +1368,11 @@ class MOFFragmenter(BaseFragmenter):
                 zif_mode,
             )
 
-        self.optimize_capped_h_geometry_only(final_species, final_coords, getattr(self, "_last_capped_h_indices", None))
+        bool_flags = [i in getattr(self, "_last_capped_h_indices", []) for i in range(len(final_species))]
+        final_species, final_coords, bool_flags = self.enforce_single_molecule(final_species, final_coords, bool_flags)
+        self._last_capped_h_indices = [i for i, f in enumerate(bool_flags) if f]
+
+        self.optimize_capped_h_geometry_only(final_species, final_coords, self._last_capped_h_indices)
         print(f"Final size: {len(final_species)} atoms.")
         mol = Molecule(final_species, final_coords)
         mol.to(filename=output_path, fmt="xyz")
@@ -4366,7 +4436,10 @@ class BioMolFragmenter(BaseFragmenter):
         # 4) Neutralize the fragment (adjust side-chain protonation states)
         species, coords, capped_h_flags = self._neutralize_window(species, coords, capped_h_flags)
 
-        # 5) geometry-clean only the cap H atoms (per project decision)
+        # 5) Ensure only a single connected component remains (remove floating molecules)
+        species, coords, capped_h_flags = self.enforce_single_molecule(species, coords, capped_h_flags)
+
+        # 6) geometry-clean only the cap H atoms (per project decision)
         cap_h_indices = [i for i, f in enumerate(capped_h_flags) if f and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, cap_h_indices)
 

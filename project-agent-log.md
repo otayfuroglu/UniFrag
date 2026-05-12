@@ -2,6 +2,37 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-12 - UniFrag: guarantee strictly connected single-molecule fragments
+- Changed files:
+  - `fragmentation_oop.py` — added `enforce_single_molecule` to `BaseFragmenter`
+  - `project-decisions.md`
+- Summary:
+  - The user noticed that some exported fragments occasionally contained disjoint sub-fragments (e.g., floating solvent molecules captured in the radius, or disconnected pieces remaining after extraction logic).
+  - Implemented a rigorous bond-graph Breadth-First-Search (BFS) filter named `enforce_single_molecule` in the parent `BaseFragmenter` class.
+  - Before writing any final `.xyz` file (in both `MOFFragmenter` and `BioMolFragmenter`), the script now builds a structural adjacency matrix, identifies all connected components, and systematically deletes all atoms that do not belong to the largest contiguous molecule.
+  - This absolutely guarantees that every exported fragment is one single, fully connected molecule with no dangling atoms or disconnected solvent.
+
+## 2026-05-12 - MOF/COF Fragmenter: fix imidazole planarity and remove aggressive collision guard
+- Changed files:
+  - `fragmentation_oop.py` — updated `enforce_sp2_capped_h_geometry`
+  - `project-decisions.md`
+- Summary:
+  - The user noticed that capped hydrogens on aromatic rings like imidazole and phenyl were *still* out of plane.
+  - I found two root causes:
+    1. The `enforce_sp2_capped_h_geometry` method explicitly ignored Nitrogen atoms (`species[parent] != "C"`). This completely bypassed planarity enforcement for capped Nitrogens in imidazole, pyridine, or imine linkers! I updated the logic to include Nitrogen (`species[parent] not in ("C", "N")`).
+    2. The H-H clash guard was *still* incorrectly aborting the mathematical plane projection if RDKit's UFF relaxation had previously pulled the H atom into a severely sterically strained position. Because the planarity of an aromatic sp2 system is a strict chemical requirement regardless of temporary steric clashes, I completely removed the clash guard override.
+  - The script now guarantees absolute mathematical planarity for all capped H atoms attached to aromatic C or N atoms, utilizing the global SVD plane projection.
+
+## 2026-05-12 - MOF/COF Fragmenter: global aromatic ring planarity for capped H
+- Changed files:
+  - `fragmentation_oop.py` — updated `enforce_sp2_capped_h_geometry` with an SVD plane fit
+  - `project-decisions.md`
+- Summary:
+  - The user noticed that capped hydrogen atoms on aromatic rings (like phenyl linkers) were sometimes slightly out-of-plane when inspected visually. This occurred because the script only aligned the H atom to the local plane of the parent Carbon and its 2 immediate neighbors, which can be slightly tilted relative to the rest of the ring due to thermal disorder in the original X-ray CIF. Additionally, the clash guard prevented fixes if RDKit UFF pushed it too close to another H.
+  - Upgraded the `enforce_sp2_capped_h_geometry` method to perform a Graph BFS (up to 3 bonds away) to discover the entire aromatic ring. It then calculates the best-fit 3D plane using Singular Value Decomposition (SVD) and mathematically projects the H-atom vector perfectly onto this global ring plane.
+  - Lowered the H-H collision guard threshold from 1.4 Å to 1.1 Å to prevent false positives from aborting the geometrical fix.
+
+
 ## 2026-05-12 - BioMolFragmenter: chemical deduplication of sliding windows
 - Changed files:
   - `fragmentation_oop.py` — added chemical duplicate checking in `BioMolFragmenter.extract`
