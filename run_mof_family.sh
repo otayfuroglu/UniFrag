@@ -5,9 +5,9 @@
 
 set -u
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+WORKDIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${PYTHON:-/Users/omert/miniconda3/bin/python}"
-SCRIPT="$ROOT/fragmentation_oop.py"
+SCRIPT="/Users/omert/Desktop/UniFrag_main/UniFrag/fragmentation_oop.py"
 FOLDER_ARG="${1:-}"
 RADIUS="${2:-4.0}"
 
@@ -26,7 +26,7 @@ fi
 if [[ "$FOLDER_ARG" = /* ]]; then
     FAMILY_DIR="$FOLDER_ARG"
 else
-    FAMILY_DIR="$ROOT/$FOLDER_ARG"
+    FAMILY_DIR="$WORKDIR/$FOLDER_ARG"
 fi
 
 if [ ! -f "$PYTHON" ]; then
