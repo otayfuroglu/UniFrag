@@ -564,92 +564,79 @@ class MOFFragmenter(BaseFragmenter):
         if not bridge_atoms:
             return [], [], []
 
-        carbon = {i for i in heavy if linker_species[i] == "C"}
-        cadj = {i: [j for j in hadj[i] if j in carbon] for i in carbon}
+        # 1. Find the 2-core (all rings and their interconnects)
+        core_atoms = set(heavy)
+        changed = True
+        while changed:
+            changed = False
+            to_remove = set()
+            for u in core_atoms:
+                degree = sum(1 for v in hadj.get(u, []) if v in core_atoms)
+                if degree <= 1:
+                    to_remove.add(u)
+            if to_remove:
+                core_atoms -= to_remove
+                changed = True
 
-        def find_six_cycle(seeds):
-            if len(carbon) < 6:
-                return set()
+        keep_heavy = set(bridge_atoms)
 
-            def dfs(start, cur, path, used):
-                if len(path) == 6:
-                    if start in cadj[cur]:
-                        return list(path)
-                    return None
-                for nb in cadj[cur]:
-                    if nb in used:
-                        continue
-                    used.add(nb)
-                    path.append(nb)
-                    got = dfs(start, nb, path, used)
-                    if got is not None:
-                        return got
-                    path.pop()
-                    used.remove(nb)
-                return None
-
-            ordered = []
-            seen = set()
-            for seed in seeds:
-                q = deque([seed])
-                local_seen = {seed}
-                while q:
-                    u = q.popleft()
-                    if u in carbon and u not in seen:
-                        ordered.append(u)
-                        seen.add(u)
-                    for v in hadj.get(u, []):
-                        if v not in local_seen:
-                            local_seen.add(v)
-                            q.append(v)
-            for st in ordered or list(carbon):
-                got = dfs(st, st, [st], {st})
-                if got is not None:
-                    return set(got)
-            return set()
-
-        ring = find_six_cycle(bridge_atoms)
-        if not ring:
-            q = deque(bridge_atoms)
+        # 2. Find shortest path from bridge_atoms to the nearest 2-core component
+        if core_atoms:
+            q = deque([(ba, [ba]) for ba in bridge_atoms])
             seen = set(bridge_atoms)
-            carbons = []
-            while q and len(carbons) < 6:
-                u = q.popleft()
-                if u in carbon:
-                    carbons.append(u)
-                for v in hadj.get(u, []):
-                    if v not in seen:
-                        seen.add(v)
-                        q.append(v)
-            ring = set(carbons)
-        if not ring:
-            return [], [], []
+            path_to_core = []
+            while q:
+                curr, path = q.popleft()
+                if curr in core_atoms:
+                    path_to_core = path
+                    break
+                for nb in hadj.get(curr, []):
+                    if nb not in seen:
+                        seen.add(nb)
+                        q.append((nb, path + [nb]))
+            
+            if path_to_core:
+                keep_heavy.update(path_to_core)
+                core_target = path_to_core[-1]
+                
+                def is_bridge(u, v, adj_dict, valid_nodes):
+                    q_b = deque([u])
+                    seen_b = {u}
+                    while q_b:
+                        curr_b = q_b.popleft()
+                        if curr_b == v: return False
+                        for nb_b in adj_dict.get(curr_b, []):
+                            if nb_b in valid_nodes and nb_b not in seen_b:
+                                if (curr_b == u and nb_b == v) or (curr_b == v and nb_b == u):
+                                    continue
+                                seen_b.add(nb_b)
+                                q_b.append(nb_b)
+                    return True
 
-        keep_heavy = set(bridge_atoms) | set(ring)
-        # Keep the shortest connector from node-bound atoms into the first ring.
-        q = deque(bridge_atoms)
-        parent = {i: None for i in bridge_atoms}
-        target = None
-        while q:
-            u = q.popleft()
-            if u in ring:
-                target = u
-                break
-            for v in hadj.get(u, []):
-                if v not in parent:
-                    parent[v] = u
-                    q.append(v)
-        while target is not None:
-            keep_heavy.add(target)
-            target = parent[target]
-
-        # Preserve hetero atoms attached to kept connector/ring atoms on the node side.
-        for i in heavy:
-            if i in keep_heavy:
-                continue
-            if linker_species[i] in {"O", "N", "S", "P", "B"}:
-                if any(nb in keep_heavy for nb in hadj.get(i, [])) and any(nb in bridge_atoms for nb in hadj.get(i, []) + [i]):
-                    keep_heavy.add(i)
+                core_comp = {core_target}
+                cq = deque([core_target])
+                found_cycle = False
+                
+                while cq:
+                    c = cq.popleft()
+                    
+                    curr_in_cycle = any(not is_bridge(c, nb, hadj, core_atoms) for nb in hadj.get(c, []) if nb in core_atoms)
+                    if curr_in_cycle:
+                        found_cycle = True
+                        
+                    for nb in hadj.get(c, []):
+                        if nb in core_atoms and nb not in core_comp:
+                            edge_is_bridge = is_bridge(c, nb, hadj, core_atoms)
+                            
+                            if found_cycle:
+                                if not edge_is_bridge:
+                                    core_comp.add(nb)
+                                    cq.append(nb)
+                            else:
+                                core_comp.add(nb)
+                                cq.append(nb)
+                                
+                keep_heavy.update(core_comp)
 
         removed_nbr_count = {i: sum(1 for nb in hadj.get(i, []) if nb not in keep_heavy) for i in keep_heavy}
 
@@ -1043,8 +1030,11 @@ class MOFFragmenter(BaseFragmenter):
         if not scored_images:
             return None
         scored_images.sort(key=lambda x: x[0], reverse=True)
-        selected_images = scored_images[:1] if minimize else scored_images
-        partial_images = scored_images[1:] if minimize else []
+        normal_size = len(node_sp) + sum(len(l.molecule) for _, l, _ in scored_images)
+        should_minimize = minimize and normal_size >= 50
+
+        selected_images = scored_images[:1] if should_minimize else scored_images
+        partial_images = scored_images[1:] if should_minimize else []
 
         species = []
         coords = []
@@ -1481,7 +1471,10 @@ class MOFFragmenter(BaseFragmenter):
             if component:
                 components.append(component)
 
-        if minimize:
+        normal_size_estimate = len(final_indices) + len(broken_bonds)
+        should_minimize = minimize and normal_size_estimate >= 50
+
+        if should_minimize:
             partial_to_remove = set()
             bridge_atoms_to_cap = []
             linker_evaluations = []
@@ -1529,25 +1522,16 @@ class MOFFragmenter(BaseFragmenter):
 
             for comp, bridge_atoms, keep_linker in linker_evaluations:
                 if not keep_linker:
-                    keep_atoms = set(bridge_atoms)
-                    q = deque([(ba, 0) for ba in bridge_atoms])
-                    while q:
-                        curr, depth = q.popleft()
-                        if depth < 5:
-                            for nb in local_adj[curr]:
-                                if nb in comp and nb not in keep_atoms:
-                                    keep_atoms.add(nb)
-                                    q.append((nb, depth + 1))
+                    keep_atoms = set(comp)
 
                     changed = True
                     while changed:
                         changed = False
                         to_remove = set()
                         for ka in keep_atoms - bridge_atoms:
-                            if supercell[ka].species_string == "C":
-                                internal_bonds = sum(1 for nb in local_adj[ka] if nb in keep_atoms)
-                                if internal_bonds <= 1:
-                                    to_remove.add(ka)
+                            internal_bonds = sum(1 for nb in local_adj[ka] if nb in keep_atoms)
+                            if internal_bonds <= 1:
+                                to_remove.add(ka)
                         if to_remove:
                             keep_atoms -= to_remove
                             changed = True
@@ -4804,8 +4788,21 @@ def main():
 
     if args.kind == "mof":
         frag = MOFFragmenter(radius=args.radius)
-        frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
-                     output_path=args.output, minimize=args.minimize)
+        if args.minimize:
+            frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
+                         output_path=args.output, minimize=True)
+        else:
+            res = frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
+                               output_path=args.output, minimize=False)
+            if res and len(res.species) > 50:
+                min_out = str(args.output)
+                if min_out.endswith(".xyz"):
+                    min_out = min_out[:-4] + "_min.xyz"
+                else:
+                    min_out += "_min.xyz"
+                print(f"Normal fragment size > 50. Auto-generating minimize version...")
+                frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
+                             output_path=min_out, minimize=True)
     elif args.kind == "cof":
         frag = COFFragmenter(radius=args.radius, layer_mode=args.cof_layer)
         frag.extract(args.input_path, center_idx=args.center,

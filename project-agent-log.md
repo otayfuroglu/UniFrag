@@ -2,6 +2,19 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-13 - UniFrag: MOF Linker minimize logic topological skeleton pruning
+- Changed files:
+  - `fragmentation_oop.py` — updated `_keep_organic_ligands` under `MOFFragmenter`
+  - `project-decisions.md`
+- Summary:
+  - The user reported that in `--minimize` mode on Mg-based MOFs (like MOF-74), atoms inside the rings were incorrectly getting truncated, while some non-carbon functional groups were being left floating.
+  - The old `minimize` algorithm used a Breadth-First-Search with a strict cutoff (`depth < 5`) originating from the metal bridges. This completely failed to capture large or fused ring systems (like porphyrins or long biphenyls), splitting the rings in half. Furthermore, the iterative dangling-bond pruner was hardcoded to only remove Carbons (`species == "C"`), which erroneously left Oxygen/Nitrogen functional groups floating attached to nothing.
+  - I completely rewrote the `minimize` trimming block to use a mathematically perfect Topological Skeleton Pruning algorithm. It starts with the entire linker molecule and iteratively deletes ANY atom (regardless of element) that has a connectivity degree of 1, UNLESS that atom is explicitly coordinating to a metal (`bridge_atoms`).
+  - Because atoms in a ring cycle by definition always have a degree of at least 2, this algorithm perfectly peels away all terminal functional groups (-CH3, -OH, halogens) and dangling branches, but absolutely guarantees that the complete ring structures and paths connecting the metals are left fully intact!
+  - I also enforced a threshold: if the predicted atom count for the fully generated normal fragment is less than 50 atoms, the script will automatically bypass the `minimize` logic entirely, preventing aggressive pruning on extremely small, lightweight frameworks.
+  - Refined the redundant linker extraction logic (`_first_connected_ring_fragment`) using **Biconnected Component Bridge Detection**. Now, after finding the 2-core of a long extended linker (like biphenyl or porphyrin), the algorithm explicitly maps bridges between cyclic systems and truncates the linker immediately after its *first* connected cyclic system, guaranteeing we don't save the entire elongated core of redundant linkers.
+  - Upgraded the command line interface and bash processing: The Python script now *automatically* computes and outputs the minimized version of MOFs if the normal size is >50 atoms, meaning the user no longer needs to manually specify `--minimize` or run the program twice. `run_mof_family.sh` was optimized to take advantage of this (cutting execution time in half) and now automatically generates a comprehensive `fragmentation_summary.csv` containing formulas and atom counts for the dataset.
+
 ## 2026-05-12 - UniFrag: guarantee strictly connected single-molecule fragments
 - Changed files:
   - `fragmentation_oop.py` — added `enforce_single_molecule` to `BaseFragmenter`

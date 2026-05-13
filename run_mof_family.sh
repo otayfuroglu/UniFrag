@@ -52,6 +52,7 @@ fi
 pass=0
 fail=0
 summary=""
+csv_summary=""
 failures=""
 
 formula_for_xyz() {
@@ -83,39 +84,39 @@ run_one() {
 
     echo -e "${YELLOW}${base}${NC}"
 
+    rm -f "$out_norm" "$out_min"
+
     local normal_output
     normal_output=$("$PYTHON" "$SCRIPT" "$cif" --kind mof --radius "$RADIUS" --output "$out_norm" 2>&1)
     local normal_status=$?
     echo "$normal_output" | grep -E "MOF Path|Path [A-Z]|Final size|Saved|Error|Warning|Traceback" || true
 
-    local min_output
-    min_output=$("$PYTHON" "$SCRIPT" "$cif" --kind mof --radius "$RADIUS" --minimize --output "$out_min" 2>&1)
-    local min_status=$?
-    echo "$min_output" | grep -E "MOF Path|Path [A-Z]|Final size|Saved|Error|Warning|Traceback" || true
-
-    if [ $normal_status -ne 0 ] || [ $min_status -ne 0 ]; then
+    if [ $normal_status -ne 0 ]; then
         echo -e "  ${RED}FAILED${NC}"
-        if [ $normal_status -ne 0 ]; then
-            failures+="$base normal failed\n"
-            echo "$normal_output"
-        fi
-        if [ $min_status -ne 0 ]; then
-            failures+="$base minimum failed\n"
-            echo "$min_output"
-        fi
+        failures+="$base normal failed\n"
+        echo "$normal_output"
         ((fail++))
         return
     fi
 
     local norm_info min_info norm_atoms norm_formula min_atoms min_formula
     norm_info="$(formula_for_xyz "$out_norm")"
-    min_info="$(formula_for_xyz "$out_min")"
     norm_atoms="$(echo "$norm_info" | cut -f1)"
     norm_formula="$(echo "$norm_info" | cut -f2-)"
-    min_atoms="$(echo "$min_info" | cut -f1)"
-    min_formula="$(echo "$min_info" | cut -f2-)"
+
+    # The python script automatically names the min output by removing .xyz and appending _min.xyz
+    local expected_min_out="${out_norm%.xyz}_min.xyz"
+    if [ -f "$expected_min_out" ]; then
+        min_info="$(formula_for_xyz "$expected_min_out")"
+        min_atoms="$(echo "$min_info" | cut -f1)"
+        min_formula="$(echo "$min_info" | cut -f2-)"
+    else
+        min_atoms="N/A"
+        min_formula="N/A"
+    fi
 
     summary+="$base\t$norm_atoms\t$norm_formula\t$min_atoms\t$min_formula\n"
+    csv_summary+="${base}.cif,$norm_atoms,$norm_formula,$min_atoms,$min_formula\n"
     echo -e "  ${GREEN}OK${NC}: normal=$norm_atoms min=$min_atoms"
     ((pass++))
 }
@@ -137,6 +138,13 @@ echo "============================================================"
 echo -e "name\tnormal_atoms\tnormal_formula\tmin_atoms\tmin_formula"
 printf "%b" "$summary"
 echo "============================================================"
+
+csv_file="$FAMILY_DIR/fragmentation_summary.csv"
+echo "cif_file,normal_atoms,normal_formula,min_atoms,min_formula" > "$csv_file"
+printf "%b" "$csv_summary" >> "$csv_file"
+echo -e "CSV summary saved to: ${GREEN}$csv_file${NC}"
+echo "============================================================"
+
 echo -e "Results: ${GREEN}$pass passed${NC}, ${RED}$fail failed${NC}"
 if [ $fail -ne 0 ]; then
     echo "Failures:"
