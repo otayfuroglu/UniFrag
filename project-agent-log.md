@@ -2,6 +2,19 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-14 - UniFrag: unified batch processing, parallel --nproc, incremental CSV/ExtXYZ for all modes
+- Changed files:
+  - `fragmentation_oop.py` — added `_process_cof_file`, `_process_bio_file` top-level helpers; extended COF and bio branches in `main()` with full folder-mode support; bio batch CSV now writes one row per window with `window_name` and `n_atoms`
+  - `project-decisions.md`
+- Summary:
+  - Extended the batch folder processing architecture (previously MOF-only) to **COF** and **bio-macromolecule** modes. All three modes now share identical capabilities: pass a directory instead of a single file, configure `--nproc` for parallel workers, and receive incremental CSV and ExtXYZ outputs updated after each file.
+  - COF batch mode writes `fragmentation_summary.csv` (columns: `cif_file`, `normal_atoms`, `normal_formula`, `min_atoms`, `min_formula`) and `fragments_collection.extxyz` (fragments named `{base}_frag_cof` / `{base}_frag_cof_min`).
+  - Bio batch mode writes `bio_fragmentation_summary.csv` with **one row per window** (columns: `pdb_file`, `window_name`, `n_atoms`) and `bio_fragments_collection.extxyz` with windows named `{stem}_w000`, `{stem}_w001`, etc. The `window_name` key matches the `name` field in the ExtXYZ header for lossless cross-referencing.
+  - All ExtXYZ fragment names have `[` and `]` replaced with `_` and no `.xyz` suffix for clean downstream ML pipeline compatibility.
+- Follow-up risks:
+  - Bio `_process_bio_file` calls `frag.extract(output_dir=None)` which defaults to creating a `bio_fragments/` subfolder. Verify behavior is acceptable or pass a controlled temp path.
+  - COF `_process_cof_file` passes `output_path=None` to suppress individual XYZ saves; verify all COF exit paths respect the `if output_path:` guard.
+
 ## 2026-05-13 - UniFrag: MOF Linker minimize logic topological skeleton pruning
 - Changed files:
   - `fragmentation_oop.py` — updated `_keep_organic_ligands` under `MOFFragmenter`
