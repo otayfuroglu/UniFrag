@@ -4741,12 +4741,53 @@ class BioMolFragmenter(BaseFragmenter):
         return dist <= cutoff
 
 
+def _get_formula(species):
+    from collections import Counter
+    c = Counter(species)
+    return " ".join(f"{el}{c[el]}" for el in sorted(c))
+
+def _process_mof_file(args_tuple):
+    cif_path, radius, center, nmetals = args_tuple
+    import os
+    base = os.path.basename(cif_path)
+    if base.endswith(".cif"):
+        base = base[:-4]
+    
+    out_norm = os.path.join(os.path.dirname(cif_path), f"{base}_frag_mof.xyz")
+    out_min = os.path.join(os.path.dirname(cif_path), f"{base}_frag_mof_min.xyz")
+    
+    try:
+        frag = MOFFragmenter(radius=radius)
+        res = frag.extract(cif_path, center_idx=center, nmetals=nmetals,
+                           output_path=out_norm, minimize=False)
+        
+        norm_atoms = len(res.species) if res else 0
+        norm_formula = _get_formula(res.species) if res else "N/A"
+        
+        min_atoms = "N/A"
+        min_formula = "N/A"
+        
+        if res and len(res.species) > 50:
+            print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
+            res_min = frag.extract(cif_path, center_idx=center, nmetals=nmetals,
+                                   output_path=out_min, minimize=True)
+            if res_min:
+                min_atoms = len(res_min.species)
+                min_formula = _get_formula(res_min.species)
+                
+        return (os.path.basename(cif_path), norm_atoms, norm_formula, min_atoms, min_formula)
+    except Exception as e:
+        print(f"[{base}] Error: {e}")
+        return (os.path.basename(cif_path), "ERROR", "ERROR", "ERROR", "ERROR")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="OOP fragmenter core for MOF / COF / Bio-macromolecule"
     )
-    parser.add_argument("input_path", help="CIF (MOF/COF) or PDB (bio) input file")
+    parser.add_argument("input_path", help="CIF/PDB file or folder containing CIF files")
     parser.add_argument("--kind", choices=["mof", "cof", "bio"], default="mof")
+    parser.add_argument("--nproc", type=int, default=1, help="Number of parallel processes for folder mode.")
     # MOF / COF shared
     parser.add_argument("--radius", type=float, default=6.0)
     parser.add_argument("--center", type=int, default=-1)
@@ -4787,22 +4828,50 @@ def main():
     args = parser.parse_args()
 
     if args.kind == "mof":
-        frag = MOFFragmenter(radius=args.radius)
-        if args.minimize:
-            frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
-                         output_path=args.output, minimize=True)
+        import os
+        import glob
+        import multiprocessing
+        
+        if os.path.isdir(args.input_path):
+            cif_files = sorted(glob.glob(os.path.join(args.input_path, "*.cif")))
+            if not cif_files:
+                print(f"No CIF files found in {args.input_path}")
+                return
+            
+            pool_args = [(cif, args.radius, args.center, args.nmetals) for cif in cif_files]
+            
+            print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
+            
+            if args.nproc > 1:
+                with multiprocessing.Pool(args.nproc) as pool:
+                    results = pool.map(_process_mof_file, pool_args)
+            else:
+                results = [_process_mof_file(pa) for pa in pool_args]
+                
+            csv_path = os.path.join(args.input_path, "fragmentation_summary.csv")
+            with open(csv_path, "w") as f:
+                f.write("cif_file,normal_atoms,normal_formula,min_atoms,min_formula\n")
+                for r in results:
+                    f.write(f"{r[0]},{r[1]},{r[2]},{r[3]},{r[4]}\n")
+            print(f"CSV summary saved to: {csv_path}")
+            
         else:
-            res = frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
-                               output_path=args.output, minimize=False)
-            if res and len(res.species) > 50:
-                min_out = str(args.output)
-                if min_out.endswith(".xyz"):
-                    min_out = min_out[:-4] + "_min.xyz"
-                else:
-                    min_out += "_min.xyz"
-                print(f"Normal fragment size > 50. Auto-generating minimize version...")
+            frag = MOFFragmenter(radius=args.radius)
+            if args.minimize:
                 frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
-                             output_path=min_out, minimize=True)
+                             output_path=args.output, minimize=True)
+            else:
+                res = frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
+                                   output_path=args.output, minimize=False)
+                if res and len(res.species) > 50:
+                    min_out = str(args.output)
+                    if min_out.endswith(".xyz"):
+                        min_out = min_out[:-4] + "_min.xyz"
+                    else:
+                        min_out += "_min.xyz"
+                    print(f"Normal fragment size > 50. Auto-generating minimize version...")
+                    frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
+                                 output_path=min_out, minimize=True)
     elif args.kind == "cof":
         frag = COFFragmenter(radius=args.radius, layer_mode=args.cof_layer)
         frag.extract(args.input_path, center_idx=args.center,
