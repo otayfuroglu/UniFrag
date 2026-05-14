@@ -4839,21 +4839,26 @@ def main():
                 return
             
             pool_args = [(cif, args.radius, args.center, args.nmetals) for cif in cif_files]
+            csv_path = os.path.join(args.input_path, "fragmentation_summary.csv")
+            
+            # Initialize CSV with header
+            with open(csv_path, "w") as f:
+                f.write("cif_file,normal_atoms,normal_formula,min_atoms,min_formula\n")
             
             print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
             
             if args.nproc > 1:
                 with multiprocessing.Pool(args.nproc) as pool:
-                    results = pool.map(_process_mof_file, pool_args)
+                    for r in pool.imap_unordered(_process_mof_file, pool_args):
+                        with open(csv_path, "a") as f:
+                            f.write(f"{r[0]},{r[1]},{r[2]},{r[3]},{r[4]}\n")
             else:
-                results = [_process_mof_file(pa) for pa in pool_args]
-                
-            csv_path = os.path.join(args.input_path, "fragmentation_summary.csv")
-            with open(csv_path, "w") as f:
-                f.write("cif_file,normal_atoms,normal_formula,min_atoms,min_formula\n")
-                for r in results:
-                    f.write(f"{r[0]},{r[1]},{r[2]},{r[3]},{r[4]}\n")
-            print(f"CSV summary saved to: {csv_path}")
+                for pa in pool_args:
+                    r = _process_mof_file(pa)
+                    with open(csv_path, "a") as f:
+                        f.write(f"{r[0]},{r[1]},{r[2]},{r[3]},{r[4]}\n")
+            
+            print(f"Batch processing complete. CSV summary updated at: {csv_path}")
             
         else:
             frag = MOFFragmenter(radius=args.radius)
