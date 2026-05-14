@@ -1073,11 +1073,12 @@ class MOFFragmenter(BaseFragmenter):
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
 
         mol = Molecule(species, coords)
-        mol.to(filename=output_path, fmt="xyz")
-        print("  -> MOF Path J (moffragmentor node+linker combine).")
-        print(f"  -> Helper fragments available in mof_nodes_lib/ and mof_linkers_lib/.")
-        print(f"Final size: {len(species)} atoms.")
-        print(f"Saved: {output_path}")
+        if output_path:
+            mol.to(filename=output_path, fmt="xyz")
+            print("  -> MOF Path J (moffragmentor node+linker combine).")
+            print(f"  -> Helper fragments available in mof_nodes_lib/ and mof_linkers_lib/.")
+            print(f"Final size: {len(species)} atoms.")
+            print(f"Saved: {output_path}")
         return FragmentResult(species=species, coords=coords)
 
     def extract(self, mof_path, center_idx=-1, nmetals=3, output_path="fragment.xyz", minimize=False):
@@ -1363,9 +1364,10 @@ class MOFFragmenter(BaseFragmenter):
         self._last_capped_h_indices = [i for i, f in enumerate(bool_flags) if f]
 
         self.optimize_capped_h_geometry_only(final_species, final_coords, self._last_capped_h_indices)
-        print(f"Final size: {len(final_species)} atoms.")
-        mol = Molecule(final_species, final_coords)
-        mol.to(filename=output_path, fmt="xyz")
+        if output_path:
+            mol = Molecule(final_species, final_coords)
+            mol.to(filename=output_path, fmt="xyz")
+            print(f"Saved: {output_path}")
         return FragmentResult(species=final_species, coords=final_coords)
 
     def _get_fragment(self, core_metals, initial_indices, supercell, sc_center_idx, is_infinite_sbu, nmetals, minimize, zif_mode=False):
@@ -2410,11 +2412,12 @@ class COFFragmenter(BaseFragmenter):
                 species = [x for i, x in enumerate(species) if i in keep]
                 coords = [x for i, x in enumerate(coords) if i in keep]
 
-        Molecule(species, coords).to(filename=output_path, fmt="xyz")
-        print("  -> COF Path J (graph node+linker fallback combine).")
-        print("  -> Helper fragments available in cof_nodes_lib/ and cof_linkers_lib/.")
-        print(f"Final size: {len(species)} atoms")
-        print(f"Saved: {output_path}")
+        if output_path:
+            Molecule(species, coords).to(filename=output_path, fmt="xyz")
+            print(f"  -> COF Path J (graph node+linker fallback combine).")
+            print("  -> Helper fragments available in cof_nodes_lib/ and cof_linkers_lib/.")
+            print(f"Final size: {len(species)} atoms")
+            print(f"Saved: {output_path}")
         return FragmentResult(species=species, coords=coords)
 
     def _try_coffragmentor_node_linker_fragment(self, cif_path, output_path, minimize=False):
@@ -2565,12 +2568,13 @@ class COFFragmenter(BaseFragmenter):
             coords = base_coords + [c + layer_vec for c in base_coords]
             capped_h_flags = base_flags + base_flags
 
-        mol = Molecule(species, coords)
-        mol.to(filename=output_path, fmt="xyz")
-        print("  -> COF Path J (coffragmentor node+linker combine).")
-        print("  -> Helper fragments available in cof_nodes_lib/ and cof_linkers_lib/.")
-        print(f"Final size: {len(species)} atoms")
-        print(f"Saved: {output_path}")
+        if output_path:
+            mol = Molecule(species, coords)
+            mol.to(filename=output_path, fmt="xyz")
+            print("  -> COF Path J (coffragmentor node+linker combine).")
+            print("  -> Helper fragments available in cof_nodes_lib/ and cof_linkers_lib/.")
+            print(f"Final size: {len(species)} atoms")
+            print(f"Saved: {output_path}")
         return FragmentResult(species=species, coords=coords)
 
     def extract(self, cif_path, output_path="cof_fragment.xyz", center_idx=-1, minimize=False):
@@ -2871,8 +2875,9 @@ class COFFragmenter(BaseFragmenter):
                         print("  -> COF Path J6 (boroxine-like node+all attached linkers).")
                         print(f"Final size: {len(species)} atoms")
                         mol = Molecule(species, coords)
-                        mol.to(filename=output_path, fmt="xyz")
-                        print(f"Saved: {output_path}")
+                        if output_path:
+                            mol.to(filename=output_path, fmt="xyz")
+                            print(f"Saved: {output_path}")
                         return FragmentResult(species=species, coords=coords)
 
         bo_node_species = {"B", "O"}
@@ -4052,8 +4057,9 @@ class COFFragmenter(BaseFragmenter):
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
         print(f"Final size: {len(species)} atoms")
         mol = Molecule(species, coords)
-        mol.to(filename=output_path, fmt="xyz")
-        print(f"Saved: {output_path}")
+        if output_path:
+            mol.to(filename=output_path, fmt="xyz")
+            print(f"Saved: {output_path}")
         return FragmentResult(species=species, coords=coords)
 
 
@@ -4753,8 +4759,9 @@ def _process_mof_file(args_tuple):
     if base.endswith(".cif"):
         base = base[:-4]
     
-    out_norm = os.path.join(os.path.dirname(cif_path), f"{base}_frag_mof.xyz")
-    out_min = os.path.join(os.path.dirname(cif_path), f"{base}_frag_mof_min.xyz")
+    # Passing None to skip individual file saving in folder mode
+    out_norm = None
+    out_min = None
     
     try:
         frag = MOFFragmenter(radius=radius)
@@ -4766,6 +4773,7 @@ def _process_mof_file(args_tuple):
         
         min_atoms = "N/A"
         min_formula = "N/A"
+        res_min = None
         
         if res and len(res.species) > 50:
             print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
@@ -4775,10 +4783,26 @@ def _process_mof_file(args_tuple):
                 min_atoms = len(res_min.species)
                 min_formula = _get_formula(res_min.species)
                 
-        return (os.path.basename(cif_path), norm_atoms, norm_formula, min_atoms, min_formula)
+        return {
+            "cif": os.path.basename(cif_path),
+            "norm_atoms": norm_atoms,
+            "norm_formula": norm_formula,
+            "min_atoms": min_atoms,
+            "min_formula": min_formula,
+            "norm_res": res,
+            "min_res": res_min
+        }
     except Exception as e:
         print(f"[{base}] Error: {e}")
-        return (os.path.basename(cif_path), "ERROR", "ERROR", "ERROR", "ERROR")
+        return {
+            "cif": os.path.basename(cif_path),
+            "norm_atoms": "ERROR",
+            "norm_formula": "ERROR",
+            "min_atoms": "ERROR",
+            "min_formula": "ERROR",
+            "norm_res": None,
+            "min_res": None
+        }
 
 
 def main():
@@ -4840,25 +4864,67 @@ def main():
             
             pool_args = [(cif, args.radius, args.center, args.nmetals) for cif in cif_files]
             csv_path = os.path.join(args.input_path, "fragmentation_summary.csv")
+            extxyz_path = os.path.join(args.input_path, "fragments_collection.extxyz")
             
-            # Initialize CSV with header
+            # Initialize files
             with open(csv_path, "w") as f:
                 f.write("cif_file,normal_atoms,normal_formula,min_atoms,min_formula\n")
+            if os.path.exists(extxyz_path):
+                os.remove(extxyz_path)
             
             print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
             
+            has_ase = False
+            try:
+                from ase import Atoms
+                from ase.io import write
+                has_ase = True
+            except ImportError:
+                print("Warning: 'ase' not found. Incremental ExtXYZ collection will be skipped.")
+
             if args.nproc > 1:
                 with multiprocessing.Pool(args.nproc) as pool:
                     for r in pool.imap_unordered(_process_mof_file, pool_args):
+                        # Update CSV
                         with open(csv_path, "a") as f:
-                            f.write(f"{r[0]},{r[1]},{r[2]},{r[3]},{r[4]}\n")
+                            f.write(f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{r['min_atoms']},{r['min_formula']}\n")
+                        # Update ExtXYZ
+                        if has_ase:
+                            for key in ["norm_res", "min_res"]:
+                                res_obj = r[key]
+                                if res_obj:
+                                    suffix = "_min" if key == "min_res" else ""
+                                    base_name = r["cif"]
+                                    if base_name.endswith(".cif"): base_name = base_name[:-4]
+                                    frag_name = f"{base_name}_frag_mof{suffix}"
+                                    frag_name = frag_name.replace("[", "_").replace("]", "_")
+                                    at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
+                                    at.info["name"] = frag_name
+                                    write(extxyz_path, at, format="extxyz", append=True)
             else:
                 for pa in pool_args:
                     r = _process_mof_file(pa)
+                    # Update CSV
                     with open(csv_path, "a") as f:
-                        f.write(f"{r[0]},{r[1]},{r[2]},{r[3]},{r[4]}\n")
+                        f.write(f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{r['min_atoms']},{r['min_formula']}\n")
+                    # Update ExtXYZ
+                    if has_ase:
+                        for key in ["norm_res", "min_res"]:
+                            res_obj = r[key]
+                            if res_obj:
+                                suffix = "_min" if key == "min_res" else ""
+                                base_name = r["cif"]
+                                if base_name.endswith(".cif"): base_name = base_name[:-4]
+                                frag_name = f"{base_name}_frag_mof{suffix}"
+                                frag_name = frag_name.replace("[", "_").replace("]", "_")
+                                at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
+                                at.info["name"] = frag_name
+                                write(extxyz_path, at, format="extxyz", append=True)
             
-            print(f"Batch processing complete. CSV summary updated at: {csv_path}")
+            print(f"Batch processing complete.")
+            print(f"CSV summary updated at: {csv_path}")
+            if has_ase and os.path.exists(extxyz_path):
+                print(f"ExtXYZ collection updated at: {extxyz_path}")
             
         else:
             frag = MOFFragmenter(radius=args.radius)
