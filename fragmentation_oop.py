@@ -5089,7 +5089,7 @@ def main():
             csv_path = os.path.join(args.input_path, "bio_fragmentation_summary.csv")
             extxyz_path = os.path.join(args.input_path, "bio_fragments_collection.extxyz")
             with open(csv_path, "w") as f:
-                f.write("pdb_file,n_windows,total_atoms\n")
+                f.write("pdb_file,window_name,n_atoms\n")
             if os.path.exists(extxyz_path):
                 os.remove(extxyz_path)
             print(f"Processing {len(pdb_files)} PDB files using {args.nproc} processes...")
@@ -5102,14 +5102,16 @@ def main():
                 print("Warning: 'ase' not found. Incremental ExtXYZ collection will be skipped.")
 
             def _flush_bio_result(r):
+                base_name = r["pdb"]
+                if base_name.lower().endswith(".pdb"): base_name = base_name[:-4]
                 with open(csv_path, "a") as f:
-                    f.write(f"{r['pdb']},{r['n_windows']},{r['total_atoms']}\n")
-                if has_ase:
-                    base_name = r["pdb"]
-                    if base_name.lower().endswith(".pdb"): base_name = base_name[:-4]
                     for win_idx, res_obj in enumerate(r["results"]):
-                        frag_name = f"{base_name}_w{win_idx:03d}"
-                        frag_name = frag_name.replace("[", "_").replace("]", "_")
+                        win_name = f"{base_name}_w{win_idx:03d}"
+                        f.write(f"{r['pdb']},{win_name},{len(res_obj.species)}\n")
+                if has_ase:
+                    for win_idx, res_obj in enumerate(r["results"]):
+                        win_name = f"{base_name}_w{win_idx:03d}"
+                        frag_name = win_name.replace("[", "_").replace("]", "_")
                         at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
                         at.info["name"] = frag_name
                         write(extxyz_path, at, format="extxyz", append=True)
