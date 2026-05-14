@@ -4752,6 +4752,76 @@ def _get_formula(species):
     c = Counter(species)
     return " ".join(f"{el}{c[el]}" for el in sorted(c))
 
+
+def _process_cof_file(args_tuple):
+    cif_path, radius, center, layer_mode = args_tuple
+    import os
+    base = os.path.basename(cif_path)
+    if base.endswith(".cif"):
+        base = base[:-4]
+    try:
+        frag = COFFragmenter(radius=radius, layer_mode=layer_mode)
+        res = frag.extract(cif_path, center_idx=center, output_path=None, minimize=False)
+        norm_atoms = len(res.species) if res else 0
+        norm_formula = _get_formula(res.species) if res else "N/A"
+        min_atoms = "N/A"
+        min_formula = "N/A"
+        res_min = None
+        if res and len(res.species) > 50:
+            print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
+            res_min = frag.extract(cif_path, center_idx=center, output_path=None, minimize=True)
+            if res_min:
+                min_atoms = len(res_min.species)
+                min_formula = _get_formula(res_min.species)
+        return {
+            "cif": os.path.basename(cif_path),
+            "norm_atoms": norm_atoms,
+            "norm_formula": norm_formula,
+            "min_atoms": min_atoms,
+            "min_formula": min_formula,
+            "norm_res": res,
+            "min_res": res_min,
+        }
+    except Exception as e:
+        print(f"[{base}] Error: {e}")
+        return {
+            "cif": os.path.basename(cif_path),
+            "norm_atoms": "ERROR", "norm_formula": "ERROR",
+            "min_atoms": "ERROR", "min_formula": "ERROR",
+            "norm_res": None, "min_res": None,
+        }
+
+
+def _process_bio_file(args_tuple):
+    pdb_path, window_size, stride, use_pdbfixer, ph, chain = args_tuple
+    import os
+    base = os.path.basename(pdb_path)
+    if base.lower().endswith(".pdb"):
+        base = base[:-4]
+    try:
+        frag = BioMolFragmenter(
+            window_size=window_size, stride=stride,
+            use_pdbfixer=use_pdbfixer, ph=ph,
+        )
+        # Bio mode writes its own per-window XYZs; we capture the results list.
+        results = frag.extract(pdb_path, output_dir=None, chain=chain)
+        n_windows = len(results) if results else 0
+        total_atoms = sum(len(r.species) for r in results) if results else 0
+        return {
+            "pdb": os.path.basename(pdb_path),
+            "n_windows": n_windows,
+            "total_atoms": total_atoms,
+            "results": results or [],
+        }
+    except Exception as e:
+        print(f"[{base}] Error: {e}")
+        return {
+            "pdb": os.path.basename(pdb_path),
+            "n_windows": "ERROR",
+            "total_atoms": "ERROR",
+            "results": [],
+        }
+
 def _process_mof_file(args_tuple):
     cif_path, radius, center, nmetals = args_tuple
     import os
@@ -4944,17 +5014,126 @@ def main():
                     frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
                                  output_path=min_out, minimize=True)
     elif args.kind == "cof":
-        frag = COFFragmenter(radius=args.radius, layer_mode=args.cof_layer)
-        frag.extract(args.input_path, center_idx=args.center,
-                     output_path=args.output, minimize=args.minimize)
+        import os
+        import glob
+        import multiprocessing
+
+        if os.path.isdir(args.input_path):
+            cif_files = sorted(glob.glob(os.path.join(args.input_path, "*.cif")))
+            if not cif_files:
+                print(f"No CIF files found in {args.input_path}")
+                return
+            pool_args = [(cif, args.radius, args.center, args.cof_layer) for cif in cif_files]
+            csv_path = os.path.join(args.input_path, "fragmentation_summary.csv")
+            extxyz_path = os.path.join(args.input_path, "fragments_collection.extxyz")
+            with open(csv_path, "w") as f:
+                f.write("cif_file,normal_atoms,normal_formula,min_atoms,min_formula\n")
+            if os.path.exists(extxyz_path):
+                os.remove(extxyz_path)
+            print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
+            has_ase = False
+            try:
+                from ase import Atoms
+                from ase.io import write
+                has_ase = True
+            except ImportError:
+                print("Warning: 'ase' not found. Incremental ExtXYZ collection will be skipped.")
+
+            def _flush_cof_result(r):
+                with open(csv_path, "a") as f:
+                    f.write(f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{r['min_atoms']},{r['min_formula']}\n")
+                if has_ase:
+                    for key in ["norm_res", "min_res"]:
+                        res_obj = r[key]
+                        if res_obj:
+                            suffix = "_min" if key == "min_res" else ""
+                            base_name = r["cif"]
+                            if base_name.endswith(".cif"): base_name = base_name[:-4]
+                            frag_name = f"{base_name}_frag_cof{suffix}"
+                            frag_name = frag_name.replace("[", "_").replace("]", "_")
+                            at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
+                            at.info["name"] = frag_name
+                            write(extxyz_path, at, format="extxyz", append=True)
+
+            if args.nproc > 1:
+                with multiprocessing.Pool(args.nproc) as pool:
+                    for r in pool.imap_unordered(_process_cof_file, pool_args):
+                        _flush_cof_result(r)
+            else:
+                for pa in pool_args:
+                    _flush_cof_result(_process_cof_file(pa))
+
+            print(f"Batch processing complete.")
+            print(f"CSV summary updated at: {csv_path}")
+            if has_ase and os.path.exists(extxyz_path):
+                print(f"ExtXYZ collection updated at: {extxyz_path}")
+        else:
+            frag = COFFragmenter(radius=args.radius, layer_mode=args.cof_layer)
+            frag.extract(args.input_path, center_idx=args.center,
+                         output_path=args.output, minimize=args.minimize)
+
     else:  # bio
-        frag = BioMolFragmenter(
-            window_size=args.window_size,
-            stride=args.stride,
-            use_pdbfixer=not args.no_pdbfixer,
-            ph=args.ph,
-        )
-        frag.extract(args.input_path, output_dir=args.output_dir, chain=args.chain)
+        import os
+        import glob
+        import multiprocessing
+
+        if os.path.isdir(args.input_path):
+            pdb_files = sorted(glob.glob(os.path.join(args.input_path, "*.pdb")))
+            if not pdb_files:
+                print(f"No PDB files found in {args.input_path}")
+                return
+            pool_args = [
+                (pdb, args.window_size, args.stride, not args.no_pdbfixer, args.ph, args.chain)
+                for pdb in pdb_files
+            ]
+            csv_path = os.path.join(args.input_path, "bio_fragmentation_summary.csv")
+            extxyz_path = os.path.join(args.input_path, "bio_fragments_collection.extxyz")
+            with open(csv_path, "w") as f:
+                f.write("pdb_file,n_windows,total_atoms\n")
+            if os.path.exists(extxyz_path):
+                os.remove(extxyz_path)
+            print(f"Processing {len(pdb_files)} PDB files using {args.nproc} processes...")
+            has_ase = False
+            try:
+                from ase import Atoms
+                from ase.io import write
+                has_ase = True
+            except ImportError:
+                print("Warning: 'ase' not found. Incremental ExtXYZ collection will be skipped.")
+
+            def _flush_bio_result(r):
+                with open(csv_path, "a") as f:
+                    f.write(f"{r['pdb']},{r['n_windows']},{r['total_atoms']}\n")
+                if has_ase:
+                    base_name = r["pdb"]
+                    if base_name.lower().endswith(".pdb"): base_name = base_name[:-4]
+                    for win_idx, res_obj in enumerate(r["results"]):
+                        frag_name = f"{base_name}_w{win_idx:03d}"
+                        frag_name = frag_name.replace("[", "_").replace("]", "_")
+                        at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
+                        at.info["name"] = frag_name
+                        write(extxyz_path, at, format="extxyz", append=True)
+
+            if args.nproc > 1:
+                with multiprocessing.Pool(args.nproc) as pool:
+                    for r in pool.imap_unordered(_process_bio_file, pool_args):
+                        _flush_bio_result(r)
+            else:
+                for pa in pool_args:
+                    _flush_bio_result(_process_bio_file(pa))
+
+            print(f"Batch processing complete.")
+            print(f"CSV summary updated at: {csv_path}")
+            if has_ase and os.path.exists(extxyz_path):
+                print(f"ExtXYZ collection updated at: {extxyz_path}")
+        else:
+            frag = BioMolFragmenter(
+                window_size=args.window_size,
+                stride=args.stride,
+                use_pdbfixer=not args.no_pdbfixer,
+                ph=args.ph,
+            )
+            frag.extract(args.input_path, output_dir=args.output_dir, chain=args.chain)
 
 
 if __name__ == "__main__":
