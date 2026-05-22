@@ -2,6 +2,16 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
+## Decision 2026-05-22: Unified Single-File/Folder Execution with Atomic Collection Updates and No Individual XYZ Files
+- Context: Previously, running fragmentation on a single file produced separate `.xyz` files and wiped the target collections, whereas directory execution appended frames/rows. The user requested completely eliminating individual `.xyz` files (relying only on `fragments_collection.extxyz` or `bio_fragments_collection.extxyz`) and ensuring that re-running a single file atomically updates its specific entries in the CSV and ExtXYZ collections without affecting other files in the same folder.
+- Decision: Unified both single-file and directory modes in `main()` so both write to/update the same central collections in the parent directory. Implemented two atomic, temp-file-safe transactional update helpers: `_update_csv_rows` and `_update_extxyz_collection`. When a structure is processed, any existing entries matching that filename/label are safely deleted and replaced with the new results in both the summary CSV and the ExtXYZ collection. Also, `BioMolFragmenter.extract` was extended with `write_files=False` so that individual window `.xyz` files are completely bypassed.
+- Consequences: No individual `.xyz` files are written under any mode (MOF, COF, or Bio). Centralized collections (`fragments_collection.extxyz` and `fragmentation_summary.csv`) serve as the clean, single-point of output, while re-runs remain highly efficient and preserve existing directory progress.
+
+## Decision 2026-05-22: Use label instead of name in ExtXYZ headers
+- Context: The user requested replacing `"name"` with `"label"` in the header of the generated `fragments_collection.extxyz` file.
+- Decision: Updated the Atoms `info` dictionary key from `"name"` to `"label"` across all three fragmentation modes (MOF, COF, Bio) in `fragmentation_oop.py`. This ensures that the ASE-written ExtXYZ comments consistently serialize as `label=...` rather than `name=...`.
+- Consequences: Downstream ExtXYZ outputs automatically write the fragment identifier with a `label` key instead of a `name` key, matching the requested specification.
+
 ## Decision 2026-05-14: Unified batch folder processing architecture applies to all three modes (MOF, COF, Bio)
 - Context: Batch folder processing, parallel `--nproc`, incremental CSV and ExtXYZ outputs were initially only implemented for the MOF mode. COF and bio modes were still single-file only.
 - Decision: Extended the identical architecture to COF (`*.cif` folder) and bio (`*.pdb` folder) modes. Each mode now has a dedicated top-level worker function (`_process_cof_file`, `_process_bio_file`) that is safe to call from a `multiprocessing.Pool`. CSV and ExtXYZ collection files are initialized empty at the start of a batch run and appended to incrementally as each worker returns. Bio CSV specifically writes one row per sliding-window fragment (columns: `pdb_file`, `window_name`, `n_atoms`) so individual windows are identifiable without parsing the ExtXYZ file.

@@ -14,6 +14,156 @@ class FragmentResult:
     coords: list
 
 
+def _write_extxyz(filepath, species, coords, label):
+    """
+    Writes a molecular fragment to an ExtXYZ file.
+    Does not require any external library (like ASE) to ensure zero-dependency robustness.
+    """
+    with open(filepath, "a") as f:
+        f.write(f"{len(species)}\n")
+        f.write(f"Properties=species:S:1:pos:R:3 label={label} pbc=\"F F F\"\n")
+        for sym, pos in zip(species, coords):
+            f.write(f"{sym:<8}{pos[0]:16.8f}{pos[1]:16.8f}{pos[2]:16.8f}\n")
+
+
+def _parse_extxyz(filepath):
+    """
+    Parses a multi-frame ExtXYZ file and returns a list of dictionaries:
+    [{'label': label, 'species': [...], 'coords': [...]}, ...]
+    """
+    import os
+    if not os.path.exists(filepath):
+        return []
+    frames = []
+    with open(filepath, "r") as f:
+        lines = f.readlines()
+    
+    i = 0
+    n_lines = len(lines)
+    while i < n_lines:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        try:
+            n_atoms = int(line)
+        except ValueError:
+            i += 1
+            continue
+        
+        if i + 1 >= n_lines:
+            break
+        comment = lines[i + 1].strip()
+        
+        label = ""
+        if "label=" in comment:
+            parts = comment.split("label=")
+            if len(parts) > 1:
+                val = parts[1].split()[0]
+                if val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                elif val.startswith("'") and val.endswith("'"):
+                    val = val[1:-1]
+                label = val
+        
+        species = []
+        coords = []
+        for j in range(n_atoms):
+            idx = i + 2 + j
+            if idx >= n_lines:
+                break
+            atom_line = lines[idx].strip()
+            if not atom_line:
+                continue
+            parts = atom_line.split()
+            if len(parts) >= 4:
+                species.append(parts[0])
+                coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+        
+        if len(species) == n_atoms:
+            frames.append({
+                "label": label,
+                "species": species,
+                "coords": coords
+            })
+        i += 2 + n_atoms
+    return frames
+
+
+def _load_seen_keys_from_extxyz(filepath, decimals=3):
+    seen_keys = set()
+    frames = _parse_extxyz(filepath)
+    for frame in frames:
+        key = MOFFragmenter._species_coords_unique_key(frame["species"], frame["coords"], decimals=decimals)
+        seen_keys.add(key)
+    return seen_keys
+
+
+def _update_csv_rows(csv_path, file_basename, new_rows_data, header):
+    import os
+    existing_lines = []
+    if os.path.exists(csv_path):
+        with open(csv_path, "r") as f:
+            existing_lines = f.readlines()
+            
+    filtered_lines = []
+    header_found = False
+    for idx, line in enumerate(existing_lines):
+        if idx == 0 and ("cif_file" in line or "pdb_file" in line):
+            filtered_lines.append(line)
+            header_found = True
+            continue
+        parts = line.split(",")
+        if parts and parts[0] == file_basename:
+            continue
+        filtered_lines.append(line)
+        
+    if not header_found and header:
+        filtered_lines.insert(0, header if header.endswith("\n") else header + "\n")
+        
+    temp_path = csv_path + ".tmp"
+    try:
+        with open(temp_path, "w") as f:
+            f.writelines(filtered_lines)
+            f.writelines(new_rows_data)
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+        os.rename(temp_path, csv_path)
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise e
+
+
+def _update_extxyz_collection(extxyz_path, clean_base, new_fragments):
+    import os
+    existing_frames = []
+    if os.path.exists(extxyz_path):
+        existing_frames = _parse_extxyz(extxyz_path)
+    
+    remaining_frames = [f for f in existing_frames if not f["label"].startswith(clean_base)]
+    
+    temp_path = extxyz_path + ".tmp"
+    try:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            
+        for f in remaining_frames:
+            _write_extxyz(temp_path, f["species"], f["coords"], f["label"])
+            
+        for species, coords, label in new_fragments:
+            _write_extxyz(temp_path, species, coords, label)
+            
+        if os.path.exists(temp_path):
+            if os.path.exists(extxyz_path):
+                os.remove(extxyz_path)
+            os.rename(temp_path, extxyz_path)
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise e
+
+
 class BaseFragmenter:
     def __init__(self, radius=6.0):
         self.radius = float(radius)
@@ -529,13 +679,14 @@ class MOFFragmenter(BaseFragmenter):
             # the carbonyl/carboxyl carbon left after the missing node was cut.
             # Cap them with H using the same placement/refinement machinery as
             # the legacy MOF path.
-            if has_metal or len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] != "C":
+            if has_metal or len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in ("C", "P"):
                 continue
             base = opos - np.array(coords[heavy_neighbors[0]], dtype=float)
+            cap_len = self.cap_bond_length("O")
             before = len(species)
-            self.place_capping_h(i, base, self.cap_bond_length("O"), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+            self.place_capping_h(i, base, cap_len, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
             if len(species) == before and np.linalg.norm(base) > 1e-12:
-                self.place_capping_h(i, -base, self.cap_bond_length("O"), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+                self.place_capping_h(i, -base, cap_len, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
     def _first_connected_ring_fragment(self, linker_species, linker_coords, node_species, node_coords):
         heavy = [i for i, sp in enumerate(linker_species) if sp != "H"]
@@ -1053,6 +1204,92 @@ class MOFFragmenter(BaseFragmenter):
                 self._append_merged_atoms(species, coords, [p_sp], [p_coord])
                 if p_flag and len(species) > before and species[-1] == "H":
                     partial_capped_h.append(len(species) - 1)
+        # --- Coordination completion: Ensure full coordination sphere by adding any stray coordinating atoms ---
+        all_species_coords = list(zip(species, coords))
+        stray_found = False
+        
+        for i, sp_m in enumerate(node_sp):
+            if sp_m not in self.METALS:
+                continue
+            m_pos = node_co[i]
+            # Find all neighbors in struct (using images)
+            for ia in (-1, 0, 1):
+                for ib in (-1, 0, 1):
+                    for ic in (-1, 0, 1):
+                        shift = ia * struct.lattice.matrix[0] + ib * struct.lattice.matrix[1] + ic * struct.lattice.matrix[2]
+                        for s_idx, site in enumerate(struct):
+                            d = np.linalg.norm(site.coords + shift - m_pos)
+                            if 0.1 < d < 2.6: # Bonded
+                                # Check if this atom is already in species/coords
+                                is_missing = True
+                                for ex_sp, ex_co in all_species_coords:
+                                    if ex_sp == site.species_string and np.linalg.norm(ex_co - (site.coords + shift)) < 0.5:
+                                        is_missing = False
+                                        break
+                                if is_missing:
+                                    # BFS to find the full connected organic component for this stray atom
+                                    q_stray = deque([(site.coords + shift, site.species_string, s_idx, (ia, ib, ic))])
+                                    visited_stray = {(s_idx, (ia, ib, ic))}
+                                    
+                                    while q_stray:
+                                        curr_pos, curr_sp, curr_si, curr_img = q_stray.popleft()
+                                        
+                                        # Add to result if not a duplicate
+                                        dup_in_result = False
+                                        curr_idx_in_res = -1
+                                        for ex_idx, (ex_sp, ex_co) in enumerate(all_species_coords):
+                                            if ex_sp == curr_sp and np.linalg.norm(ex_co - curr_pos) < 0.5:
+                                                dup_in_result = True
+                                                curr_idx_in_res = ex_idx
+                                                break
+                                        if not dup_in_result:
+                                            before_len = len(species)
+                                            self._append_merged_atoms(species, coords, [curr_sp], [curr_pos])
+                                            if len(species) > before_len:
+                                                curr_idx_in_res = len(species) - 1
+                                                all_species_coords.append((curr_sp, curr_pos))
+                                                stray_found = True
+                                            else:
+                                                # somehow it was a duplicate after all or append failed
+                                                continue
+                                            
+                                        # Find neighbors of this stray atom to continue BFS or cap
+                                        for nia in (-1, 0, 1):
+                                            for nib in (-1, 0, 1):
+                                                for nic in (-1, 0, 1):
+                                                    n_shift = (curr_img[0]+nia)*struct.lattice.matrix[0] + (curr_img[1]+nib)*struct.lattice.matrix[1] + (curr_img[2]+nic)*struct.lattice.matrix[2]
+                                                    for n_s_idx, n_site in enumerate(struct):
+                                                        n_pos = n_site.coords + n_shift
+                                                        nd = np.linalg.norm(n_pos - curr_pos)
+                                                        if not self.is_valid_bond(curr_sp, n_site.species_string, nd) or nd < 0.1:
+                                                            continue
+
+                                                        if n_site.species_string in self.METALS:
+                                                            # If it's a metal NOT in our core node, we need to cap this bond
+                                                            is_core_metal = False
+                                                            for m_c in node_co:
+                                                                if np.linalg.norm(m_c - n_pos) < 0.5:
+                                                                    is_core_metal = True
+                                                                    break
+                                                            if not is_core_metal:
+                                                                # CAP IT
+                                                                base = n_pos - curr_pos
+                                                                before = len(species)
+                                                                capped_h_flags_temp = [False] * (len(species) + 1) # dummy
+                                                                self.place_capping_h(curr_idx_in_res, base, self.cap_bond_length(curr_sp), 
+                                                                                      species, coords, min_hh=1.5, capped_h_flags=capped_h_flags_temp)
+                                                                if len(species) > before:
+                                                                    # The new H index is before
+                                                                    partial_capped_h.append(before)
+                                                                    all_species_coords.append((species[before], coords[before]))
+                                                            continue
+
+                                                        if (n_s_idx, (curr_img[0]+nia, curr_img[1]+nib, curr_img[2]+nic)) not in visited_stray:
+                                                            visited_stray.add((n_s_idx, (curr_img[0]+nia, curr_img[1]+nib, curr_img[2]+nic)))
+                                                            q_stray.append((n_pos, n_site.species_string, n_s_idx, (curr_img[0]+nia, curr_img[1]+nib, curr_img[2]+nic)))
+
+        if stray_found:
+            print("  -> Coordination completion: Added stray coordinating groups.")
 
         recovered_branches = self._recover_open_node_linkers_from_structure(struct, node_sp, node_co, species, coords, minimize=minimize)
         for rsp, rco, rflags in recovered_branches:
@@ -1490,7 +1727,7 @@ class MOFFragmenter(BaseFragmenter):
                             touching_metals.add(nb)
                             bridge_atoms.add(atom_idx)
 
-                remove_cond = len(touching_metals) < 1 if zif_mode else len(touching_metals) < 2
+                remove_cond = len(touching_metals) < 1
                 if remove_cond:
                     atoms_to_cut = comp - bridge_atoms
                     partial_to_remove.update(atoms_to_cut)
@@ -1559,7 +1796,7 @@ class MOFFragmenter(BaseFragmenter):
                         if nb in core_metals:
                             touching_metals.add(nb)
                             bridge_atoms.add(atom_idx)
-                remove_cond = len(touching_metals) < 1 if zif_mode else len(touching_metals) < 2
+                remove_cond = len(touching_metals) < 1
                 if remove_cond:
                     atoms_to_cut = comp - bridge_atoms
                     partial_to_remove.update(atoms_to_cut)
@@ -4153,7 +4390,7 @@ class BioMolFragmenter(BaseFragmenter):
     # Public API
     # ------------------------------------------------------------------
 
-    def extract(self, pdb_path, output_dir=None, chain=None):
+    def extract(self, pdb_path, output_dir=None, chain=None, write_files=True):
         """Fragment a PDB file into sliding-window XYZ files.
 
         Parameters
@@ -4166,6 +4403,9 @@ class BioMolFragmenter(BaseFragmenter):
         chain : str | None
             Chain ID to extract (e.g. ``"B"``).  If None, the first chain
             with ATOM records is used.
+        write_files : bool
+            If True, write out individual XYZ files and a summary CSV.
+            If False, only return the FragmentResult objects without writing files.
 
         Returns
         -------
@@ -4173,99 +4413,120 @@ class BioMolFragmenter(BaseFragmenter):
             One entry per window.
         """
         pdb_path = Path(pdb_path)
-        if output_dir is None:
-            output_dir = pdb_path.parent / "bio_fragments"
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        if write_files:
+            if output_dir is None:
+                output_dir = pdb_path.parent / "bio_fragments"
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
 
         # --- optional PDBFixer pre-processing ----------------------------
         parse_path = pdb_path
         pdb_has_h = False          # True once PDBFixer has added H atoms
+        temp_fixed_path = None
         if self.use_pdbfixer:
             fixed_pdb_str = self._fix_with_pdbfixer(pdb_path, self.ph)
             if fixed_pdb_str is not None:
-                fixed_path = output_dir / (pdb_path.stem + "_fixed.pdb")
-                fixed_path.write_text(fixed_pdb_str)
-                parse_path = fixed_path
+                if write_files:
+                    fixed_path = output_dir / (pdb_path.stem + "_fixed.pdb")
+                    fixed_path.write_text(fixed_pdb_str)
+                    parse_path = fixed_path
+                    print(f"PDBFixer: fixed PDB written to {fixed_path.name}")
+                else:
+                    temp_fixed_path = pdb_path.parent / f".{pdb_path.stem}_fixed.pdb"
+                    temp_fixed_path.write_text(fixed_pdb_str)
+                    parse_path = temp_fixed_path
                 pdb_has_h = True
-                print(f"PDBFixer: fixed PDB written to {fixed_path.name}")
             else:
                 print("PDBFixer unavailable or failed — using original PDB.")
         # -----------------------------------------------------------------
 
-        residues = self._parse_pdb(parse_path, chain=chain, keep_h=pdb_has_h)
-        if not residues:
-            raise ValueError(f"No ATOM records found in {pdb_path} (chain={chain!r})")
+        try:
+            residues = self._parse_pdb(parse_path, chain=chain, keep_h=pdb_has_h)
+            if not residues:
+                raise ValueError(f"No ATOM records found in {pdb_path} (chain={chain!r})")
 
+            stem = pdb_path.stem
+            results = []
+            csv_rows = [["window", "res_start", "res_end", "sequence",
+                         "n_residues", "n_heavy", "n_total", "xyz_file"]]
 
-        stem = pdb_path.stem
-        results = []
-        csv_rows = [["window", "res_start", "res_end", "sequence",
-                     "n_residues", "n_heavy", "n_total", "xyz_file"]]
+            n_res = len(residues)
+            win_idx = 0
+            start = 0
+            seen_keys = set()
+            while start < n_res:
+                end = min(start + self.window_size, n_res)
+                window_res = residues[start:end]
 
-        n_res = len(residues)
-        win_idx = 0
-        start = 0
-        seen_keys = set()
-        while start < n_res:
-            end = min(start + self.window_size, n_res)
-            window_res = residues[start:end]
-
-            species, coords, capped_h_flags = self._build_window(
-                window_res,
-                is_nterm=(start == 0),
-                is_cterm=(end == n_res),
-            )
-
-            res_ids   = [r["res_seq"] for r in window_res]
-            res_names = [r["res_name"] for r in window_res]
-            seq1 = "".join(self._AA1.get(rn, "X") for rn in res_names)
-            n_heavy = sum(1 for s in species if s != "H")
-
-            key = MOFFragmenter._species_coords_unique_key(species, coords, decimals=1)
-            if key in seen_keys:
-                print(
-                    f"Window {win_idx:3d}  res {res_ids[0]:3d}-{res_ids[-1]:<3d}"
-                    f"  seq={seq1}  (Skipped, duplicate)"
-                )
-                csv_rows.append([
-                    win_idx, res_ids[0], res_ids[-1], seq1,
-                    len(window_res), n_heavy, len(species), "duplicate",
-                ])
-            else:
-                seen_keys.add(key)
-                fname = f"{stem}_w{win_idx:03d}_r{res_ids[0]}-{res_ids[-1]}.xyz"
-                out_path = output_dir / fname
-
-                # write XYZ
-                mol = Molecule(species, coords)
-                mol.to(filename=str(out_path), fmt="xyz")
-
-                print(
-                    f"Window {win_idx:3d}  res {res_ids[0]:3d}-{res_ids[-1]:3d}"
-                    f"  seq={seq1}  heavy={n_heavy}  total={len(species)}"
-                    f"  → {out_path.name}"
+                species, coords, capped_h_flags = self._build_window(
+                    window_res,
+                    is_nterm=(start == 0),
+                    is_cterm=(end == n_res),
                 )
 
-                csv_rows.append([
-                    win_idx, res_ids[0], res_ids[-1], seq1,
-                    len(window_res), n_heavy, len(species), fname,
-                ])
-                results.append(FragmentResult(species=species, coords=coords))
+                res_ids   = [r["res_seq"] for r in window_res]
+                res_names = [r["res_name"] for r in window_res]
+                seq1 = "".join(self._AA1.get(rn, "X") for rn in res_names)
+                n_heavy = sum(1 for s in species if s != "H")
 
-            win_idx += 1
-            start += self.stride
-            if end == n_res:
-                break  # last window already processed
+                key = MOFFragmenter._species_coords_unique_key(species, coords, decimals=1)
+                if key in seen_keys:
+                    print(
+                        f"Window {win_idx:3d}  res {res_ids[0]:3d}-{res_ids[-1]:<3d}"
+                        f"  seq={seq1}  (Skipped, duplicate)"
+                    )
+                    csv_rows.append([
+                        win_idx, res_ids[0], res_ids[-1], seq1,
+                        len(window_res), n_heavy, len(species), "duplicate",
+                    ])
+                else:
+                    seen_keys.add(key)
+                    fname = f"{stem}_w{win_idx:03d}_r{res_ids[0]}-{res_ids[-1]}.xyz"
 
-        # write summary CSV
-        csv_path = output_dir / f"{stem}_windows.csv"
-        with open(csv_path, "w") as fh:
-            for row in csv_rows:
-                fh.write(",".join(str(v) for v in row) + "\n")
-        print(f"\nSummary CSV: {csv_path}")
-        print(f"Total windows: {len(results)}")
-        return results
+                    if write_files:
+                        out_path = output_dir / fname
+                        # write XYZ
+                        mol = Molecule(species, coords)
+                        mol.to(filename=str(out_path), fmt="xyz")
+                        print(
+                            f"Window {win_idx:3d}  res {res_ids[0]:3d}-{res_ids[-1]:3d}"
+                            f"  seq={seq1}  heavy={n_heavy}  total={len(species)}"
+                            f"  → {out_path.name}"
+                        )
+                    else:
+                        print(
+                            f"Window {win_idx:3d}  res {res_ids[0]:3d}-{res_ids[-1]:3d}"
+                            f"  seq={seq1}  heavy={n_heavy}  total={len(species)}"
+                        )
+
+                    csv_rows.append([
+                        win_idx, res_ids[0], res_ids[-1], seq1,
+                        len(window_res), n_heavy, len(species), fname,
+                    ])
+                    results.append(FragmentResult(species=species, coords=coords))
+
+                win_idx += 1
+                start += self.stride
+                if end == n_res:
+                    break  # last window already processed
+
+            if write_files:
+                # write summary CSV
+                csv_path = output_dir / f"{stem}_windows.csv"
+                with open(csv_path, "w") as fh:
+                    for row in csv_rows:
+                        fh.write(",".join(str(v) for v in row) + "\n")
+                print(f"\nSummary CSV: {csv_path}")
+                print(f"Total windows: {len(results)}")
+            
+            return results
+
+        finally:
+            if temp_fixed_path and temp_fixed_path.exists():
+                try:
+                    temp_fixed_path.unlink()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # PDBFixer pre-processing
@@ -4803,8 +5064,8 @@ def _process_bio_file(args_tuple):
             window_size=window_size, stride=stride,
             use_pdbfixer=use_pdbfixer, ph=ph,
         )
-        # Bio mode writes its own per-window XYZs; we capture the results list.
-        results = frag.extract(pdb_path, output_dir=None, chain=chain)
+        # Pass write_files=False to avoid saving individual window XYZs on disk
+        results = frag.extract(pdb_path, output_dir=None, chain=chain, write_files=False)
         n_windows = len(results) if results else 0
         total_atoms = sum(len(r.species) for r in results) if results else 0
         return {
@@ -4926,216 +5187,274 @@ def main():
         import glob
         import multiprocessing
         
-        if os.path.isdir(args.input_path):
+        is_dir = os.path.isdir(args.input_path)
+        if is_dir:
             cif_files = sorted(glob.glob(os.path.join(args.input_path, "*.cif")))
-            if not cif_files:
-                print(f"No CIF files found in {args.input_path}")
+            out_dir = args.input_path
+        else:
+            if not os.path.exists(args.input_path):
+                print(f"File not found: {args.input_path}")
                 return
+            cif_files = [args.input_path]
+            out_dir = os.path.dirname(os.path.abspath(args.input_path))
             
-            pool_args = [(cif, args.radius, args.center, args.nmetals) for cif in cif_files]
-            csv_path = os.path.join(args.input_path, "fragmentation_summary.csv")
-            extxyz_path = os.path.join(args.input_path, "fragments_collection.extxyz")
+        if not cif_files:
+            print(f"No CIF files found to process.")
+            return
             
+        csv_path = os.path.join(out_dir, "fragmentation_summary.csv")
+        extxyz_path = os.path.join(out_dir, "fragments_collection.extxyz")
+        
+        seen_keys = set()
+        if is_dir:
             # Initialize files
             with open(csv_path, "w") as f:
-                f.write("cif_file,normal_atoms,normal_formula,min_atoms,min_formula\n")
+                f.write("cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n")
             if os.path.exists(extxyz_path):
                 os.remove(extxyz_path)
-            
-            print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
-            
-            has_ase = False
-            try:
-                from ase import Atoms
-                from ase.io import write
-                has_ase = True
-            except ImportError:
-                print("Warning: 'ase' not found. Incremental ExtXYZ collection will be skipped.")
-
-            if args.nproc > 1:
-                with multiprocessing.Pool(args.nproc) as pool:
-                    for r in pool.imap_unordered(_process_mof_file, pool_args):
-                        # Update CSV
-                        with open(csv_path, "a") as f:
-                            f.write(f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{r['min_atoms']},{r['min_formula']}\n")
-                        # Update ExtXYZ
-                        if has_ase:
-                            for key in ["norm_res", "min_res"]:
-                                res_obj = r[key]
-                                if res_obj:
-                                    suffix = "_min" if key == "min_res" else ""
-                                    base_name = r["cif"]
-                                    if base_name.endswith(".cif"): base_name = base_name[:-4]
-                                    frag_name = f"{base_name}_frag_mof{suffix}"
-                                    frag_name = frag_name.replace("[", "_").replace("]", "_")
-                                    at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
-                                    at.info["name"] = frag_name
-                                    write(extxyz_path, at, format="extxyz", append=True)
-            else:
-                for pa in pool_args:
-                    r = _process_mof_file(pa)
-                    # Update CSV
-                    with open(csv_path, "a") as f:
-                        f.write(f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{r['min_atoms']},{r['min_formula']}\n")
-                    # Update ExtXYZ
-                    if has_ase:
-                        for key in ["norm_res", "min_res"]:
-                            res_obj = r[key]
-                            if res_obj:
-                                suffix = "_min" if key == "min_res" else ""
-                                base_name = r["cif"]
-                                if base_name.endswith(".cif"): base_name = base_name[:-4]
-                                frag_name = f"{base_name}_frag_mof{suffix}"
-                                frag_name = frag_name.replace("[", "_").replace("]", "_")
-                                at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
-                                at.info["name"] = frag_name
-                                write(extxyz_path, at, format="extxyz", append=True)
-            
-            print(f"Batch processing complete.")
-            print(f"CSV summary updated at: {csv_path}")
-            if has_ase and os.path.exists(extxyz_path):
-                print(f"ExtXYZ collection updated at: {extxyz_path}")
-            
         else:
-            frag = MOFFragmenter(radius=args.radius)
-            if args.minimize:
-                frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
-                             output_path=args.output, minimize=True)
+            if os.path.exists(extxyz_path):
+                seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                
+        pool_args = [(cif, args.radius, args.center, args.nmetals) for cif in cif_files]
+        
+        def _flush_mof_result(r, seen_keys, csv_path, extxyz_path, is_dir):
+            norm_dup = "no"
+            min_dup = "no"
+            if r['norm_res']:
+                ckey = MOFFragmenter._species_coords_unique_key(r['norm_res'].species, r['norm_res'].coords)
+                if ckey in seen_keys: norm_dup = "yes"
+            if r['min_res']:
+                ckey = MOFFragmenter._species_coords_unique_key(r['min_res'].species, r['min_res'].coords)
+                if ckey in seen_keys: min_dup = "yes"
+
+            new_extxyz_frags = []
+            for key in ["norm_res", "min_res"]:
+                res_obj = r[key]
+                if res_obj:
+                    ckey = MOFFragmenter._species_coords_unique_key(res_obj.species, res_obj.coords)
+                    if ckey in seen_keys:
+                        continue
+                    seen_keys.add(ckey)
+                    suffix = "_min" if key == "min_res" else ""
+                    base_name = r["cif"]
+                    if base_name.endswith(".cif"): base_name = base_name[:-4]
+                    clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
+                    frag_name = f"{clean_base}_frag_mof{suffix}"
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+
+            csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
+            
+            if is_dir:
+                with open(csv_path, "a") as f:
+                    f.write(csv_row)
+                for species, coords, frag_name in new_extxyz_frags:
+                    _write_extxyz(extxyz_path, species, coords, frag_name)
             else:
-                res = frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
-                                   output_path=args.output, minimize=False)
-                if res and len(res.species) > 50:
-                    min_out = str(args.output)
-                    if min_out.endswith(".xyz"):
-                        min_out = min_out[:-4] + "_min.xyz"
-                    else:
-                        min_out += "_min.xyz"
-                    print(f"Normal fragment size > 50. Auto-generating minimize version...")
-                    frag.extract(args.input_path, center_idx=args.center, nmetals=args.nmetals,
-                                 output_path=min_out, minimize=True)
+                base_name = r["cif"]
+                if base_name.endswith(".cif"): base_name = base_name[:-4]
+                clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
+                
+                _update_csv_rows(
+                    csv_path, 
+                    r["cif"], 
+                    [csv_row], 
+                    "cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n"
+                )
+                _update_extxyz_collection(extxyz_path, clean_base, new_extxyz_frags)
+
+        if is_dir and args.nproc > 1:
+            print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
+            with multiprocessing.Pool(args.nproc) as pool:
+                for r in pool.imap_unordered(_process_mof_file, pool_args):
+                    _flush_mof_result(r, seen_keys, csv_path, extxyz_path, is_dir=True)
+        else:
+            for pa in pool_args:
+                _flush_mof_result(_process_mof_file(pa), seen_keys, csv_path, extxyz_path, is_dir=is_dir)
+                
+        print(f"Processing complete.")
+        print(f"CSV summary updated at: {csv_path}")
+        if os.path.exists(extxyz_path):
+            print(f"ExtXYZ collection updated at: {extxyz_path}")
+
     elif args.kind == "cof":
         import os
         import glob
         import multiprocessing
 
-        if os.path.isdir(args.input_path):
+        is_dir = os.path.isdir(args.input_path)
+        if is_dir:
             cif_files = sorted(glob.glob(os.path.join(args.input_path, "*.cif")))
-            if not cif_files:
-                print(f"No CIF files found in {args.input_path}")
+            out_dir = args.input_path
+        else:
+            if not os.path.exists(args.input_path):
+                print(f"File not found: {args.input_path}")
                 return
-            pool_args = [(cif, args.radius, args.center, args.cof_layer) for cif in cif_files]
-            csv_path = os.path.join(args.input_path, "fragmentation_summary.csv")
-            extxyz_path = os.path.join(args.input_path, "fragments_collection.extxyz")
+            cif_files = [args.input_path]
+            out_dir = os.path.dirname(os.path.abspath(args.input_path))
+
+        if not cif_files:
+            print(f"No CIF files found to process.")
+            return
+
+        csv_path = os.path.join(out_dir, "fragmentation_summary.csv")
+        extxyz_path = os.path.join(out_dir, "fragments_collection.extxyz")
+        
+        seen_keys = set()
+        if is_dir:
             with open(csv_path, "w") as f:
-                f.write("cif_file,normal_atoms,normal_formula,min_atoms,min_formula\n")
+                f.write("cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n")
             if os.path.exists(extxyz_path):
                 os.remove(extxyz_path)
-            print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
-            has_ase = False
-            try:
-                from ase import Atoms
-                from ase.io import write
-                has_ase = True
-            except ImportError:
-                print("Warning: 'ase' not found. Incremental ExtXYZ collection will be skipped.")
-
-            def _flush_cof_result(r):
-                with open(csv_path, "a") as f:
-                    f.write(f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{r['min_atoms']},{r['min_formula']}\n")
-                if has_ase:
-                    for key in ["norm_res", "min_res"]:
-                        res_obj = r[key]
-                        if res_obj:
-                            suffix = "_min" if key == "min_res" else ""
-                            base_name = r["cif"]
-                            if base_name.endswith(".cif"): base_name = base_name[:-4]
-                            frag_name = f"{base_name}_frag_cof{suffix}"
-                            frag_name = frag_name.replace("[", "_").replace("]", "_")
-                            at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
-                            at.info["name"] = frag_name
-                            write(extxyz_path, at, format="extxyz", append=True)
-
-            if args.nproc > 1:
-                with multiprocessing.Pool(args.nproc) as pool:
-                    for r in pool.imap_unordered(_process_cof_file, pool_args):
-                        _flush_cof_result(r)
-            else:
-                for pa in pool_args:
-                    _flush_cof_result(_process_cof_file(pa))
-
-            print(f"Batch processing complete.")
-            print(f"CSV summary updated at: {csv_path}")
-            if has_ase and os.path.exists(extxyz_path):
-                print(f"ExtXYZ collection updated at: {extxyz_path}")
         else:
-            frag = COFFragmenter(radius=args.radius, layer_mode=args.cof_layer)
-            frag.extract(args.input_path, center_idx=args.center,
-                         output_path=args.output, minimize=args.minimize)
+            if os.path.exists(extxyz_path):
+                seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+
+        pool_args = [(cif, args.radius, args.center, args.cof_layer) for cif in cif_files]
+
+        def _flush_cof_result(r, seen_keys, csv_path, extxyz_path, is_dir):
+            norm_dup = "no"
+            min_dup = "no"
+            if r['norm_res']:
+                ckey = MOFFragmenter._species_coords_unique_key(r['norm_res'].species, r['norm_res'].coords)
+                if ckey in seen_keys: norm_dup = "yes"
+            if r['min_res']:
+                ckey = MOFFragmenter._species_coords_unique_key(r['min_res'].species, r['min_res'].coords)
+                if ckey in seen_keys: min_dup = "yes"
+
+            new_extxyz_frags = []
+            for key in ["norm_res", "min_res"]:
+                res_obj = r[key]
+                if res_obj:
+                    ckey = MOFFragmenter._species_coords_unique_key(res_obj.species, res_obj.coords)
+                    if ckey in seen_keys:
+                        continue
+                    seen_keys.add(ckey)
+                    suffix = "_min" if key == "min_res" else ""
+                    base_name = r["cif"]
+                    if base_name.endswith(".cif"): base_name = base_name[:-4]
+                    clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
+                    frag_name = f"{clean_base}_frag_cof{suffix}"
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+
+            csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
+
+            if is_dir:
+                with open(csv_path, "a") as f:
+                    f.write(csv_row)
+                for species, coords, frag_name in new_extxyz_frags:
+                    _write_extxyz(extxyz_path, species, coords, frag_name)
+            else:
+                base_name = r["cif"]
+                if base_name.endswith(".cif"): base_name = base_name[:-4]
+                clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
+                
+                _update_csv_rows(
+                    csv_path, 
+                    r["cif"], 
+                    [csv_row], 
+                    "cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n"
+                )
+                _update_extxyz_collection(extxyz_path, clean_base, new_extxyz_frags)
+
+        if is_dir and args.nproc > 1:
+            print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
+            with multiprocessing.Pool(args.nproc) as pool:
+                for r in pool.imap_unordered(_process_cof_file, pool_args):
+                    _flush_cof_result(r, seen_keys, csv_path, extxyz_path, is_dir=True)
+        else:
+            for pa in pool_args:
+                _flush_cof_result(_process_cof_file(pa), seen_keys, csv_path, extxyz_path, is_dir=is_dir)
+
+        print(f"Processing complete.")
+        print(f"CSV summary updated at: {csv_path}")
+        if os.path.exists(extxyz_path):
+            print(f"ExtXYZ collection updated at: {extxyz_path}")
 
     else:  # bio
         import os
         import glob
         import multiprocessing
 
-        if os.path.isdir(args.input_path):
+        is_dir = os.path.isdir(args.input_path)
+        if is_dir:
             pdb_files = sorted(glob.glob(os.path.join(args.input_path, "*.pdb")))
-            if not pdb_files:
-                print(f"No PDB files found in {args.input_path}")
+            out_dir = args.input_path
+        else:
+            if not os.path.exists(args.input_path):
+                print(f"File not found: {args.input_path}")
                 return
-            pool_args = [
-                (pdb, args.window_size, args.stride, not args.no_pdbfixer, args.ph, args.chain)
-                for pdb in pdb_files
-            ]
-            csv_path = os.path.join(args.input_path, "bio_fragmentation_summary.csv")
-            extxyz_path = os.path.join(args.input_path, "bio_fragments_collection.extxyz")
+            pdb_files = [args.input_path]
+            out_dir = os.path.dirname(os.path.abspath(args.input_path))
+
+        if not pdb_files:
+            print(f"No PDB files found to process.")
+            return
+
+        csv_path = os.path.join(out_dir, "bio_fragmentation_summary.csv")
+        extxyz_path = os.path.join(out_dir, "bio_fragments_collection.extxyz")
+        
+        seen_keys = set()
+        if is_dir:
             with open(csv_path, "w") as f:
-                f.write("pdb_file,window_name,n_atoms\n")
+                f.write("pdb_file,window_name,n_atoms,is_duplicate\n")
             if os.path.exists(extxyz_path):
                 os.remove(extxyz_path)
-            print(f"Processing {len(pdb_files)} PDB files using {args.nproc} processes...")
-            has_ase = False
-            try:
-                from ase import Atoms
-                from ase.io import write
-                has_ase = True
-            except ImportError:
-                print("Warning: 'ase' not found. Incremental ExtXYZ collection will be skipped.")
-
-            def _flush_bio_result(r):
-                base_name = r["pdb"]
-                if base_name.lower().endswith(".pdb"): base_name = base_name[:-4]
-                with open(csv_path, "a") as f:
-                    for win_idx, res_obj in enumerate(r["results"]):
-                        win_name = f"{base_name}_w{win_idx:03d}"
-                        f.write(f"{r['pdb']},{win_name},{len(res_obj.species)}\n")
-                if has_ase:
-                    for win_idx, res_obj in enumerate(r["results"]):
-                        win_name = f"{base_name}_w{win_idx:03d}"
-                        frag_name = win_name.replace("[", "_").replace("]", "_")
-                        at = Atoms(symbols=res_obj.species, positions=res_obj.coords)
-                        at.info["name"] = frag_name
-                        write(extxyz_path, at, format="extxyz", append=True)
-
-            if args.nproc > 1:
-                with multiprocessing.Pool(args.nproc) as pool:
-                    for r in pool.imap_unordered(_process_bio_file, pool_args):
-                        _flush_bio_result(r)
-            else:
-                for pa in pool_args:
-                    _flush_bio_result(_process_bio_file(pa))
-
-            print(f"Batch processing complete.")
-            print(f"CSV summary updated at: {csv_path}")
-            if has_ase and os.path.exists(extxyz_path):
-                print(f"ExtXYZ collection updated at: {extxyz_path}")
         else:
-            frag = BioMolFragmenter(
-                window_size=args.window_size,
-                stride=args.stride,
-                use_pdbfixer=not args.no_pdbfixer,
-                ph=args.ph,
-            )
-            frag.extract(args.input_path, output_dir=args.output_dir, chain=args.chain)
+            if os.path.exists(extxyz_path):
+                seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+
+        pool_args = [
+            (pdb, args.window_size, args.stride, not args.no_pdbfixer, args.ph, args.chain)
+            for pdb in pdb_files
+        ]
+
+        def _flush_bio_result(r, seen_keys, csv_path, extxyz_path, is_dir):
+            base_name = r["pdb"]
+            if base_name.lower().endswith(".pdb"): base_name = base_name[:-4]
+            clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
+            
+            rows_to_write = []
+            new_extxyz_frags = []
+            
+            for win_idx, res_obj in enumerate(r["results"]):
+                win_name = f"{clean_base}_w{win_idx:03d}"
+                ckey = MOFFragmenter._species_coords_unique_key(res_obj.species, res_obj.coords)
+                if ckey in seen_keys:
+                    rows_to_write.append(f"{r['pdb']},{win_name},{len(res_obj.species)},yes\n")
+                else:
+                    seen_keys.add(ckey)
+                    rows_to_write.append(f"{r['pdb']},{win_name},{len(res_obj.species)},no\n")
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, win_name))
+
+            if is_dir:
+                with open(csv_path, "a") as f:
+                    for row in rows_to_write:
+                        f.write(row)
+                for species, coords, win_name in new_extxyz_frags:
+                    _write_extxyz(extxyz_path, species, coords, win_name)
+            else:
+                _update_csv_rows(
+                    csv_path, 
+                    r["pdb"], 
+                    rows_to_write, 
+                    "pdb_file,window_name,n_atoms,is_duplicate\n"
+                )
+                _update_extxyz_collection(extxyz_path, clean_base, new_extxyz_frags)
+
+        if is_dir and args.nproc > 1:
+            print(f"Processing {len(pdb_files)} PDB files using {args.nproc} processes...")
+            with multiprocessing.Pool(args.nproc) as pool:
+                for r in pool.imap_unordered(_process_bio_file, pool_args):
+                    _flush_bio_result(r, seen_keys, csv_path, extxyz_path, is_dir=True)
+        else:
+            for pa in pool_args:
+                _flush_bio_result(_process_bio_file(pa), seen_keys, csv_path, extxyz_path, is_dir=is_dir)
+
+        print(f"Processing complete.")
+        print(f"CSV summary updated at: {csv_path}")
+        if os.path.exists(extxyz_path):
+            print(f"ExtXYZ collection updated at: {extxyz_path}")
 
 
 if __name__ == "__main__":

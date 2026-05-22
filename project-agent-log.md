@@ -2,6 +2,33 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-22 - UniFrag: Unified Execution, Atomic Updates, and Legacy XYZ Cleanup
+- Changed files:
+  - `fragmentation_oop.py` — Verified and finalized unified directory/single-file processing using atomic/incremental collection update helpers (`_update_csv_rows`, `_update_extxyz_collection`) and `write_files=False` for Bio sliding-windows.
+  - `test_on_mof_mg_based/` — Deleted all remaining legacy individual `.xyz` files to keep the directory clean.
+- Summary:
+  - Verified and finalized the unified batch/single execution path: the script dynamically processes inputs (single structure or directory), increments/updates the central ExtXYZ and CSV collections, and produces absolutely no individual `.xyz` files.
+  - Deleted legacy individual `.xyz` files in the `test_on_mof_mg_based/` folder.
+  - Confirmed the removal of underscores inside the base names (e.g. `2015Mgdia3ASR1_frag_mof`) under the `label=` key in ExtXYZ headers.
+- Validation:
+  - Verified folder-mode processing of the Mg MOFs folder successfully completes, creating the summary CSV and ExtXYZ collections and leaving no individual `.xyz` files behind.
+  - Verified single-file mode incrementally updates the specific CSV rows and ExtXYZ frames for that structure, leaving other records untouched.
+- Follow-up risks:
+  - None.
+
+## 2026-05-22 - UniFrag: Replace name with label in ExtXYZ headers
+- Changed files:
+  - `fragmentation_oop.py` — modified Atoms info assignments from `"name"` to `"label"` across MOF, COF, and Bio modes.
+  - `project-decisions.md` — documented this decision.
+  - `project-agent-log.md` — updated the agent log.
+- Summary:
+  - Replaced `"name"` with `"label"` in the Atoms info headers for `fragments_collection.extxyz` and `bio_fragments_collection.extxyz` files. This ensures that the generated ExtXYZ frame comment lines consistently output `label=...` instead of `name=...`.
+- Validation:
+  - Verified compilation of `fragmentation_oop.py` succeeds without errors.
+  - Tested fragmentation on `test_on_mof_mg_based/2015[Mg][dia]3[ASR]1.cif` to confirm the generated `fragments_collection.extxyz` header has `label=2015_Mg__dia_3_ASR_1_frag_mof` and no longer uses `name`.
+- Follow-up risks:
+  - Downstream custom parsers that strictly look for the literal string `name=` inside ExtXYZ headers will need to look for `label=` instead.
+
 ## 2026-05-14 - UniFrag: unified batch processing, parallel --nproc, incremental CSV/ExtXYZ for all modes
 - Changed files:
   - `fragmentation_oop.py` — added `_process_cof_file`, `_process_bio_file` top-level helpers; extended COF and bio branches in `main()` with full folder-mode support; bio batch CSV now writes one row per window with `window_name` and `n_atoms`
