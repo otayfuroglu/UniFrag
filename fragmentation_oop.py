@@ -1550,6 +1550,35 @@ class BaseFragmenter:
 
         return species, coords, capped_h_flags
 
+    def ensure_qm_ready(self, species, coords, capped_h_flags):
+        """
+        Lightweight gate in front of the heavy RDKit saturation engine.
+
+        1. Run a quick QMReadinessChecker pass on the fragment as-is.
+        2. If charge == 0 and multiplicity == 1  → return immediately (fast path).
+        3. Otherwise delegate to force_qm_readiness (RDKit-driven fix).
+
+        This avoids running the RDKit bond-perception pipeline on the majority
+        of fragments that are already chemically correct after geometric capping.
+        """
+        # Normalise capped_h_flags once here so both branches receive consistent input
+        is_bool_list = (
+            len(capped_h_flags) == len(species)
+            and all(isinstance(x, bool) for x in capped_h_flags)
+        )
+        if not is_bool_list:
+            indices_set = set(capped_h_flags)
+            capped_h_flags = [i in indices_set for i in range(len(species))]
+        if len(capped_h_flags) < len(species):
+            capped_h_flags = capped_h_flags + [False] * (len(species) - len(capped_h_flags))
+
+        qm_info = QMReadinessChecker.check_qm_readiness(species, coords)
+        if qm_info["charge"] == 0 and qm_info["multiplicity"] == 1:
+            # Already QM-ready – skip the heavy engine entirely
+            return species, coords, capped_h_flags
+
+        # Needs correction – delegate to the full RDKit-driven engine
+        return self.force_qm_readiness(species, coords, capped_h_flags)
 
 
 class MOFFragmenter(BaseFragmenter):
@@ -2271,7 +2300,7 @@ class MOFFragmenter(BaseFragmenter):
         self._cap_path_j_open_oxygens(species, coords, capped_h_flags)
         # Path J keeps helper node/linker heavy atoms fixed. Only capped H
         # coordinates are locally adjusted, and formal charge/multiplicity are pushed to 0/1.
-        species, coords, capped_h_flags = self.force_qm_readiness(species, coords, capped_h_flags)
+        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
 
         mol = Molecule(species, coords)
         if output_path:
@@ -2562,7 +2591,7 @@ class MOFFragmenter(BaseFragmenter):
 
         bool_flags = [i in getattr(self, "_last_capped_h_indices", []) for i in range(len(final_species))]
         final_species, final_coords, bool_flags = self.enforce_single_molecule(final_species, final_coords, bool_flags)
-        final_species, final_coords, bool_flags = self.force_qm_readiness(final_species, final_coords, bool_flags)
+        final_species, final_coords, bool_flags = self.ensure_qm_ready(final_species, final_coords, bool_flags)
         self._last_capped_h_indices = [i for i, f in enumerate(bool_flags) if f]
         if output_path:
             mol = Molecule(final_species, final_coords)
@@ -3565,7 +3594,7 @@ class COFFragmenter(BaseFragmenter):
             coords = [coords[i] for i in keep_idx]
             capped_h_flags = [capped_h_flags[i] for i in keep_idx]
 
-        species, coords, capped_h_flags = self.force_qm_readiness(species, coords, capped_h_flags)
+        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
 
         # Normal dimer: preserve a complete monomer then place second copy at
         # the actual crystal layer vector to avoid one-sided linker loss.
@@ -3748,7 +3777,7 @@ class COFFragmenter(BaseFragmenter):
 
         # Keep helper heavy atoms fixed; only adjust capped H atoms.
         self._cap_open_oxygens(species, coords, capped_h_flags)
-        species, coords, capped_h_flags = self.force_qm_readiness(species, coords, capped_h_flags)
+        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
 
         # Global layered-COF rule for Path J: if a face-to-face layer spacing is
         # present and dimer output is requested, duplicate the completed fragment
@@ -4034,7 +4063,7 @@ class COFFragmenter(BaseFragmenter):
                                 vec = np.array(unwrapped[v]) - np.array(unwrapped[u])
                                 self.place_capping_h(li, vec, self.cap_bond_length(su), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
-                        species, coords, capped_h_flags = self.force_qm_readiness(species, coords, capped_h_flags)
+                        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
 
                         if do_stack_dimer:
                             # Use geometric layer shift from nearest node component
@@ -5250,7 +5279,7 @@ class COFFragmenter(BaseFragmenter):
                 capped_h_flags = base_flags + base_flags
 
         self._cap_open_oxygens(species, coords, capped_h_flags)
-        species, coords, capped_h_flags = self.force_qm_readiness(species, coords, capped_h_flags)
+        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
         print(f"Final size: {len(species)} atoms")
         mol = Molecule(species, coords)
         if output_path:
@@ -5650,7 +5679,7 @@ class BioMolFragmenter(BaseFragmenter):
         species, coords, capped_h_flags = self.enforce_single_molecule(species, coords, capped_h_flags)
 
         # 6) geometry-clean and force QM readiness (charge=0, multiplicity=1)
-        species, coords, capped_h_flags = self.force_qm_readiness(species, coords, capped_h_flags)
+        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
 
         return species, coords, capped_h_flags
 
