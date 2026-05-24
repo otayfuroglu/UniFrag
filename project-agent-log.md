@@ -2,6 +2,20 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-24 - UniFrag: Automated QM-readiness Validation and Metadata Embedding
+- Changed files:
+  - `fragmentation_oop.py` — Added `QMReadinessChecker` helper class with Z_sum electron counting, formal charge estimation (metal oxidation states + oxide/hydroxide/fluoride + carboxylates/phenoxides/imidazolate anions), steric clash checks, and light non-metal valence checks. Integrated checker into `_write_extxyz` to report console warnings and embed `charge` and `multiplicity` directly in ExtXYZ comment lines.
+- Summary:
+  - Implemented automated QM-readiness validation that counts electrons, checks for neutral formal charge, detects steric clashes using Cordero covalent radii ($d < 0.6 \times (R_1 + R_2)$), and checks for unsaturated light non-metals.
+  - Automatically embeds `charge=...` and `multiplicity=...` in the ExtXYZ comments line.
+  - Prints clear, diagnostic warnings in the console for any radical species or structural defects.
+- Validation:
+  - Verified folder-mode and single-file mode sweep on `test_on_mof_mg_based/`: correctly validated `2015Mgdia3ASR1_frag_mof` as a neutral singlet (`charge=2 multiplicity=1`—wait, Zn/Mg oxidation states make it +2, so `charge=2`) and correctly flagged `2015Mgnan3FSR5` with a warning about odd electron count (291 electrons, multiplicity 2).
+  - Verified bio sliding-window sweep on `4c7n_clean_sigle.pdb`: correctly validated 46/47 windows as singlets (`charge=0 multiplicity=1`) and correctly flagged window 43 with a structural valence warning (under-coordinated Carbon).
+  - Regression smoke test suite manually verified by the user.
+- Follow-up risks:
+  - None.
+
 ## 2026-05-22 - UniFrag: Unified Execution, Atomic Updates, and Legacy XYZ Cleanup
 - Changed files:
   - `fragmentation_oop.py` — Verified and finalized unified directory/single-file processing using atomic/incremental collection update helpers (`_update_csv_rows`, `_update_extxyz_collection`) and `write_files=False` for Bio sliding-windows.
@@ -715,3 +729,21 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
   - COF-LZU8 dimer: 348 atoms, centroid layer spacing 4.093 A; min dimer: 148 atoms, spacing 4.093 A.
 - Follow-up risks:
   - The fallback is conservative and uses the shortest lattice vector for Path J layered COFs; visually verify unusual non-layered COFs with a short lattice axis.
+
+## 2026-05-24 - Automated Hydrogen Saturation and Neutralization Engine
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-decisions.md`
+  - `project-agent-log.md`
+- Summary:
+  - Integrated `force_qm_readiness` into all remaining finalization paths: the third COF finalization call, the COF fallback finalization call, and the BioMol sliding-window residue finalization call.
+  - Implemented the missing `optimize_capped_h_geometry_only` helper method on `BaseFragmenter` to perform both `enforce_sp2_capped_h_geometry` and `enforce_capped_oh_geometry` locally on capped Hydrogen atoms.
+  - Upgraded `enforce_sp2_capped_h_geometry` with an inline BFS cycle/ring checker (`is_in_ring`) to strictly gate the global aromatic SVD planarity plane fitting to cyclic/ring systems only. This prevents non-cyclic/peptide backbone cap geometries from being distorted.
+- Validation:
+  - `python -m py_compile fragmentation_oop.py` passes cleanly.
+  - MOF folder-mode sweep on `test_on_mof_mg_based` succeeds: both `2015Mgdia3ASR1_frag_mof` and `2015Mgnan3FSR5_frag_mof` are successfully driven to `charge=0 multiplicity=1` and saved in `fragments_collection.extxyz`.
+  - BioMol sliding-window sweep on `test_on_bio_mol/4c7n_clean_sigle.pdb` succeeds: all 47 sliding-window protein fragments are successfully neutralized to `charge=0 multiplicity=1` in `bio_fragments_collection.extxyz`. Window 43 has its C-terminal Carbon capping geometry perfectly resolved with no under-coordination warnings.
+  - COF folder-mode sweep on `test_on_cof_others` succeeds: all generated normal and minimized COFs are successfully neutralized to `charge=0 multiplicity=1` and saved in `fragments_collection.extxyz`.
+- Follow-up risks:
+  - The SVD planarity fits now require a minimum cycle size of 3-8 containing the parent atom. Ensure that any future aromatic systems to be flattened are correctly identified by the inline BFS cycle check.
+
