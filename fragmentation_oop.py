@@ -892,16 +892,17 @@ class BaseFragmenter:
         return adj
 
     def _saturate_radical_site(self, species, coords, capped_h_flags):
-        """Finds the most under-coordinated light non-metal atom and adds 1 H atom to satisfy its valence."""
+        """Finds the most under-coordinated light non-metal atom and adds 1 H atom
+        to satisfy its valence.  Uses ``place_capping_h`` for clash-checked placement."""
         import numpy as np
         n = len(species)
         adj = self._build_bond_graph_all(species, coords)
-        
+
         # Prioritize Carbon first, then Nitrogen, then Oxygen, then Boron
         target_priorities = ["C", "N", "O", "B"]
         best_idx = None
         best_deficit = 0
-        
+
         for priority in target_priorities:
             for i in range(n):
                 if species[i] == priority:
@@ -913,29 +914,39 @@ class BaseFragmenter:
                         best_idx = i
             if best_idx is not None:
                 break
-                
+
         if best_idx is not None:
-            # Add Hydrogen atom along open valence direction
             parent_pos = np.array(coords[best_idx])
             nbs = adj[best_idx]
+            bl = self.cap_bond_length(species[best_idx])
+
+            # Compute a base direction to seed place_capping_h
             if len(nbs) == 0:
-                h_pos = parent_pos + np.array([0.0, 0.0, 1.09])
+                base_vec = np.array([0.0, 0.0, 1.0])
             elif len(nbs) == 1:
-                vec = parent_pos - np.array(coords[nbs[0]])
-                vec /= np.linalg.norm(vec)
-                h_pos = parent_pos + self.cap_bond_length(species[best_idx]) * vec
+                v = parent_pos - np.array(coords[nbs[0]])
+                nn = np.linalg.norm(v)
+                base_vec = v / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
             else:
-                # Average bisector direction
                 vecs = [parent_pos - np.array(coords[nb]) for nb in nbs]
-                avg_vec = np.mean(vecs, axis=0)
-                avg_vec /= np.linalg.norm(avg_vec)
-                h_pos = parent_pos + self.cap_bond_length(species[best_idx]) * avg_vec
-                
-            species.append("H")
-            coords.append(h_pos.tolist())
-            capped_h_flags.append(True)
-            print(f"QM-Engine: Saturated radical site {best_idx}({species[best_idx]}) with 1 H atom.")
-            
+                avg = np.mean(vecs, axis=0)
+                nn = np.linalg.norm(avg)
+                base_vec = avg / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+            before_len = len(species)
+            self.place_capping_h(best_idx, base_vec, bl,
+                                  species, coords, capped_h_flags=capped_h_flags)
+
+            if len(species) > before_len:
+                print(f"QM-Engine: Saturated radical site {best_idx}({species[best_idx]}) with 1 H atom.")
+            else:
+                # place_capping_h couldn't find a non-clashing position; append anyway
+                h_pos = parent_pos + bl * base_vec
+                species.append("H")
+                coords.append(h_pos.tolist())
+                capped_h_flags.append(True)
+                print(f"QM-Engine: Saturated radical site {best_idx}({species[best_idx]}) with 1 H atom (forced).")
+
         return species, coords, capped_h_flags
 
     def _protonate_anions(self, species, coords, capped_h_flags, count):
@@ -1033,50 +1044,510 @@ class BaseFragmenter:
             
         return species, coords, capped_h_flags
 
+    # ------------------------------------------------------------------ #
+    #  RDKit-driven valence/saturation helpers                            #
+    # ------------------------------------------------------------------ #
+
+    # Elements treated as metals (stripped before RDKit perception)
+    _RDKIT_METAL_ELEMENTS = {
+        "Li", "Na", "K", "Rb", "Cs",
+        "Be", "Mg", "Ca", "Sr", "Ba",
+        "Sc", "Ti", "V",  "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+        "Y",  "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
+        "Hf", "Ta", "W",  "Re", "Os", "Ir", "Pt", "Au", "Hg",
+        "Al", "Ga", "In", "Sn", "Tl", "Pb", "Bi",
+        "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd",
+        "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+    }
+
+    @staticmethod
+    def _metal_charge_estimate(species):
+        """Sum up standard oxidation-state charges for all metals present."""
+        return sum(
+            QMReadinessChecker.METAL_OXIDATION_STATES.get(s, 0)
+            for s in species
+        )
+
+    def _build_rdkit_mol_organic(self, species, coords):
+        """
+        Build an RDKit molecule from the purely organic (non-metal) atoms.
+
+        Returns
+        -------
+        mol : rdkit.Chem.RWMol or None
+        org_indices : list[int]  – original indices of atoms kept in mol
+        """
+        try:
+            from rdkit import Chem
+        except ImportError:
+            return None, []
+
+        metals = self._RDKIT_METAL_ELEMENTS
+        org_indices = [i for i, s in enumerate(species) if s not in metals]
+
+        if not org_indices:
+            return None, []
+
+        # Build xyz block for the organic sub-system
+        xyz_lines = [str(len(org_indices)), ""]
+        for i in org_indices:
+            x, y, z = coords[i]
+            xyz_lines.append(f"{species[i]}  {x:.6f}  {y:.6f}  {z:.6f}")
+        xyz_block = "\n".join(xyz_lines)
+
+        try:
+            mol = Chem.MolFromXYZBlock(xyz_block)
+            if mol is None:
+                return None, org_indices
+        except Exception:
+            return None, org_indices
+
+        return mol, org_indices
+
+    @staticmethod
+    def _rdkit_determine_bonds(mol):
+        """
+        Try RDKit DetermineBonds with a sweep of charge values (0 first, then
+        ±1, ±2, ±3 …).  The organic framework is H-capped and usually neutral
+        after metal stripping, so charge=0 succeeds in the vast majority of
+        cases.
+
+        Returns
+        -------
+        succeeded : bool
+        used_charge : int  (the charge value that worked, or 0 on failure)
+        """
+        try:
+            from rdkit.Chem import rdDetermineBonds
+        except ImportError:
+            return False, 0
+
+        for delta in [0, -1, 1, -2, 2, -3, 3]:
+            try:
+                import copy
+                mol_copy = copy.copy(mol)
+                rdDetermineBonds.DetermineConnectivity(mol_copy)
+                rdDetermineBonds.DetermineBonds(mol_copy, charge=delta)
+                # If we reach here, it worked – apply to the real mol
+                rdDetermineBonds.DetermineConnectivity(mol)
+                rdDetermineBonds.DetermineBonds(mol, charge=delta)
+                return True, delta
+            except Exception:
+                continue
+        return False, 0
+
+    def _fix_valence_violations_rdkit(self, species, coords, capped_h_flags):
+        """
+        Use RDKit bond perception on the metal-stripped organic framework to
+        detect atoms that are OVER-COORDINATED (i.e. have more bonds than their
+        maximum normal valence allows).  For every excess bond, if a neighbour
+        is a capped Hydrogen it is the first candidate for removal.
+
+        Returns
+        -------
+        species, coords, capped_h_flags, changed : bool
+        """
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import rdDetermineBonds
+        except ImportError:
+            return species, coords, capped_h_flags, False
+
+        import numpy as np
+
+        mol, org_indices = self._build_rdkit_mol_organic(species, coords)
+        if mol is None or len(org_indices) == 0:
+            return species, coords, capped_h_flags, False
+
+        succeeded, used_charge = self._rdkit_determine_bonds(mol)
+        if not succeeded:
+            print("QM-RDKit: DetermineBonds (valence check) could not find valid bond ordering.")
+            return species, coords, capped_h_flags, False
+
+        # Maximum valences for light non-metals
+        MAX_VALENCE = {"C": 4, "N": 3, "O": 2, "S": 6, "P": 5, "B": 3, "F": 1, "Cl": 1, "Br": 1, "I": 1}
+
+        # Map from RDKit atom index → original index
+        rdk2orig = {ri: org_indices[ri] for ri in range(len(org_indices))}
+
+        h_to_remove = []  # original indices to delete
+
+        for atom in mol.GetAtoms():
+            sym = atom.GetSymbol()
+            if sym not in MAX_VALENCE:
+                continue
+            max_v = MAX_VALENCE[sym]
+            # Total degree in RDKit (includes explicit+implicit H)
+            # We use explicit degree from the perceived graph
+            explicit_degree = atom.GetDegree()
+            # Count implicit H that RDKit assigned
+            implicit_h = atom.GetNumImplicitHs()
+            total_v = explicit_degree + implicit_h
+            if total_v <= max_v:
+                continue
+
+            excess = total_v - max_v
+            orig_idx = rdk2orig[atom.GetIdx()]
+            print(f"QM-RDKit: Over-coordinated {sym}[orig={orig_idx}] "
+                  f"degree={explicit_degree} implH={implicit_h} max={max_v} excess={excess}")
+
+            # Prefer to remove *capped* Hydrogen neighbours in the original list
+            # (they are the ones we added, so they are the safe removal targets)
+            h_nbs_capped = []
+            h_nbs_any = []
+            for nb in atom.GetNeighbors():
+                if nb.GetSymbol() == "H":
+                    nb_orig = rdk2orig.get(nb.GetIdx())
+                    if nb_orig is not None:
+                        if capped_h_flags[nb_orig]:
+                            h_nbs_capped.append(nb_orig)
+                        else:
+                            h_nbs_any.append(nb_orig)
+
+            # Also look for un-mapped capped H by geometry (within 1.3 Å)
+            orig_pos = np.array(coords[orig_idx])
+            for gi, gs in enumerate(species):
+                if gs == "H" and capped_h_flags[gi] and gi not in h_nbs_capped:
+                    d = np.linalg.norm(orig_pos - np.array(coords[gi]))
+                    if d < 1.3:
+                        h_nbs_capped.append(gi)
+
+            # Remove excess capped Hs first, then any H if still needed
+            candidates = h_nbs_capped + h_nbs_any
+            for h_idx in candidates[:excess]:
+                if h_idx not in h_to_remove:
+                    h_to_remove.append(h_idx)
+
+        if not h_to_remove:
+            return species, coords, capped_h_flags, False
+
+        keep = set(range(len(species))) - set(h_to_remove)
+        keep = sorted(keep)
+        species = [species[i] for i in keep]
+        coords = [coords[i] for i in keep]
+        capped_h_flags = [capped_h_flags[i] for i in keep]
+        print(f"QM-RDKit: Removed {len(h_to_remove)} over-coordinated H atom(s).")
+        return species, coords, capped_h_flags, True
+
+    def _adjust_qm_readiness_rdkit(self, species, coords, capped_h_flags, charge, multiplicity):
+        """
+        Use RDKit bond perception on the metal-stripped organic framework to
+        perform targeted protonation/deprotonation:
+
+        * Radical (multiplicity > 1): add H to the atom with most radical electrons.
+        * Negative charge: add H to the most basic anion site (O⁻ > N⁻ > C⁻ radical).
+        * Positive charge: remove H from the most acidic site (-COOH > -OH > -NH).
+
+        Returns
+        -------
+        species, coords, capped_h_flags, succeeded : bool
+        """
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import rdDetermineBonds
+        except ImportError:
+            return species, coords, capped_h_flags, False
+
+        import numpy as np
+
+        mol, org_indices = self._build_rdkit_mol_organic(species, coords)
+        if mol is None or len(org_indices) == 0:
+            return species, coords, capped_h_flags, False
+
+        succeeded, used_charge = self._rdkit_determine_bonds(mol)
+        if not succeeded:
+            print("QM-RDKit: DetermineBonds (adjust) could not find valid bond ordering.")
+            return species, coords, capped_h_flags, False
+
+        rdk2orig = {ri: org_indices[ri] for ri in range(len(org_indices))}
+
+        # ---- Helper: add H to a given heavy atom ----
+        def _add_h_to(orig_idx):
+            parent_pos = np.array(coords[orig_idx])
+            nbs = []
+            for gi, gs in enumerate(species):
+                if gi == orig_idx or gs == "H":
+                    continue
+                d = np.linalg.norm(parent_pos - np.array(coords[gi]))
+                r1 = QMReadinessChecker.COV_RAD.get(species[orig_idx], 0.77)
+                r2 = QMReadinessChecker.COV_RAD.get(gs, 0.77)
+                if d <= 1.3 * (r1 + r2):
+                    nbs.append(gi)
+            if len(nbs) == 0:
+                base_vec = np.array([0.0, 0.0, 1.0])
+            elif len(nbs) == 1:
+                vec = parent_pos - np.array(coords[nbs[0]])
+                nn = np.linalg.norm(vec)
+                base_vec = vec / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
+            else:
+                vecs = [parent_pos - np.array(coords[nb]) for nb in nbs]
+                avg = np.mean(vecs, axis=0)
+                nn = np.linalg.norm(avg)
+                base_vec = avg / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
+            bl = self.cap_bond_length(species[orig_idx])
+            before_len = len(species)
+            self.place_capping_h(orig_idx, base_vec, bl,
+                                  species, coords, capped_h_flags=capped_h_flags)
+            if len(species) == before_len:
+                # No non-clashing spot found; force placement along base direction
+                h_pos = parent_pos + bl * base_vec
+                species.append("H")
+                coords.append(h_pos.tolist())
+                capped_h_flags.append(True)
+            print(f"QM-RDKit: Added H to {species[orig_idx]}[{orig_idx}].")
+
+        # ---- Helper: remove one capped H from a given heavy atom ----
+        def _remove_h_from(orig_idx):
+            parent_pos = np.array(coords[orig_idx])
+            # Find nearest capped H
+            best_h = None
+            best_d = 2.0
+            for gi, gs in enumerate(species):
+                if gs == "H" and capped_h_flags[gi]:
+                    d = np.linalg.norm(parent_pos - np.array(coords[gi]))
+                    if d < best_d:
+                        best_d = d
+                        best_h = gi
+            if best_h is None:
+                # Fall back to any H neighbour
+                for gi, gs in enumerate(species):
+                    if gs == "H":
+                        d = np.linalg.norm(parent_pos - np.array(coords[gi]))
+                        if d < best_d:
+                            best_d = d
+                            best_h = gi
+            if best_h is None:
+                return False
+            keep = [i for i in range(len(species)) if i != best_h]
+            # Rebuild lists in-place via slice assignment
+            species[:] = [species[i] for i in keep]
+            coords[:] = [coords[i] for i in keep]
+            capped_h_flags[:] = [capped_h_flags[i] for i in keep]
+            print(f"QM-RDKit: Removed H from {species[orig_idx]}[{orig_idx}].")
+            return True
+
+        succeeded = False
+
+        # --- CASE 1: Radical → add H to atom with most radical electrons ---
+        if multiplicity > 1:
+            best_atom = None
+            best_rad = 0
+            for atom in mol.GetAtoms():
+                rad = atom.GetNumRadicalElectrons()
+                if rad > best_rad:
+                    best_rad = rad
+                    best_atom = atom
+            if best_atom is not None:
+                _add_h_to(rdk2orig[best_atom.GetIdx()])
+                succeeded = True
+            else:
+                # Fallback: use _saturate_radical_site heuristic
+                species, coords, capped_h_flags = self._saturate_radical_site(
+                    species, coords, capped_h_flags)
+                succeeded = True
+            return species, coords, capped_h_flags, succeeded
+
+        # --- CASE 2: Negative charge → protonate ---
+        if charge < 0:
+            # Priority: O⁻ (formal charge -1), then N⁻, then C radical
+            candidates_o = []   # (rdkit_atom_idx, formal_charge)
+            candidates_n = []
+            for atom in mol.GetAtoms():
+                fc = atom.GetFormalCharge()
+                sym = atom.GetSymbol()
+                if fc < 0:
+                    if sym == "O":
+                        candidates_o.append((atom.GetIdx(), fc))
+                    elif sym == "N":
+                        candidates_n.append((atom.GetIdx(), fc))
+            # Sort most-negative first
+            candidates_o.sort(key=lambda x: x[1])
+            candidates_n.sort(key=lambda x: x[1])
+            all_cands = [a for a, _ in candidates_o] + [a for a, _ in candidates_n]
+
+            if all_cands:
+                _add_h_to(rdk2orig[all_cands[0]])
+                succeeded = True
+            else:
+                # No formal charge: use heuristic
+                species, coords, capped_h_flags = self._protonate_anions(
+                    species, coords, capped_h_flags, count=1)
+                succeeded = True
+            return species, coords, capped_h_flags, succeeded
+
+        # --- CASE 3: Positive charge → deprotonate ---
+        if charge > 0:
+            # Priority: O with H (acid OH), then N with H (amine/amide), then C-H
+            # Among O-H groups prefer carboxyl (O-C=O) over free OH
+            best_oh = None  # (score, rdkit_atom_idx)
+            for atom in mol.GetAtoms():
+                sym = atom.GetSymbol()
+                if sym not in ("O", "N", "C"):
+                    continue
+                # Count H neighbours
+                h_nbs = [nb for nb in atom.GetNeighbors() if nb.GetSymbol() == "H"]
+                if not h_nbs:
+                    continue
+                # Score: carboxyl O > free O-H > N-H > C-H
+                score = 0
+                if sym == "O":
+                    heavy_nbs = [nb for nb in atom.GetNeighbors() if nb.GetSymbol() != "H"]
+                    if any(nb.GetSymbol() == "C" for nb in heavy_nbs):
+                        c_nb = next(nb for nb in heavy_nbs if nb.GetSymbol() == "C")
+                        # Check if carbon is C=O (carboxyl)
+                        if any(b.GetBondTypeAsDouble() >= 1.5 for b in c_nb.GetBonds()
+                               if b.GetOtherAtom(c_nb).GetSymbol() == "O"
+                                  and b.GetOtherAtomIdx(c_nb.GetIdx()) != atom.GetIdx()):
+                            score = 3  # carboxyl OH
+                        else:
+                            score = 2  # phenol/alcohol OH
+                    else:
+                        score = 2
+                elif sym == "N":
+                    score = 1
+                else:  # C
+                    score = 0
+                if best_oh is None or score > best_oh[0]:
+                    best_oh = (score, atom.GetIdx())
+
+            if best_oh is not None:
+                _remove_h_from(rdk2orig[best_oh[1]])
+                succeeded = True
+            else:
+                species, coords, capped_h_flags = self._deprotonate_acids(
+                    species, coords, capped_h_flags, count=1)
+                succeeded = True
+            return species, coords, capped_h_flags, succeeded
+
+        return species, coords, capped_h_flags, False
+
+    def _remove_steric_clashing_h(self, species, coords, capped_h_flags,
+                                   hh_clash_threshold=0.8):
+        """
+        Final safety pass: remove capped H atoms that are impossibly close to
+        another H atom (H–H distance < ``hh_clash_threshold`` Å).
+
+        For each clashing pair:
+        * If one H is capped and the other is not, remove the capped one.
+        * If both are capped, remove the one added last (higher index).
+        * Non-capped H–H clashes are left untouched (they are the user's data).
+        """
+        import numpy as np
+
+        to_remove = set()
+        h_indices = [i for i, s in enumerate(species) if s == "H"]
+
+        for a in range(len(h_indices)):
+            for b in range(a + 1, len(h_indices)):
+                ia, ib = h_indices[a], h_indices[b]
+                if ia in to_remove or ib in to_remove:
+                    continue
+                d = np.linalg.norm(
+                    np.array(coords[ia]) - np.array(coords[ib]))
+                if d < hh_clash_threshold:
+                    ca, cb = capped_h_flags[ia], capped_h_flags[ib]
+                    if ca and not cb:
+                        to_remove.add(ia)
+                        print(f"QM-Engine: Removed steric-clashing capped H[{ia}] "
+                              f"(d={d:.3f} Å to H[{ib}]).")
+                    elif cb and not ca:
+                        to_remove.add(ib)
+                        print(f"QM-Engine: Removed steric-clashing capped H[{ib}] "
+                              f"(d={d:.3f} Å to H[{ia}]).")
+                    elif ca and cb:
+                        # Both capped – remove the later one
+                        victim = max(ia, ib)
+                        to_remove.add(victim)
+                        print(f"QM-Engine: Removed steric-clashing capped H[{victim}] "
+                              f"(d={d:.3f} Å).")
+
+        if not to_remove:
+            return species, coords, capped_h_flags
+
+        keep = sorted(set(range(len(species))) - to_remove)
+        species = [species[i] for i in keep]
+        coords = [coords[i] for i in keep]
+        capped_h_flags = [capped_h_flags[i] for i in keep]
+        return species, coords, capped_h_flags
+
+    # ------------------------------------------------------------------ #
+
     def force_qm_readiness(self, species, coords, capped_h_flags):
         """
         Iteratively adjusts Hydrogen protonation/deprotonation and saturation
-        to force the fragment to be a neutral singlet (charge = 0, multiplicity = 1).
+        using RDKit bond determination and valence checks to force the fragment
+        to be a neutral singlet (charge = 0, multiplicity = 1).
+
+        Strategy (per iteration):
+        1. Check charge and multiplicity via QMReadinessChecker.
+        2. If both are already 0/1, check for RDKit-detected valence violations
+           (over-coordinated atoms) and remove extra H if needed.
+        3. Otherwise use _adjust_qm_readiness_rdkit (RDKit-based) or fall back
+           to distance-heuristic helpers when RDKit is unavailable.
+        4. Run capped-H geometry optimisation once at the end.
         """
         import numpy as np
-        
-        # Convert index list or set to boolean list if needed
-        is_bool_list = len(capped_h_flags) == len(species) and all(isinstance(x, bool) for x in capped_h_flags)
+
+        # Normalise capped_h_flags to a boolean list aligned with species
+        is_bool_list = (
+            len(capped_h_flags) == len(species)
+            and all(isinstance(x, bool) for x in capped_h_flags)
+        )
         if not is_bool_list:
             indices_set = set(capped_h_flags)
             capped_h_flags = [i in indices_set for i in range(len(species))]
-            
-        # Ensure correct length
         if len(capped_h_flags) < len(species):
             capped_h_flags = capped_h_flags + [False] * (len(species) - len(capped_h_flags))
-            
-        for iteration in range(10):
+
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import rdDetermineBonds
+            has_rdkit = True
+        except ImportError:
+            has_rdkit = False
+
+        for iteration in range(12):
             qm_info = QMReadinessChecker.check_qm_readiness(species, coords)
             charge = qm_info["charge"]
             multiplicity = qm_info["multiplicity"]
-            
+
             if charge == 0 and multiplicity == 1:
+                # Still check for over-coordinated atoms (e.g. phenyl C with 2 Hs)
+                if has_rdkit:
+                    species, coords, capped_h_flags, changed = \
+                        self._fix_valence_violations_rdkit(species, coords, capped_h_flags)
+                    if changed:
+                        continue  # re-evaluate after removing extra H
                 break
-                
-            # Step A: Resolve Odd Electron Count (Multiplicity > 1)
-            # If multiplicity is odd (doublet/radical), we must add 1 H to the most radical-like site
+
+            if has_rdkit:
+                species, coords, capped_h_flags, succeeded = \
+                    self._adjust_qm_readiness_rdkit(
+                        species, coords, capped_h_flags, charge, multiplicity)
+                if succeeded:
+                    continue
+
+            # ---- Fallback: distance-heuristic helpers ----
             if multiplicity > 1:
-                species, coords, capped_h_flags = self._saturate_radical_site(species, coords, capped_h_flags)
-                continue
-                
-            # Step B: Resolve Non-Zero Charge
-            if charge < 0:
-                # Negative charge: protonate by adding |charge| Hydrogen atoms
-                species, coords, capped_h_flags = self._protonate_anions(species, coords, capped_h_flags, count=abs(charge))
+                species, coords, capped_h_flags = self._saturate_radical_site(
+                    species, coords, capped_h_flags)
+            elif charge < 0:
+                species, coords, capped_h_flags = self._protonate_anions(
+                    species, coords, capped_h_flags, count=abs(charge))
             elif charge > 0:
-                # Positive charge: deprotonate by removing charge Hydrogen atoms
-                species, coords, capped_h_flags = self._deprotonate_acids(species, coords, capped_h_flags, count=charge)
-                
-        # Run final geometry optimization on newly added capped hydrogens
+                species, coords, capped_h_flags = self._deprotonate_acids(
+                    species, coords, capped_h_flags, count=charge)
+
+        # Safety net: remove any H atoms that are impossibly close to each other
+        # (can happen when the fallback heuristic forced a placement with no valid direction)
+        species, coords, capped_h_flags = self._remove_steric_clashing_h(
+            species, coords, capped_h_flags)
+
+        # Final geometry cleanup for all capped hydrogens
         capped_h_indices = [i for i, f in enumerate(capped_h_flags) if f]
         if capped_h_indices:
             self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
-            
+
         return species, coords, capped_h_flags
 
 
