@@ -221,18 +221,28 @@ class QMReadinessChecker:
         Runs a suite of physical and chemical validation checks on the fragment.
         Returns a dictionary with status, warnings, and suggested charge/multiplicity.
         """
+        import numpy as np
+        from scipy.spatial.distance import cdist
+
         warnings = []
-        
+
+        # Compute pairwise distance matrix once (vectorised)
+        coords_arr = np.array(coords, dtype=float)
+        dists = cdist(coords_arr, coords_arr) if len(coords_arr) > 1 else np.zeros((1, 1))
+
+        # Pre-build adjacency once and share across sub-checks
+        adj = cls._build_adj_from_dists(species, dists)
+
         # 1. Total Electron Count (Z_sum)
         z_sum = sum(cls.ATOMIC_NUMBERS.get(s, 6) for s in species)
-        
-        # 2. Estimate formal charge
-        charge = cls.estimate_formal_charge(species, coords)
-        
+
+        # 2. Estimate formal charge (reuse adj + dists)
+        charge = cls.estimate_formal_charge(species, adj)
+
         # 3. Calculated number of electrons (N_elec = Z_sum - charge)
         n_elec = z_sum - charge
         is_even = (n_elec % 2 == 0)
-        
+
         # Suggested Spin Multiplicity
         multiplicity = 1 if is_even else 2
         if not is_even:
@@ -240,17 +250,17 @@ class QMReadinessChecker:
                 f"Odd number of electrons detected ({n_elec}). "
                 f"Fragment is a radical (Spin Multiplicity = 2)."
             )
-            
-        # 4. Check for Steric Clashes (pairwise distance vs covalent sum)
-        clashes = cls.detect_steric_clashes(species, coords)
+
+        # 4. Check for Steric Clashes
+        clashes = cls.detect_steric_clashes(species, dists)
         if clashes:
             warnings.extend(clashes)
-            
+
         # 5. Check for Under-coordinated / Unsaturated light non-metals
-        valences = cls.check_valence_saturation(species, coords)
+        valences = cls.check_valence_saturation(species, adj)
         if valences:
             warnings.extend(valences)
-            
+
         return {
             "is_qm_ready": len(warnings) == 0,
             "warnings": warnings,
@@ -259,187 +269,154 @@ class QMReadinessChecker:
             "n_elec": n_elec,
             "multiplicity": multiplicity,
         }
-
     @classmethod
-    def estimate_formal_charge(cls, species, coords):
-        """
-        Estimates the formal charge of the fragment based on:
-        - Cations: Standard oxidation states for metal centers.
-        - Inorganic Anions: O2- (oxide), OH- (hydroxide), F- (fluoride).
-        - Organic Ligands: Assumed fully protonated (neutral) if cut/capped.
-          We build an adjacency graph to check for unprotonated/charged sites.
-        """
+    def _build_adj_from_dists(cls, species, dists):
+        """Build adjacency dict from a precomputed N×N distance matrix (numpy)."""
         import numpy as np
         n = len(species)
-        
-        # Build adjacency graph
-        adj = {i: [] for i in range(n)}
-        for i in range(n):
-            for j in range(i + 1, n):
-                d = float(np.linalg.norm(np.array(coords[i]) - np.array(coords[j])))
-                
-                # Check covalent bond
-                r1 = cls.COV_RAD.get(species[i], 0.77)
-                r2 = cls.COV_RAD.get(species[j], 0.77)
-                cutoff = 1.3 * (r1 + r2)
-                cutoff = min(2.0, max(0.9, cutoff))
-                if d <= cutoff:
-                    adj[i].append(j)
-                    adj[j].append(i)
-                    
+        radii = np.array([cls.COV_RAD.get(s, 0.77) for s in species])
+        # Covalent cutoff matrix: 1.3*(r_i + r_j), clipped to [0.9, 2.0]
+        cutoffs = np.clip(1.3 * (radii[:, None] + radii[None, :]), 0.9, 2.0)
+        bonded = (dists <= cutoffs) & (dists > 0)   # exclude self (diagonal=0)
+        adj = {i: list(np.where(bonded[i])[0]) for i in range(n)}
+        return adj
+
+
+    @classmethod
+    def estimate_formal_charge(cls, species, adj):
+        """
+        Estimates the formal charge of the fragment.
+        Accepts a precomputed adjacency dict (from _build_adj_from_dists).
+        """
         charge = 0
-        
-        # Identify metals, inorganic oxide/hydroxide, and organic anions
+
+        # Metal cations
         for i, s in enumerate(species):
-            # Metal cations
             if s in cls.METAL_OXIDATION_STATES:
                 charge += cls.METAL_OXIDATION_STATES[s]
+
+        # Inorganic oxide O²⁻ and bridging hydroxide OH⁻
+        for i, s in enumerate(species):
+            if s != "O":
                 continue
-                
-            # Inorganic species
-            if s == "O":
-                nbs = adj[i]
-                only_metals = len(nbs) > 0 and all(species[nb] in cls.METAL_OXIDATION_STATES for nb in nbs)
-                if only_metals:
-                    # Central oxide O2-
-                    charge -= 2
-                    continue
-                    
-                # Check for hydroxide OH-
-                has_h = any(species[nb] == "H" for nb in nbs)
-                metals = [nb for nb in nbs if species[nb] in cls.METAL_OXIDATION_STATES]
-                if len(metals) > 0 and has_h:
-                    # Formally a hydroxide OH- bridging metals
-                    charge -= 1
-                    continue
-                    
-            if s == "F":
-                # Fluoride F-
+            nbs = adj[i]
+            only_metals = len(nbs) > 0 and all(
+                species[nb] in cls.METAL_OXIDATION_STATES for nb in nbs)
+            if only_metals:
+                charge -= 2
+                continue
+            has_h = any(species[nb] == "H" for nb in nbs)
+            metals = [nb for nb in nbs if species[nb] in cls.METAL_OXIDATION_STATES]
+            if metals and has_h:
                 charge -= 1
                 continue
-                
-        # Find carboxylate groups
-        # A carboxylate group is a Carbon atom bonded to exactly two Oxygen atoms.
-        # If neither Oxygen is bonded to Hydrogen, the carboxylate has a -1 charge.
+
+        # Fluoride F⁻
+        for i, s in enumerate(species):
+            if s == "F":
+                charge -= 1
+
+        # Carboxylate groups (-COO⁻)
         for i, s in enumerate(species):
             if s == "C":
                 o_nbs = [nb for nb in adj[i] if species[nb] == "O"]
                 if len(o_nbs) == 2:
-                    # Check if neither is bonded to Hydrogen
-                    is_protonated = False
-                    for o_idx in o_nbs:
-                        if any(species[nb] == "H" for nb in adj[o_idx]):
-                            is_protonated = True
-                            break
+                    is_protonated = any(
+                        any(species[nb2] == "H" for nb2 in adj[o_idx])
+                        for o_idx in o_nbs
+                    )
                     if not is_protonated:
                         charge -= 1
 
-        # Find phenoxide-like or other organic alkoxide/phenoxide charges
+        # Phenoxide / alkoxide (O bonded to metal and C, no H)
         for i, s in enumerate(species):
             if s == "O":
                 nbs = adj[i]
-                # Must be bonded to a Carbon and a metal, and NOT to Hydrogen
                 has_metal = any(species[nb] in cls.METAL_OXIDATION_STATES for nb in nbs)
                 has_h = any(species[nb] == "H" for nb in nbs)
                 c_nbs = [nb for nb in nbs if species[nb] == "C"]
                 if has_metal and not has_h and len(c_nbs) == 1:
-                    c_idx = c_nbs[0]
-                    # Make sure this Carbon is not part of a carboxylate group
-                    # (a carboxylate carbon is bonded to 2 oxygens)
-                    c_o_nbs = [nb for nb in adj[c_idx] if species[nb] == "O"]
+                    c_o_nbs = [nb for nb in adj[c_nbs[0]] if species[nb] == "O"]
                     if len(c_o_nbs) < 2:
                         charge -= 1
 
-        # Find deprotonated imidazolate-like rings
+        # Deprotonated imidazolate-like rings
         counted_n_pairs = set()
         for i, s in enumerate(species):
-            if s == "N":
-                # Find all cycles of length 5 containing this Nitrogen
-                for neighbor in adj[i]:
-                    stack = [(neighbor, [i, neighbor])]
-                    while stack:
-                        curr, path = stack.pop()
-                        if len(path) == 5:
-                            if i in adj[curr]:
-                                n_indices = [idx for idx in path if species[idx] == "N"]
-                                c_indices = [idx for idx in path if species[idx] == "C"]
-                                if len(n_indices) == 2 and len(c_indices) == 3:
-                                    n_pair = tuple(sorted(n_indices))
-                                    if n_pair not in counted_n_pairs:
-                                        counted_n_pairs.add(n_pair)
-                                        has_h = False
-                                        for n_idx in n_pair:
-                                            if any(species[nb] == "H" for nb in adj[n_idx]):
-                                                has_h = True
-                                                break
-                                        if not has_h:
-                                            charge -= 1
-                        else:
-                            for nxt in adj[curr]:
-                                if nxt not in path:
-                                    stack.append((nxt, path + [nxt]))
-                                    
+            if s != "N":
+                continue
+            for neighbor in adj[i]:
+                stack = [(neighbor, [i, neighbor])]
+                while stack:
+                    curr, path = stack.pop()
+                    if len(path) == 5:
+                        if i in adj[curr]:
+                            n_indices = [idx for idx in path if species[idx] == "N"]
+                            c_indices = [idx for idx in path if species[idx] == "C"]
+                            if len(n_indices) == 2 and len(c_indices) == 3:
+                                n_pair = tuple(sorted(n_indices))
+                                if n_pair not in counted_n_pairs:
+                                    counted_n_pairs.add(n_pair)
+                                    has_h = any(
+                                        any(species[nb] == "H" for nb in adj[n_idx])
+                                        for n_idx in n_pair
+                                    )
+                                    if not has_h:
+                                        charge -= 1
+                    else:
+                        for nxt in adj[curr]:
+                            if nxt not in path:
+                                stack.append((nxt, path + [nxt]))
+
         return charge
 
     @classmethod
-    def detect_steric_clashes(cls, species, coords):
+    def detect_steric_clashes(cls, species, dists):
         """
-        Checks all pairwise distances. If any two atoms (bonded or non-bonded)
-        have a distance d < 0.60 * (R_cov(i) + R_cov(j)), it's a severe clash.
+        Checks all pairwise distances for severe steric clashes.
+        Accepts a precomputed N×N distance matrix (numpy) instead of raw coords.
         """
         import numpy as np
-        warnings = []
+        warnings_out = []
         n = len(species)
-        for i in range(n):
-            for j in range(i + 1, n):
-                d = float(np.linalg.norm(np.array(coords[i]) - np.array(coords[j])))
-                r1 = cls.COV_RAD.get(species[i], 0.77)
-                r2 = cls.COV_RAD.get(species[j], 0.77)
-                clash_limit = 0.60 * (r1 + r2)
-                if d < clash_limit:
-                    warnings.append(
-                        f"Steric clash detected between atom {i}({species[i]}) and "
-                        f"atom {j}({species[j]}): distance={d:.3f} A, limit={clash_limit:.3f} A."
-                    )
-        return warnings
+        radii = np.array([cls.COV_RAD.get(s, 0.77) for s in species])
+        clash_limits = 0.60 * (radii[:, None] + radii[None, :])
+        # Only upper triangle (i < j), exclude self (d > 0)
+        rows, cols = np.triu_indices(n, k=1)
+        ds = dists[rows, cols]
+        limits = clash_limits[rows, cols]
+        bad = np.where(ds < limits)[0]
+        for idx in bad:
+            i, j = int(rows[idx]), int(cols[idx])
+            warnings_out.append(
+                f"Steric clash detected between atom {i}({species[i]}) and "
+                f"atom {j}({species[j]}): distance={ds[idx]:.3f} A, "
+                f"limit={limits[idx]:.3f} A."
+            )
+        return warnings_out
 
     @classmethod
-    def check_valence_saturation(cls, species, coords):
+    def check_valence_saturation(cls, species, adj):
         """
-        Detects unsaturated/dangling valences on light non-metals (C, N, O, B, Si).
+        Detects unsaturated/dangling valences on light non-metals.
+        Accepts a precomputed adjacency dict (from _build_adj_from_dists).
         """
-        import numpy as np
-        warnings = []
-        n = len(species)
-        
-        # Build adjacency graph
-        adj = {i: [] for i in range(n)}
-        for i in range(n):
-            for j in range(i + 1, n):
-                d = float(np.linalg.norm(np.array(coords[i]) - np.array(coords[j])))
-                r1 = cls.COV_RAD.get(species[i], 0.77)
-                r2 = cls.COV_RAD.get(species[j], 0.77)
-                cutoff = 1.3 * (r1 + r2)
-                cutoff = min(2.0, max(0.9, cutoff))
-                if d <= cutoff:
-                    adj[i].append(j)
-                    adj[j].append(i)
-                    
+        warnings_out = []
         for i, s in enumerate(species):
             n_bonds = len(adj[i])
-            if s == "C":
-                if n_bonds < 3:
-                    warnings.append(f"Under-coordinated Carbon detected: atom {i}(C) has only {n_bonds} bonds.")
-            elif s == "N":
-                if n_bonds < 2:
-                    warnings.append(f"Under-coordinated Nitrogen detected: atom {i}(N) has only {n_bonds} bonds.")
-            elif s == "O":
-                if n_bonds < 1:
-                    warnings.append(f"Isolated/Under-coordinated Oxygen detected: atom {i}(O) has {n_bonds} bonds.")
-            elif s == "B":
-                if n_bonds < 3:
-                    warnings.append(f"Under-coordinated Boron detected: atom {i}(B) has only {n_bonds} bonds.")
-        return warnings
+            if s == "C" and n_bonds < 3:
+                warnings_out.append(
+                    f"Under-coordinated Carbon detected: atom {i}(C) has only {n_bonds} bonds.")
+            elif s == "N" and n_bonds < 2:
+                warnings_out.append(
+                    f"Under-coordinated Nitrogen detected: atom {i}(N) has only {n_bonds} bonds.")
+            elif s == "O" and n_bonds < 1:
+                warnings_out.append(
+                    f"Isolated/Under-coordinated Oxygen detected: atom {i}(O) has {n_bonds} bonds.")
+            elif s == "B" and n_bonds < 3:
+                warnings_out.append(
+                    f"Under-coordinated Boron detected: atom {i}(B) has only {n_bonds} bonds.")
+        return warnings_out
 
 
 class BaseFragmenter:
@@ -872,24 +849,22 @@ class BaseFragmenter:
         return new_sp, new_co
 
     def _build_bond_graph_all(self, species, coords):
-        """Return adjacency dict of all atoms including Hydrogen."""
+        """Return adjacency dict of all atoms including Hydrogen (vectorised)."""
         import numpy as np
+        from scipy.spatial.distance import cdist
+
         n = len(species)
-        adj = {i: [] for i in range(n)}
-        for i in range(n):
-            ci = np.array(coords[i])
-            for j in range(i + 1, n):
-                d = float(np.linalg.norm(ci - np.array(coords[j])))
-                
-                # Check covalent bond
-                r1 = QMReadinessChecker.COV_RAD.get(species[i], 0.77)
-                r2 = QMReadinessChecker.COV_RAD.get(species[j], 0.77)
-                cutoff = 1.3 * (r1 + r2)
-                cutoff = min(2.0, max(0.9, cutoff))
-                if d <= cutoff:
-                    adj[i].append(j)
-                    adj[j].append(i)
+        if n == 0:
+            return {}
+        coords_arr = np.array(coords, dtype=float)
+        dists = cdist(coords_arr, coords_arr)
+
+        radii = np.array([QMReadinessChecker.COV_RAD.get(s, 0.77) for s in species])
+        cutoffs = np.clip(1.3 * (radii[:, None] + radii[None, :]), 0.9, 2.0)
+        bonded = (dists <= cutoffs) & (dists > 0)
+        adj = {i: list(np.where(bonded[i])[0]) for i in range(n)}
         return adj
+
 
     def _saturate_radical_site(self, species, coords, capped_h_flags):
         """Finds the most under-coordinated light non-metal atom and adds 1 H atom
