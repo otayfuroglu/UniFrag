@@ -2,10 +2,31 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
-## Decision 2026-05-24: Automated QM-readiness validation, hydrogen saturation, neutralization engine, and ring planarity gating
-- Context: For seamless Quantum Chemistry (QM) calculations on the generated fragments, it is essential that all outputs are formally neutral (charge = 0) and closed-shell singlet (spin multiplicity = 1). Relying on manual or external tools to saturate radicals, protonate coordinating anions, or deprotonate acidic groups is error-prone. Additionally, blindly applying aromatic SVD planarity fits to acyclic/peptide backbone carbons distorts local capping geometries and leads to severe under-coordination.
-- Decision: Implemented a robust validation helper `QMReadinessChecker` and an automated iterative engine `force_qm_readiness` in `fragmentation_oop.py`. The engine dynamically neutralizes fragments by adding hydrogens to anionic coordinating sites (e.g. carboxylates, phenoxides) or removing hydrogens from acidic groups. It also saturates under-coordinated light non-metals (C, N, O, B) to resolve radical states, iterating up to 10 cycles until exactly `charge = 0` and `multiplicity = 1` are achieved. Furthermore, `enforce_sp2_capped_h_geometry` was upgraded with an inline BFS cycle/ring checker (`is_in_ring`) to strictly gate the global aromatic SVD planarity plane fitting to cyclic/ring systems only, leaving non-cyclic/peptide backbone cap geometries physically realistic.
-- Consequences: All exported frames in the ExtXYZ collections (`fragments_collection.extxyz` and `bio_fragments_collection.extxyz`) are guaranteed to be closed-shell singlets with exactly 0 formal charge, completely ready for QM calculations out-of-the-box. Console diagnostics and metadata embedding are preserved, and peptide/acyclic cap geometries are robustly protected against distortions.
+## Decision 2026-05-26: Bypass `moffragmentor` for 1D Infinite SBUs
+- Context: The node+linker approach using `moffragmentor` overrides the `--nmetals` fallback for 1D rods because it merges unit-cell nodes blindly without understanding infinite slicing.
+- Decision: Check `getattr(result, "has_1d_sbu", False)`. If True, intentionally skip the `moffragmentor` extraction and fall back to Path B (Infinite), which correctly builds the supercell and slices the 1D chain to exactly `--nmetals`.
+- Consequences: Rod MOFs respect the `--nmetals` requested by the user, providing an exact cut of the infinite metal chain.
+
+## Decision 2026-05-26: ExtXYZ label formatting uses CamelCase
+- Context: The user requested labels without underscores for the generated `.extxyz` files.
+- Decision: Updated label formats across MOF, COF, and Bio modes to use CamelCase without underscores (e.g., `2015Mgins3ASR1FragMof`, `2015Mgins3ASR1FragCof`, `2015Mgins3ASR1W001`).
+- Consequences: All ExtXYZ files output CamelCase labels in their `label=` property.
+
+## Decision 2026-05-25: Smart H-capping for non-metal bonded Oxygen atoms
+- Context: Oxygen atoms that are part of functional groups (like Carboxylate, Sulfonyl, etc.) and coordinate to metals were incorrectly being capped with too many hydrogens (e.g., 2 H's like water) when bonds to the metal were cut.
+- Decision: Implemented functional-group-aware priority for H-capping. The BFS cap assignment checks the heavy non-metal neighbors (C, S, P) of an Oxygen. If an Oxygen is bonded to a C/S/P, it is strictly capped with a maximum of 1 H (representing an -OH group). If it is a pure metal-coordinated water (no non-metal heavy neighbors), it is capped with up to 2 H's.
+- Consequences: Prevents over-protonation of carboxylate and sulfonyl oxygens, yielding chemically accurate terminal groups.
+
+## Decision 2026-05-25: Merging fragmented moffragmentor nodes for polynuclear SBUs
+- Context: `moffragmentor` was erroneously splitting discrete polynuclear SBUs (like Mg dinuclear clusters) into isolated 0D nodes, causing the node+linker path to fail to build the full SBU.
+- Decision: Added an iterative node-merging step inside `_try_moffragmentor_node_linker_fragment`. If metal atoms from different moffragmentor nodes are within 3.5 Å (accounting for periodic images), the nodes are merged into a single polynuclear SBU before continuing.
+- Consequences: Dinuclear and clustered SBUs are correctly kept intact when building the node+linker fragment via the primary Path J.
+
+
+### Decision 2026-05-24: [REVERTED] Automated QM-readiness validation, hydrogen saturation, neutralization engine, and ring planarity gating
+- Context: For seamless Quantum Chemistry (QM) calculations on the generated fragments, it was proposed to make all outputs formally neutral (charge = 0) and closed-shell singlet (spin multiplicity = 1).
+- Decision: Reverted fully on 2026-05-25. The saturation engine and readiness validation loops added severe performance overhead, especially on large, complex metal-organic frameworks (MOFs). The codebase was rolled back to commit `84b53581dbf3dcf52b2426ce98d17a8bdc7fc2ae` to restore the original, highly optimized geometric and chemical capping rules without RDKit iterative bond perception.
+- Consequences: All H-saturation/neutralization heuristics and iterative checks are removed. Fragmentation times returned to their fast baseline levels.
 
 
 ## Decision 2026-05-22: Unified Single-File/Folder Execution with Atomic Collection Updates and No Individual XYZ Files

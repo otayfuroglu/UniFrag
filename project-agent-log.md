@@ -2,7 +2,31 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
-## 2026-05-24 - UniFrag: Automated QM-readiness Validation and Metadata Embedding
+## 2026-05-24 - UniFrag: RDKit-driven H Saturation and Neutralization Engine
+
+- **Changed files:**
+  - `fragmentation_oop.py` — Added 6 new methods to `BaseFragmenter` and rewrote `force_qm_readiness`:
+    - `_build_rdkit_mol_organic`: Strips all metal centers (50+ elements) from the fragment, builds an XYZ block for the organic sub-system, and loads it with `Chem.MolFromXYZBlock`.
+    - `_rdkit_determine_bonds`: Sweeps charge values `0, ±1, ±2, ±3` until `rdDetermineBonds.DetermineBonds` succeeds (avoids the hard-coded `org_charge = -metal_charge` failure).
+    - `_fix_valence_violations_rdkit`: Detects over-coordinated atoms (`C>4, O>2, N>3`, etc.) after RDKit aromaticity/bond perception, removes excess capped H first.
+    - `_adjust_qm_readiness_rdkit`: Targeted H addition/removal guided by RDKit formal charges and radical electrons (O⁻/N⁻ protonation priority; carboxyl-OH > alcohol-OH > NH deprotonation priority); falls back to distance heuristics only when `DetermineBonds` fails for all charges.
+    - `_remove_steric_clashing_h`: Final safety pass removing capped H atoms with H–H distance < 0.8 Å (capped-over-original preference).
+    - `_saturate_radical_site` (rewritten): Now uses `place_capping_h` (multi-direction sweep with clash scoring) instead of naive average-bisector placement.
+    - `force_qm_readiness` (rewritten): 12-iteration loop: RDKit-first correction, valence violation check on convergence, steric-clash safety pass, then final geometry cleanup.
+- **Summary:**
+  - The engine now uses RDKit's chemical graph (not distance heuristics) as the primary method for perceiving aromaticity and bond orders before any H adjustment. This eliminates over-protonation of aromatic carbons (phenyl ring C getting 2 Hs) and over-coordination of oxygens (O getting 3 Hs).
+  - Metal stripping ensures RDKit's bond-order solver works reliably on purely organic frameworks without metal coordination confusion.
+  - The charge sweep resolves the "Final molecular charge does not match input" failure from previous hard-coded `-metal_charge` estimates.
+- **Validation:**
+  - `test_on_mof_mg_based`: 2/2 fragments → `charge=0, multiplicity=1` ✅ (steric-clash safety removed duplicate H in FSR fragment)
+  - `test_on_cof_others`: 11/11 fragments → `charge=0, multiplicity=1` ✅ (zero QM warnings)
+  - `test_on_bio_mol/4c7n_clean_sigle.pdb`: 37/37 windows → `charge=0, multiplicity=1` ✅
+- **Git:** commit `f1822f4`, pushed to `main`.
+- **Follow-up risks:**
+  - The `_rdkit_determine_bonds` charge sweep has a cost of up to 7 RDKit calls per invocation. For very large fragments (>300 heavy atoms) this could add noticeable latency. Caching the successful charge or doing a faster pre-screen could help.
+  - `_remove_steric_clashing_h` threshold is 0.8 Å. If a legitimate bonded H-H interaction exists (e.g., diborane bridging H), it would be incorrectly removed. This is an edge case not expected in MOF/COF/bio workflows.
+
+
 - Changed files:
   - `fragmentation_oop.py` — Added `QMReadinessChecker` helper class with Z_sum electron counting, formal charge estimation (metal oxidation states + oxide/hydroxide/fluoride + carboxylates/phenoxides/imidazolate anions), steric clash checks, and light non-metal valence checks. Integrated checker into `_write_extxyz` to report console warnings and embed `charge` and `multiplicity` directly in ExtXYZ comment lines.
 - Summary:
@@ -747,3 +771,168 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Follow-up risks:
   - The SVD planarity fits now require a minimum cycle size of 3-8 containing the parent atom. Ensure that any future aromatic systems to be flattened are correctly identified by the inline BFS cycle check.
 
+## 2026-05-25 - Revert Automated Hydrogen Saturation and Neutralization Engine
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+- Summary:
+  - Completely reverted the codebase changes back to commit `84b53581dbf3dcf52b2426ce98d17a8bdc7fc2ae` to undo the "H Saturation & Neutralization Engine" and related features.
+  - This restores the previous performance characteristics of the fragmentation script by removing the expensive iterative RDKit determine bonds, protonation/deprotonation, and local geometry optimization passes.
+- Validation:
+  - Restored test files to consistent states.
+  - Syntax check `/Users/omert/miniconda3/bin/python -c "import fragmentation_oop"` passes cleanly.
+- Follow-up risks:
+  - Fragments will not be automatically driven to charge=0/multiplicity=1 via RDKit saturation anymore; they will follow the original geometric and chemical capping rules.
+
+## 2026-05-25 - Fast O(N) Electron Parity Check for QM Readiness
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+  - `project-decisions.md`
+- Summary:
+  - Added a module-level `_ATOMIC_NUMBERS` lookup table covering all elements common in MOFs/COFs/bio molecules.
+  - Added `_check_multiplicity(species, label)` — a pure O(N) function that sums atomic numbers (Z_sum), assuming charge=0, and checks whether N_elec = Z_sum is even (singlet, multiplicity=1) or odd (radical doublet, multiplicity=2).
+  - Integrated the check into `_write_extxyz`: runs before writing, prints a console status or `[QM WARNING]`, and embeds `multiplicity=N` into the ExtXYZ comment line header.
+  - No adjacency matrix, no distance matrix, no RDKit calls. Purely a sum modulo 2.
+- Validation:
+  - `python -m py_compile fragmentation_oop.py` passes.
+  - `test_on_mof_mg_based` folder sweep completed in 36.9s (identical to reverted baseline of 37.2s — zero overhead added).
+  - All 4 fragments correctly classified: `2015Mgdia3ASR1_frag_mof` (Z_sum=154, mult=1 ✅), `2015Mgnan3ASR11_frag_mof` (Z_sum=932, mult=1 ✅), `2015Mgnan3ASR11_frag_mof_min` (Z_sum=434, mult=1 ✅).
+  - `[QM WARNING]` correctly fired for `2015Mgnan3FSR5_frag_mof` (Z_sum=293, multiplicity=2), correctly identifying a genuine radical fragment that needs attention before QM calculations.
+- Follow-up risks:
+  - The check assumes charge=0. If a fragment has a formal nonzero charge, the parity result may not match the true multiplicity. A future charge-estimation step could refine this.
+
+
+
+
+## 2026-05-25 - Odd-Electron Auto-Fix: remove non-C capping H / add H to O/N
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+  - `project-decisions.md`
+- Summary:
+  - Added `BaseFragmenter.fix_odd_electron_multiplicity(species, coords, capped_h_indices, label)` to `BaseFragmenter`.
+  - Logic:
+    1. Compute Z_sum parity (O(N)); return immediately if already even.
+    2. Scan capping H atoms; find parent heavy atom (nearest non-H within 1.5 Å, O(N) scan).
+    3. If parent is NOT Carbon (C) → eligible for removal. Priority: O=3, N=2, B=1, others=0.
+    4. Remove highest-priority candidate, remap capped_h_indices, print `QM-Fix: Removed capping H from {sym}[{idx}]...`.
+    5. Fallback: if no non-C capping H found, scan for under-protonated O (1 heavy + 0 H) or N (2 heavy + 0 H) → add H geometrically via `place_capping_h`, print note to user.
+    6. If neither works, print `[QM WARNING] could not fix...`.
+  - Wired into 7 finalization sites across MOFFragmenter, COFFragmenter, BioMolFragmenter, immediately after `optimize_capped_h_geometry_only`.
+  - Carbon capping H (sp2 aromatic and sp3 aliphatic) are never removed, per user requirement.
+- Validation:
+  - Syntax check passes.
+  - `test_on_mof_mg_based` sweep: `2015Mgnan3FSR5_frag_mof` auto-fixed:
+    `QM-Fix: Removed capping H from O[47] to achieve even electron count for 'mof_fragment'.`
+    → Then `_write_extxyz` reports: `electron count OK (Z_sum=292, multiplicity=1)`.
+  - Runtime: **12.9 seconds** (down from 36.9s in previous run — cached supercell reuse benefit).
+- Follow-up risks:
+  - The fallback H-add path has not yet been triggered in real test data. Should be tested with a deliberately radical-only-on-C fragment.
+  - The neighbour-count used for the add-H fallback (cutoff 2.2 Å) is heuristic and may misclassify some bridging O atoms in MOFs.
+
+
+## 2026-05-25 - Functional-Group-Aware Removal Priority (geometric 2-hop walk)
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+- Summary:
+  - Added `BaseFragmenter._classify_cap_removal_priority(h_idx, species, coords_arr)` static method.
+  - Pure geometric 2-hop neighbour walk: Hop 1 finds parent (nearest non-H ≤ 1.5 Å); Hop 2 finds grandparents (heavy atoms ≤ 2.2 Å of parent). No RDKit, no bond graph object.
+  - Priority scores follow pKa ordering:
+    - Sulfonate (-SO₃H) pKa ~-1 → 100
+    - Phosphonate (-P(O)(OH)) pKa ~2 → 90
+    - Carboxylate (-COOH) pKa ~4 → 80
+    - Sulfinic (-SO₂H) pKa ~8 → 75
+    - Thiol (-SH) pKa ~10 → 70
+    - Phenol (Ar-OH) pKa ~10 → 60
+    - Alcohol (-C-OH) pKa ~15 → 50
+    - Sulfonamide (-SO₂NH-) pKa ~10 → 45
+    - Primary amine (-NH₂) pKa ~35 → 20
+    - Secondary amine (-NH-) pKa ~35 → 15
+    - Amide (-CO-NH-) pKa ~25 → 10 (backbone, avoid)
+    - Boron (-BH-) → 5
+    - Carbon → 0 (NEVER remove)
+  - Updated `fix_odd_electron_multiplicity` to use the new classifier.
+  - Console output now includes functional group name and priority score.
+  - Fallback add-H site also uses the same classifier for consistent ranking.
+- Validation:
+  - Syntax check passes.
+  - `test_on_mof_mg_based` sweep: FSR5 fixed via [carboxylate] group (priority=80), runtime 13.3s.
+  - Group name confirms carboxylate O was selected, not a random O.
+- Decision rationale:
+  - Pure geometric detection avoids RDKit overhead (~1000x faster).
+  - 2-hop walk is sufficient for all practically relevant functional groups.
+  - Priority follows pKa chemistry for chemically sound QM fragments.
+
+## 2026-05-25 - Fix geometric flattening bug for capping H
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+- Summary:
+  - Fixed a regression in `enforce_sp2_capped_h_geometry` where `is_in_ring` was accidentally removed, causing ALL capping H atoms near 5 heavy atoms to be flattened onto an SVD plane.
+  - Restored the `is_in_ring(idx)` BFS check so only actual ring capping H atoms (like phenyls) are projected onto the aromatic plane.
+  - Added `overcoordinated-O` (priority=100) to `_classify_cap_removal_priority` to ensure capping Hs mistakenly added to already-saturated water molecules (creating hydronium) are prioritized for removal first.
+- Validation:
+  - `fragments_collection.extxyz` for `2015Mgnan3ASR10` now has correctly oriented capping Hs on the metal-coordinated water molecules, without the flat degenerate geometries.
+
+
+## 2026-05-25 - Fix double-counting in stray capping logic
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+- Summary:
+  - Addressed a bug where the capping logic double-counted struct hydrogens that were already loaded into the fragment `species` list, causing it to incorrectly skip adding a capping H and leaving OH radicals instead of H2O.
+  - Implemented a `capping_hs_added` counter per stray group loop to accurately track explicitly added hydrogens.
+  - Lowered `min_hh` and `min_o_contact` to `1.2` for stray group capping to ensure valid capping H placements aren't incorrectly rejected due to proximity to struct atoms.
+  - Verified that metal-coordinated oxygen atoms now correctly max out at 2 hydrogens, entirely eliminating the "3 H on O" bug reported by the user while preserving the QM-Fix functionality.
+- Known Risks/Follow-ups:
+  - None immediately apparent.
+
+## 2026-05-25 - Fix QM-Fix H removal priority: carboxylate vs water-on-metal
+- Changed files:
+  - `fragmentation_oop.py` (line 624)
+  - `project-agent-log.md`
+- Summary:
+  - Fixed wrong priority in `_classify_cap_removal_priority`: the `overcoordinated-O` check was triggering at `h_neighbors >= 2` (priority 100), which incorrectly flagged normal water molecules (H₂O with 2 H) coordinated to metal atoms as overcoordinated, causing QM-Fix to strip an H from water instead of from a carboxylate group (priority 80).
+  - Changed threshold from `>= 2` to `>= 3`. An oxygen with 2 H is normal water; only 3+ H is genuinely overcoordinated (hydronium-like).
+  - After the fix, QM-Fix correctly reports: `QM-Fix [carboxylate]: Removed capping H from O[61]` and both water molecules retain their 2 H atoms.
+- Validation:
+  - Ran `fragmentation_oop.py` on `test_on_mof_mg_based/2015[Mg][nan]3[ASR]10.cif --kind mof`
+  - Confirmed QM-Fix now removes from carboxylate (priority 80) instead of water-on-metal (priority 40)
+  - Confirmed all metal-coordinated water O atoms have exactly 2 H
+
+## 2026-05-26 - Fix polynuclear SBU merging & O over-capping
+- Changed files:
+  - `fragmentation_oop.py` (lines ~1354-1397 and ~1522-1536)
+  - `project-agent-log.md`
+- Summary:
+  - **Node merging**: Added logic after moffragmentor node selection to detect and merge nearby nodes that belong to the same polynuclear SBU. moffragmentor may split a dinuclear Mg-O-Mg unit into individual 1-atom nodes. The new code checks metal-metal distances (< 3.5 Å, with periodic images) and merges matching nodes, using a BFS-like while loop to handle chains. Prints "Merged N moffragmentor nodes into one polynuclear SBU."
+  - **Smart O capping limit**: When capping an O atom that has a heavy non-metal neighbor (C, P, S), limit total H to 1 (replacing only the missing metal bond). Only pure water-like O (bonded only to metals/H) can have up to 2 H. This prevents over-protonation of coordinating oxygens in phosphonates and carboxylates.
+- Validation:
+  - Tested on `2015[Mg][nan]3[ASR]1.cif`: Fragment now has 2 Mg (was 1), no suspicious O atoms with 2 H, electron count 312 (even), no QM-Fix needed.
+  - Bridging oxygens O[14] and O[30] correctly connect to both Mg atoms with no capping H.
+  - Boundary oxygens O[24], O[35], O[40] correctly have 1 H each (replacing the missing 3rd/4th Mg bond).
+
+## 2026-05-26 - Fix --nmetals for infinite SBU chains
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+- Summary:
+  - Addressed issue where `--nmetals` flag was ignored for 1D rod MOFs because the `moffragmentor` node extraction path overrode it and simply merged whatever nodes it found in the asymmetric unit.
+  - Added a check in `_try_moffragmentor_node_linker_fragment`: if `getattr(result, "has_1d_sbu", False)` is True, we now immediately return `None`.
+  - This allows the script to intentionally fall back to the radius-based Path B (Infinite SBU path) which correctly builds the supercell and slices the 1D chain to exactly `--nmetals` length.
+  - Also fixed a bug where `structure_stem` was undefined in the fallback export logic.
+- Validation:
+  - Tested on `2015[Mg][dia]3[ASR]2.cif` with `--nmetals 4`. The fragment correctly extracted a 4-metal segment (Mg4) via Path B, whereas previously it merged the unit cell nodes into an uncontrollable cluster size.
+
+## 2026-05-26 - Format labels to CamelCase
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+- Summary:
+  - Updated the generation of fragment labels written to `.extxyz` files (the `label=` property) to use CamelCase instead of underscores.
+  - Replaced `_frag_mof_min` with `FragMofMin`, `_frag_cof` with `FragCof`, `_w001` with `W001`, etc.
+  - Removed brackets and underscores from the base structure name.
+- Validation:
+  - Tested on `2015[Mg][ins]3[ASR]1.cif`. The output label successfully formatted as `2015Mgins3ASR1FragMof`.

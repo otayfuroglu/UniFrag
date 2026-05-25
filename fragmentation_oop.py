@@ -17,25 +17,11 @@ class FragmentResult:
 def _write_extxyz(filepath, species, coords, label):
     """
     Writes a molecular fragment to an ExtXYZ file.
-    Includes automated QM-readiness validation and embeds metadata (charge, multiplicity).
+    Does not require any external library (like ASE) to ensure zero-dependency robustness.
     """
-    # Run QM readiness checks
-    qm_info = QMReadinessChecker.check_qm_readiness(species, coords)
-    
-    # Report warnings to console if not fully QM-ready
-    if not qm_info["is_qm_ready"]:
-        print(f"\n[QM WARNING] Fragment '{label}' is NOT fully QM-ready:")
-        for w in qm_info["warnings"]:
-            print(f"  - {w}")
-    else:
-        print(f"Fragment '{label}': QM-ready (charge={qm_info['charge']}, spin multiplicity={qm_info['multiplicity']})")
-        
     with open(filepath, "a") as f:
         f.write(f"{len(species)}\n")
-        f.write(
-            f"Properties=species:S:1:pos:R:3 label={label} "
-            f"charge={qm_info['charge']} multiplicity={qm_info['multiplicity']} pbc=\"F F F\"\n"
-        )
+        f.write(f"Properties=species:S:1:pos:R:3 label={label} pbc=\"F F F\"\n")
         for sym, pos in zip(species, coords):
             f.write(f"{sym:<8}{pos[0]:16.8f}{pos[1]:16.8f}{pos[2]:16.8f}\n")
 
@@ -176,247 +162,6 @@ def _update_extxyz_collection(extxyz_path, clean_base, new_fragments):
         if os.path.exists(temp_path):
             os.remove(temp_path)
         raise e
-
-
-class QMReadinessChecker:
-    # Covalent radii from Cordero et al. Dalton Trans. 2008 (used for bond validation & clash checks)
-    COV_RAD = {
-        "H": 0.37, "He": 0.46,
-        "Li": 1.28, "Be": 0.96, "B": 0.84, "C": 0.76, "N": 0.71, "O": 0.66, "F": 0.57,
-        "Na": 1.66, "Mg": 1.41, "Al": 1.21, "Si": 1.11, "P": 1.07, "S": 1.05, "Cl": 1.02,
-        "K": 2.03, "Ca": 1.76, "Sc": 1.70, "Ti": 1.60, "V": 1.53, "Cr": 1.39, "Mn": 1.39,
-        "Fe": 1.32, "Co": 1.26, "Ni": 1.24, "Cu": 1.32, "Zn": 1.22, "Ga": 1.22, "Ge": 1.20,
-        "As": 1.19, "Se": 1.20, "Br": 1.20, "Kr": 1.16, "Zr": 1.54, "Nb": 1.47, "Mo": 1.38,
-        "Tc": 1.28, "Ru": 1.25, "Rh": 1.25, "Pd": 1.20, "Ag": 1.28, "Cd": 1.44, "In": 1.42,
-        "Sn": 1.40, "Sb": 1.40, "Te": 1.36, "I": 1.39, "Xe": 1.40, "La": 1.80, "Ce": 1.63,
-        "Pr": 1.76, "Nd": 1.74, "Pm": 1.73, "Sm": 1.72, "Eu": 1.68, "Gd": 1.69, "Tb": 1.68,
-        "Dy": 1.67, "Ho": 1.66, "Er": 1.65, "Tm": 1.56, "Yb": 1.70, "Lu": 1.62, "Hf": 1.50,
-        "Ta": 1.38, "W": 1.46, "Re": 1.59, "Os": 1.28, "Ir": 1.37, "Pt": 1.28, "Au": 1.44,
-        "Hg": 1.49, "Tl": 1.48, "Pb": 1.47, "Bi": 1.46
-    }
-    
-    # Atomic numbers (Z) for electron counting
-    ATOMIC_NUMBERS = {
-        "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
-        "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17,
-        "Ar": 18, "K": 19, "Ca": 20, "Sc": 21, "Ti": 22, "V": 23, "Cr": 24, "Mn": 25,
-        "Fe": 26, "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30, "Ga": 31, "Ge": 32, "As": 33,
-        "Se": 34, "Br": 35, "Kr": 36, "Zr": 40, "Nb": 41, "Mo": 42, "Tc": 43, "Ru": 44,
-        "Rh": 45, "Pd": 46, "Ag": 47, "Cd": 48, "In": 49, "Sn": 50, "Sb": 51, "Te": 52,
-        "I": 53, "Xe": 54, "La": 57, "Ce": 58, "Pr": 59, "Nd": 60, "Pm": 61, "Sm": 62,
-        "Eu": 63, "Gd": 64, "Tb": 65, "Dy": 66, "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70,
-        "Lu": 71, "Hf": 72, "Ta": 73, "W": 74, "Re": 75, "Os": 76, "Ir": 77, "Pt": 78,
-        "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82, "Bi": 83
-    }
-    
-    # Standard assumed oxidation states for metal centers in MOFs/COFs
-    METAL_OXIDATION_STATES = {
-        "Zn": 2, "Mg": 2, "Cu": 2, "Zr": 4, "Fe": 2, "Co": 2, "Ni": 2, "Mn": 2,
-        "Ca": 2, "Al": 3, "Cr": 3, "V": 3, "Ti": 4, "Cd": 2, "Pd": 2, "Pt": 2
-    }
-
-    @classmethod
-    def check_qm_readiness(cls, species, coords):
-        """
-        Runs a suite of physical and chemical validation checks on the fragment.
-        Returns a dictionary with status, warnings, and suggested charge/multiplicity.
-        """
-        import numpy as np
-        from scipy.spatial.distance import cdist
-
-        warnings = []
-
-        # Compute pairwise distance matrix once (vectorised)
-        coords_arr = np.array(coords, dtype=float)
-        dists = cdist(coords_arr, coords_arr) if len(coords_arr) > 1 else np.zeros((1, 1))
-
-        # Pre-build adjacency once and share across sub-checks
-        adj = cls._build_adj_from_dists(species, dists)
-
-        # 1. Total Electron Count (Z_sum)
-        z_sum = sum(cls.ATOMIC_NUMBERS.get(s, 6) for s in species)
-
-        # 2. Estimate formal charge (reuse adj + dists)
-        charge = cls.estimate_formal_charge(species, adj)
-
-        # 3. Calculated number of electrons (N_elec = Z_sum - charge)
-        n_elec = z_sum - charge
-        is_even = (n_elec % 2 == 0)
-
-        # Suggested Spin Multiplicity
-        multiplicity = 1 if is_even else 2
-        if not is_even:
-            warnings.append(
-                f"Odd number of electrons detected ({n_elec}). "
-                f"Fragment is a radical (Spin Multiplicity = 2)."
-            )
-
-        # 4. Check for Steric Clashes
-        clashes = cls.detect_steric_clashes(species, dists)
-        if clashes:
-            warnings.extend(clashes)
-
-        # 5. Check for Under-coordinated / Unsaturated light non-metals
-        valences = cls.check_valence_saturation(species, adj)
-        if valences:
-            warnings.extend(valences)
-
-        return {
-            "is_qm_ready": len(warnings) == 0,
-            "warnings": warnings,
-            "z_sum": z_sum,
-            "charge": charge,
-            "n_elec": n_elec,
-            "multiplicity": multiplicity,
-        }
-    @classmethod
-    def _build_adj_from_dists(cls, species, dists):
-        """Build adjacency dict from a precomputed N×N distance matrix (numpy)."""
-        import numpy as np
-        n = len(species)
-        radii = np.array([cls.COV_RAD.get(s, 0.77) for s in species])
-        # Covalent cutoff matrix: 1.3*(r_i + r_j), clipped to [0.9, 2.0]
-        cutoffs = np.clip(1.3 * (radii[:, None] + radii[None, :]), 0.9, 2.0)
-        bonded = (dists <= cutoffs) & (dists > 0)   # exclude self (diagonal=0)
-        adj = {i: list(np.where(bonded[i])[0]) for i in range(n)}
-        return adj
-
-
-    @classmethod
-    def estimate_formal_charge(cls, species, adj):
-        """
-        Estimates the formal charge of the fragment.
-        Accepts a precomputed adjacency dict (from _build_adj_from_dists).
-        """
-        charge = 0
-
-        # Metal cations
-        for i, s in enumerate(species):
-            if s in cls.METAL_OXIDATION_STATES:
-                charge += cls.METAL_OXIDATION_STATES[s]
-
-        # Inorganic oxide O²⁻ and bridging hydroxide OH⁻
-        for i, s in enumerate(species):
-            if s != "O":
-                continue
-            nbs = adj[i]
-            only_metals = len(nbs) > 0 and all(
-                species[nb] in cls.METAL_OXIDATION_STATES for nb in nbs)
-            if only_metals:
-                charge -= 2
-                continue
-            has_h = any(species[nb] == "H" for nb in nbs)
-            metals = [nb for nb in nbs if species[nb] in cls.METAL_OXIDATION_STATES]
-            if metals and has_h:
-                charge -= 1
-                continue
-
-        # Fluoride F⁻
-        for i, s in enumerate(species):
-            if s == "F":
-                charge -= 1
-
-        # Carboxylate groups (-COO⁻)
-        for i, s in enumerate(species):
-            if s == "C":
-                o_nbs = [nb for nb in adj[i] if species[nb] == "O"]
-                if len(o_nbs) == 2:
-                    is_protonated = any(
-                        any(species[nb2] == "H" for nb2 in adj[o_idx])
-                        for o_idx in o_nbs
-                    )
-                    if not is_protonated:
-                        charge -= 1
-
-        # Phenoxide / alkoxide (O bonded to metal and C, no H)
-        for i, s in enumerate(species):
-            if s == "O":
-                nbs = adj[i]
-                has_metal = any(species[nb] in cls.METAL_OXIDATION_STATES for nb in nbs)
-                has_h = any(species[nb] == "H" for nb in nbs)
-                c_nbs = [nb for nb in nbs if species[nb] == "C"]
-                if has_metal and not has_h and len(c_nbs) == 1:
-                    c_o_nbs = [nb for nb in adj[c_nbs[0]] if species[nb] == "O"]
-                    if len(c_o_nbs) < 2:
-                        charge -= 1
-
-        # Deprotonated imidazolate-like rings
-        counted_n_pairs = set()
-        for i, s in enumerate(species):
-            if s != "N":
-                continue
-            for neighbor in adj[i]:
-                stack = [(neighbor, [i, neighbor])]
-                while stack:
-                    curr, path = stack.pop()
-                    if len(path) == 5:
-                        if i in adj[curr]:
-                            n_indices = [idx for idx in path if species[idx] == "N"]
-                            c_indices = [idx for idx in path if species[idx] == "C"]
-                            if len(n_indices) == 2 and len(c_indices) == 3:
-                                n_pair = tuple(sorted(n_indices))
-                                if n_pair not in counted_n_pairs:
-                                    counted_n_pairs.add(n_pair)
-                                    has_h = any(
-                                        any(species[nb] == "H" for nb in adj[n_idx])
-                                        for n_idx in n_pair
-                                    )
-                                    if not has_h:
-                                        charge -= 1
-                    else:
-                        for nxt in adj[curr]:
-                            if nxt not in path:
-                                stack.append((nxt, path + [nxt]))
-
-        return charge
-
-    @classmethod
-    def detect_steric_clashes(cls, species, dists):
-        """
-        Checks all pairwise distances for severe steric clashes.
-        Accepts a precomputed N×N distance matrix (numpy) instead of raw coords.
-        """
-        import numpy as np
-        warnings_out = []
-        n = len(species)
-        radii = np.array([cls.COV_RAD.get(s, 0.77) for s in species])
-        clash_limits = 0.60 * (radii[:, None] + radii[None, :])
-        # Only upper triangle (i < j), exclude self (d > 0)
-        rows, cols = np.triu_indices(n, k=1)
-        ds = dists[rows, cols]
-        limits = clash_limits[rows, cols]
-        bad = np.where(ds < limits)[0]
-        for idx in bad:
-            i, j = int(rows[idx]), int(cols[idx])
-            warnings_out.append(
-                f"Steric clash detected between atom {i}({species[i]}) and "
-                f"atom {j}({species[j]}): distance={ds[idx]:.3f} A, "
-                f"limit={limits[idx]:.3f} A."
-            )
-        return warnings_out
-
-    @classmethod
-    def check_valence_saturation(cls, species, adj):
-        """
-        Detects unsaturated/dangling valences on light non-metals.
-        Accepts a precomputed adjacency dict (from _build_adj_from_dists).
-        """
-        warnings_out = []
-        for i, s in enumerate(species):
-            n_bonds = len(adj[i])
-            if s == "C" and n_bonds < 3:
-                warnings_out.append(
-                    f"Under-coordinated Carbon detected: atom {i}(C) has only {n_bonds} bonds.")
-            elif s == "N" and n_bonds < 2:
-                warnings_out.append(
-                    f"Under-coordinated Nitrogen detected: atom {i}(N) has only {n_bonds} bonds.")
-            elif s == "O" and n_bonds < 1:
-                warnings_out.append(
-                    f"Isolated/Under-coordinated Oxygen detected: atom {i}(O) has {n_bonds} bonds.")
-            elif s == "B" and n_bonds < 3:
-                warnings_out.append(
-                    f"Under-coordinated Boron detected: atom {i}(B) has only {n_bonds} bonds.")
-        return warnings_out
 
 
 class BaseFragmenter:
@@ -609,22 +354,6 @@ class BaseFragmenter:
             out.sort(key=lambda x: x[1])
             return [j for j, _ in out]
 
-        def is_in_ring(idx):
-            # Check if there is a cycle of size 3 to 8 containing idx
-            # using a simple BFS path search
-            from collections import deque
-            q = deque([(idx, [idx])])
-            while q:
-                curr, path = q.popleft()
-                if len(path) > 8:
-                    continue
-                for nb in heavy_neighbors(curr):
-                    if len(path) > 2 and nb == idx:
-                        return True
-                    if nb not in path:
-                        q.append((nb, path + [nb]))
-            return False
-
         for hidx in capped_h_indices:
             if hidx < 0 or hidx >= len(species) or species[hidx] != "H":
                 continue
@@ -666,8 +395,21 @@ class BaseFragmenter:
             # --- GLOBAL AROMATIC PLANARITY ENFORCEMENT ---
             # To ensure the H is perfectly planar with the entire ring (e.g. phenyl),
             # we find all heavy atoms within 3 bonds to fit a best plane.
-            is_ring = is_in_ring(parent)
-            if is_ring:
+            def is_in_ring(idx):
+                from collections import deque
+                q = deque([(idx, [idx])])
+                while q:
+                    curr, path = q.popleft()
+                    if len(path) > 8:
+                        continue
+                    for nb in heavy_neighbors(curr):
+                        if len(path) > 2 and nb == idx:
+                            return True
+                        if nb not in path:
+                            q.append((nb, path + [nb]))
+                return False
+
+            if is_in_ring(parent):
                 from collections import deque
                 q = deque([(parent, 0)])
                 seen_heavy = {parent}
@@ -682,14 +424,11 @@ class BaseFragmenter:
                                 q.append((nb, depth + 1))
                 
                 if len(ring_atoms) >= 5:
-                    # Fit plane via SVD
                     pts = np.array([coords[idx] for idx in ring_atoms], dtype=float)
                     centroid = np.mean(pts, axis=0)
                     pts_centered = pts - centroid
                     _, _, vh = np.linalg.svd(pts_centered, full_matrices=False)
-                    normal = vh[-1, :] # Normal vector (smallest singular value)
-                    
-                    # Project dvec perfectly onto the average ring plane
+                    normal = vh[-1, :]
                     dvec = dvec - np.dot(dvec, normal) * normal
                     nd = np.linalg.norm(dvec)
                     if nd > 1e-8:
@@ -793,13 +532,6 @@ class BaseFragmenter:
 
             coords[hidx] = candidate
 
-    def optimize_capped_h_geometry_only(self, species, coords, capped_h_indices):
-        """Locally adjusts only the H atoms recorded as caps, using deterministic
-        C-H sp2 plane fit and O-H angle cleanups.
-        """
-        self.enforce_sp2_capped_h_geometry(species, coords, capped_h_indices)
-        self.enforce_capped_oh_geometry(species, coords, capped_h_indices)
-
     def enforce_single_molecule(self, species, coords, flags=None):
         """Keeps only the largest connected component in the molecule graph,
         removing any disjoint/floating solvent or sub-fragments.
@@ -848,713 +580,220 @@ class BaseFragmenter:
             return new_sp, new_co, new_fl
         return new_sp, new_co
 
-    def _build_bond_graph_all(self, species, coords):
-        """Return adjacency dict of all atoms including Hydrogen (vectorised)."""
-        import numpy as np
-        from scipy.spatial.distance import cdist
+    def optimize_capped_h_geometry_only(self, species, coords, capped_h_indices=None):
+        if not capped_h_indices:
+            return
+        capped_h_indices = [
+            i for i in capped_h_indices
+            if 0 <= i < len(species) and species[i] == "H"
+        ]
+        if not capped_h_indices:
+            return
+        self.enforce_sp2_capped_h_geometry(species, coords, capped_h_indices)
+        self.enforce_capped_oh_geometry(species, coords, capped_h_indices)
+        # Global rule: RDKit/UFF relaxation for capped H only, with all
+        # non-capped atoms fixed.
+        # RDKit can slightly pull aromatic C-H caps out of the phenyl plane;
+        # enforce the final sp2 direction again before writing coordinates.
+        self.enforce_sp2_capped_h_geometry(species, coords, capped_h_indices)
 
+
+    @staticmethod
+    def _classify_cap_removal_priority(h_idx, species, coords_arr):
         n = len(species)
-        if n == 0:
-            return {}
+        h_pos = coords_arr[h_idx]
+        best_d, parent_idx = float("inf"), -1
+        for j in range(n):
+            if j == h_idx or species[j] == "H":
+                continue
+            d = float(np.linalg.norm(coords_arr[j] - h_pos))
+            if d < best_d:
+                best_d, parent_idx = d, j
+        if parent_idx < 0 or best_d >= 1.5:
+            return 0, "unknown"
+        parent_sym = species[parent_idx]
+        if parent_sym == "C":
+            return 0, "carbon"
+            
+        h_neighbors = 0
+        p_pos = coords_arr[parent_idx]
+        for j in range(n):
+            if species[j] == "H":
+                if float(np.linalg.norm(coords_arr[j] - p_pos)) < 1.3:
+                    h_neighbors += 1
+        if parent_sym == "O" and h_neighbors >= 3:
+            return 100, "overcoordinated-O"
+            
+        grandparents = []
+        for j in range(n):
+            if j == h_idx or j == parent_idx or species[j] == "H":
+                continue
+            d = float(np.linalg.norm(coords_arr[j] - p_pos))
+            if d <= 2.2:
+                grandparents.append((j, species[j], d))
+        
+        def _gp_o_count(gp_idx):
+            gp_pos = coords_arr[gp_idx]
+            count = 0
+            for j in range(n):
+                if j == gp_idx or j == parent_idx or species[j] != "O":
+                    continue
+                if float(np.linalg.norm(coords_arr[j] - gp_pos)) <= 1.5:
+                    count += 1
+            return count
+
+        def _gp_heavy_count(gp_idx):
+            gp_pos = coords_arr[gp_idx]
+            count = 0
+            for j in range(n):
+                if j == gp_idx or j == parent_idx or species[j] == "H":
+                    continue
+                if float(np.linalg.norm(coords_arr[j] - gp_pos)) <= 1.8:
+                    count += 1
+            return count
+
+        if parent_sym == "O":
+            if not grandparents:
+                return 30, "bare-O"
+            gp_idx, gp_sym, _ = grandparents[0]
+            if gp_sym == "C":
+                n_o = _gp_o_count(gp_idx)
+                if n_o >= 1:
+                    return 80, "carboxylate"
+                if _gp_heavy_count(gp_idx) >= 3:
+                    return 60, "phenol"
+                return 50, "alcohol"
+            if gp_sym == "S":
+                n_o = _gp_o_count(gp_idx)
+                if n_o >= 2:
+                    return 35, "sulfonate"
+                return 70, "thiol"
+            if gp_sym == "P":
+                return 75, "phosphonate"
+            return 40, f"O-on-{gp_sym}"
+            
+        if parent_sym == "N":
+            if not grandparents:
+                return 25, "bare-N"
+            gp_idx, gp_sym, _ = grandparents[0]
+            if gp_sym == "S":
+                return 45, "sulfonamide"
+            if gp_sym == "C":
+                n_o = _gp_o_count(gp_idx)
+                if n_o >= 1:
+                    return 10, "amide"
+            n_heavy = len(grandparents)
+            if n_heavy == 1:
+                return 20, "primary-amine"
+            return 15, "secondary-amine"
+            
+        if parent_sym == "B":
+            return 5, "boron"
+            
+        return 8, f"{parent_sym}-group"
+
+    def fix_odd_electron_multiplicity(self, species, coords, capped_h_indices, label):
+        _ATOMIC_NUMBERS = {
+            "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
+            "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17,
+            "Ar": 18, "K": 19, "Ca": 20, "Sc": 21, "Ti": 22, "V": 23, "Cr": 24, "Mn": 25,
+            "Fe": 26, "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30, "Ga": 31, "Ge": 32, "As": 33,
+            "Se": 34, "Br": 35, "Kr": 36, "Zr": 40, "Nb": 41, "Mo": 42, "Tc": 43, "Ru": 44,
+            "Rh": 45, "Pd": 46, "Ag": 47, "Cd": 48, "In": 49, "Sn": 50, "Sb": 51, "Te": 52,
+            "I": 53, "Xe": 54, "La": 57, "Ce": 58, "Pr": 59, "Nd": 60, "Pm": 61, "Sm": 62,
+            "Eu": 63, "Gd": 64, "Tb": 65, "Dy": 66, "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70,
+            "Lu": 71, "Hf": 72, "Ta": 73, "W": 74, "Re": 75, "Os": 76, "Ir": 77, "Pt": 78,
+            "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82, "Bi": 83
+        }
+        z_sum = sum(_ATOMIC_NUMBERS.get(s, 6) for s in species)
+        if z_sum % 2 == 0:
+            return species, coords, capped_h_indices
+            
+        n = len(species)
         coords_arr = np.array(coords, dtype=float)
-        dists = cdist(coords_arr, coords_arr)
-
-        radii = np.array([QMReadinessChecker.COV_RAD.get(s, 0.77) for s in species])
-        cutoffs = np.clip(1.3 * (radii[:, None] + radii[None, :]), 0.9, 2.0)
-        bonded = (dists <= cutoffs) & (dists > 0)
-        adj = {i: list(np.where(bonded[i])[0]) for i in range(n)}
-        return adj
-
-
-    def _saturate_radical_site(self, species, coords, capped_h_flags):
-        """Finds the most under-coordinated light non-metal atom and adds 1 H atom
-        to satisfy its valence.  Uses ``place_capping_h`` for clash-checked placement."""
-        import numpy as np
-        n = len(species)
-        adj = self._build_bond_graph_all(species, coords)
-
-        # Prioritize Carbon first, then Nitrogen, then Oxygen, then Boron
-        target_priorities = ["C", "N", "O", "B"]
-        best_idx = None
-        best_deficit = 0
-
-        for priority in target_priorities:
-            for i in range(n):
-                if species[i] == priority:
-                    n_bonds = len(adj[i])
-                    val = 4 if priority == "C" else (3 if priority == "N" else (2 if priority == "O" else 3))
-                    deficit = val - n_bonds
-                    if deficit > best_deficit:
-                        best_deficit = deficit
-                        best_idx = i
-            if best_idx is not None:
-                break
-
-        if best_idx is not None:
-            parent_pos = np.array(coords[best_idx])
-            nbs = adj[best_idx]
-            bl = self.cap_bond_length(species[best_idx])
-
-            # Compute a base direction to seed place_capping_h
-            if len(nbs) == 0:
-                base_vec = np.array([0.0, 0.0, 1.0])
-            elif len(nbs) == 1:
-                v = parent_pos - np.array(coords[nbs[0]])
-                nn = np.linalg.norm(v)
-                base_vec = v / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
-            else:
-                vecs = [parent_pos - np.array(coords[nb]) for nb in nbs]
-                avg = np.mean(vecs, axis=0)
-                nn = np.linalg.norm(avg)
-                base_vec = avg / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
-
-            before_len = len(species)
-            self.place_capping_h(best_idx, base_vec, bl,
-                                  species, coords, capped_h_flags=capped_h_flags)
-
-            if len(species) > before_len:
-                print(f"QM-Engine: Saturated radical site {best_idx}({species[best_idx]}) with 1 H atom.")
-            else:
-                # place_capping_h couldn't find a non-clashing position; append anyway
-                h_pos = parent_pos + bl * base_vec
-                species.append("H")
-                coords.append(h_pos.tolist())
-                capped_h_flags.append(True)
-                print(f"QM-Engine: Saturated radical site {best_idx}({species[best_idx]}) with 1 H atom (forced).")
-
-        return species, coords, capped_h_flags
-
-    def _protonate_anions(self, species, coords, capped_h_flags, count):
-        """Adds Hydrogen atoms to coordinating anions to protonate them to neutral."""
-        import numpy as np
-        n = len(species)
-        adj = self._build_bond_graph_all(species, coords)
         
-        # Find unprotonated carboxylate oxygens or phenoxide oxygens
-        candidates = []
-        for i, s in enumerate(species):
-            if s == "O":
-                nbs = adj[i]
-                has_h = any(species[nb] == "H" for nb in nbs)
-                has_metal = any(species[nb] in QMReadinessChecker.METAL_OXIDATION_STATES for nb in nbs)
-                if has_metal and not has_h:
-                    candidates.append(i)
-                    
-        # Protonate up to 'count' candidates
-        added = 0
-        for o_idx in candidates[:count]:
-            o_pos = np.array(coords[o_idx])
-            heavy_nbs = [nb for nb in adj[o_idx] if species[nb] != "H"]
-            if len(heavy_nbs) > 0:
-                parent_pos = np.array(coords[heavy_nbs[0]])
-                vec = o_pos - parent_pos
-                if np.linalg.norm(vec) > 1e-6:
-                    vec /= np.linalg.norm(vec)
-                else:
-                    vec = np.array([0.0, 0.0, 1.0])
-            else:
-                vec = np.array([0.0, 0.0, 1.0])
+        removal_candidates = []
+        for h_idx in capped_h_indices:
+            score, group = self._classify_cap_removal_priority(h_idx, species, coords_arr)
+            if score > 0:
+                removal_candidates.append((score, h_idx, group))
                 
-            e1, e2 = self._orthonormal_basis(vec)
-            angle = np.deg2rad(109.5)
-            dv = np.cos(angle) * vec + np.sin(angle) * e1
-            dv /= np.linalg.norm(dv)
-            h_pos = o_pos + 0.96 * dv
+        if removal_candidates:
+            removal_candidates.sort(key=lambda x: x[0], reverse=True)
+            score, target_idx, group = removal_candidates[0]
             
-            species.append("H")
-            coords.append(h_pos.tolist())
-            capped_h_flags.append(True)
-            added += 1
-            print(f"QM-Engine: Protonated anionic Oxygen {o_idx} to neutral (Added 1 H).")
+            p_sym = "unknown"
+            for j in range(n):
+                if species[j] != "H" and float(np.linalg.norm(coords_arr[j] - coords_arr[target_idx])) < 1.5:
+                    p_sym = species[j]
+                    break
+                    
+            print(f"QM-Fix [{group}]: Removed capping H from {p_sym}[{target_idx}] (priority={score}) to achieve even electron count for '{label}'.")
             
-        # If we still need to add more H (but no candidates found), we can add H to any Oxygen
-        if added < count:
-            for i, s in enumerate(species):
-                if s == "O" and added < count:
-                    if len(adj[i]) <= 1:
-                        o_pos = np.array(coords[i])
-                        h_pos = o_pos + np.array([0.0, 0.0, 0.96])
-                        species.append("H")
-                        coords.append(h_pos.tolist())
-                        capped_h_flags.append(True)
-                        added += 1
-                        print(f"QM-Engine: Protonated O atom {i} with 1 H.")
-                        
-        return species, coords, capped_h_flags
-
-    def _deprotonate_acids(self, species, coords, capped_h_flags, count):
-        """Removes Hydrogen atoms from acidic groups to neutralize positive metal charges."""
-        import numpy as np
-        n = len(species)
-        adj = self._build_bond_graph_all(species, coords)
-        
-        # Find Hydrogen atoms bonded to carboxylate or metal-coordinated Oxygens
-        candidates = []
-        for i, s in enumerate(species):
-            if s == "H":
-                nbs = adj[i]
-                if len(nbs) == 1 and species[nbs[0]] == "O":
-                    o_idx = nbs[0]
-                    o_nbs = adj[o_idx]
-                    is_acidic = any(species[nb] == "C" or species[nb] in QMReadinessChecker.METAL_OXIDATION_STATES for nb in o_nbs)
-                    if is_acidic:
-                        candidates.append(i)
-                        
-        # Deprotonate up to 'count' candidates
-        to_remove = set(candidates[:count])
-        
-        if len(to_remove) < count:
-            for i, s in enumerate(species):
-                if s == "H" and i not in to_remove and len(to_remove) < count:
-                    nbs = adj[i]
-                    if len(nbs) == 1 and species[nbs[0]] in ("O", "N"):
-                        to_remove.add(i)
-                        
-        if to_remove:
-            keep = [i for i in range(n) if i not in to_remove]
+            keep = [i for i in range(n) if i != target_idx]
             species = [species[i] for i in keep]
             coords = [coords[i] for i in keep]
-            capped_h_flags = [capped_h_flags[i] for i in keep]
-            print(f"QM-Engine: Deprotonated acidic sites (Removed {len(to_remove)} H).")
+            new_caps = [i for i in capped_h_indices if i != target_idx]
+            capped_h_indices = [i - 1 if i > target_idx else i for i in new_caps]
+            return species, coords, capped_h_indices
             
-        return species, coords, capped_h_flags
-
-    # ------------------------------------------------------------------ #
-    #  RDKit-driven valence/saturation helpers                            #
-    # ------------------------------------------------------------------ #
-
-    # Elements treated as metals (stripped before RDKit perception)
-    _RDKIT_METAL_ELEMENTS = {
-        "Li", "Na", "K", "Rb", "Cs",
-        "Be", "Mg", "Ca", "Sr", "Ba",
-        "Sc", "Ti", "V",  "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-        "Y",  "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
-        "Hf", "Ta", "W",  "Re", "Os", "Ir", "Pt", "Au", "Hg",
-        "Al", "Ga", "In", "Sn", "Tl", "Pb", "Bi",
-        "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd",
-        "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
-    }
-
-    @staticmethod
-    def _metal_charge_estimate(species):
-        """Sum up standard oxidation-state charges for all metals present."""
-        return sum(
-            QMReadinessChecker.METAL_OXIDATION_STATES.get(s, 0)
-            for s in species
-        )
-
-    def _build_rdkit_mol_organic(self, species, coords):
-        """
-        Build an RDKit molecule from the purely organic (non-metal) atoms.
-
-        Returns
-        -------
-        mol : rdkit.Chem.RWMol or None
-        org_indices : list[int]  – original indices of atoms kept in mol
-        """
-        try:
-            from rdkit import Chem
-        except ImportError:
-            return None, []
-
-        metals = self._RDKIT_METAL_ELEMENTS
-        org_indices = [i for i, s in enumerate(species) if s not in metals]
-
-        if not org_indices:
-            return None, []
-
-        # Build xyz block for the organic sub-system
-        xyz_lines = [str(len(org_indices)), ""]
-        for i in org_indices:
-            x, y, z = coords[i]
-            xyz_lines.append(f"{species[i]}  {x:.6f}  {y:.6f}  {z:.6f}")
-        xyz_block = "\n".join(xyz_lines)
-
-        try:
-            mol = Chem.MolFromXYZBlock(xyz_block)
-            if mol is None:
-                return None, org_indices
-        except Exception:
-            return None, org_indices
-
-        return mol, org_indices
-
-    @staticmethod
-    def _rdkit_determine_bonds(mol):
-        """
-        Try RDKit DetermineBonds with a sweep of charge values (0 first, then
-        ±1, ±2, ±3 …).  The organic framework is H-capped and usually neutral
-        after metal stripping, so charge=0 succeeds in the vast majority of
-        cases.
-
-        Returns
-        -------
-        succeeded : bool
-        used_charge : int  (the charge value that worked, or 0 on failure)
-        """
-        try:
-            from rdkit.Chem import rdDetermineBonds
-        except ImportError:
-            return False, 0
-
-        for delta in [0, -1, 1, -2, 2, -3, 3]:
-            try:
-                import copy
-                mol_copy = copy.copy(mol)
-                rdDetermineBonds.DetermineConnectivity(mol_copy)
-                rdDetermineBonds.DetermineBonds(mol_copy, charge=delta)
-                # If we reach here, it worked – apply to the real mol
-                rdDetermineBonds.DetermineConnectivity(mol)
-                rdDetermineBonds.DetermineBonds(mol, charge=delta)
-                return True, delta
-            except Exception:
-                continue
-        return False, 0
-
-    def _fix_valence_violations_rdkit(self, species, coords, capped_h_flags):
-        """
-        Use RDKit bond perception on the metal-stripped organic framework to
-        detect atoms that are OVER-COORDINATED (i.e. have more bonds than their
-        maximum normal valence allows).  For every excess bond, if a neighbour
-        is a capped Hydrogen it is the first candidate for removal.
-
-        Returns
-        -------
-        species, coords, capped_h_flags, changed : bool
-        """
-        try:
-            from rdkit import Chem
-            from rdkit.Chem import rdDetermineBonds
-        except ImportError:
-            return species, coords, capped_h_flags, False
-
-        import numpy as np
-
-        mol, org_indices = self._build_rdkit_mol_organic(species, coords)
-        if mol is None or len(org_indices) == 0:
-            return species, coords, capped_h_flags, False
-
-        succeeded, used_charge = self._rdkit_determine_bonds(mol)
-        if not succeeded:
-            print("QM-RDKit: DetermineBonds (valence check) could not find valid bond ordering.")
-            return species, coords, capped_h_flags, False
-
-        # Maximum valences for light non-metals
-        MAX_VALENCE = {"C": 4, "N": 3, "O": 2, "S": 6, "P": 5, "B": 3, "F": 1, "Cl": 1, "Br": 1, "I": 1}
-
-        # Map from RDKit atom index → original index
-        rdk2orig = {ri: org_indices[ri] for ri in range(len(org_indices))}
-
-        h_to_remove = []  # original indices to delete
-
-        for atom in mol.GetAtoms():
-            sym = atom.GetSymbol()
-            if sym not in MAX_VALENCE:
-                continue
-            max_v = MAX_VALENCE[sym]
-            # Total degree in RDKit (includes explicit+implicit H)
-            # We use explicit degree from the perceived graph
-            explicit_degree = atom.GetDegree()
-            # Count implicit H that RDKit assigned
-            implicit_h = atom.GetNumImplicitHs()
-            total_v = explicit_degree + implicit_h
-            if total_v <= max_v:
-                continue
-
-            excess = total_v - max_v
-            orig_idx = rdk2orig[atom.GetIdx()]
-            print(f"QM-RDKit: Over-coordinated {sym}[orig={orig_idx}] "
-                  f"degree={explicit_degree} implH={implicit_h} max={max_v} excess={excess}")
-
-            # Prefer to remove *capped* Hydrogen neighbours in the original list
-            # (they are the ones we added, so they are the safe removal targets)
-            h_nbs_capped = []
-            h_nbs_any = []
-            for nb in atom.GetNeighbors():
-                if nb.GetSymbol() == "H":
-                    nb_orig = rdk2orig.get(nb.GetIdx())
-                    if nb_orig is not None:
-                        if capped_h_flags[nb_orig]:
-                            h_nbs_capped.append(nb_orig)
-                        else:
-                            h_nbs_any.append(nb_orig)
-
-            # Also look for un-mapped capped H by geometry (within 1.3 Å)
-            orig_pos = np.array(coords[orig_idx])
-            for gi, gs in enumerate(species):
-                if gs == "H" and capped_h_flags[gi] and gi not in h_nbs_capped:
-                    d = np.linalg.norm(orig_pos - np.array(coords[gi]))
-                    if d < 1.3:
-                        h_nbs_capped.append(gi)
-
-            # Remove excess capped Hs first, then any H if still needed
-            candidates = h_nbs_capped + h_nbs_any
-            for h_idx in candidates[:excess]:
-                if h_idx not in h_to_remove:
-                    h_to_remove.append(h_idx)
-
-        if not h_to_remove:
-            return species, coords, capped_h_flags, False
-
-        keep = set(range(len(species))) - set(h_to_remove)
-        keep = sorted(keep)
-        species = [species[i] for i in keep]
-        coords = [coords[i] for i in keep]
-        capped_h_flags = [capped_h_flags[i] for i in keep]
-        print(f"QM-RDKit: Removed {len(h_to_remove)} over-coordinated H atom(s).")
-        return species, coords, capped_h_flags, True
-
-    def _adjust_qm_readiness_rdkit(self, species, coords, capped_h_flags, charge, multiplicity):
-        """
-        Use RDKit bond perception on the metal-stripped organic framework to
-        perform targeted protonation/deprotonation:
-
-        * Radical (multiplicity > 1): add H to the atom with most radical electrons.
-        * Negative charge: add H to the most basic anion site (O⁻ > N⁻ > C⁻ radical).
-        * Positive charge: remove H from the most acidic site (-COOH > -OH > -NH).
-
-        Returns
-        -------
-        species, coords, capped_h_flags, succeeded : bool
-        """
-        try:
-            from rdkit import Chem
-            from rdkit.Chem import rdDetermineBonds
-        except ImportError:
-            return species, coords, capped_h_flags, False
-
-        import numpy as np
-
-        mol, org_indices = self._build_rdkit_mol_organic(species, coords)
-        if mol is None or len(org_indices) == 0:
-            return species, coords, capped_h_flags, False
-
-        succeeded, used_charge = self._rdkit_determine_bonds(mol)
-        if not succeeded:
-            print("QM-RDKit: DetermineBonds (adjust) could not find valid bond ordering.")
-            return species, coords, capped_h_flags, False
-
-        rdk2orig = {ri: org_indices[ri] for ri in range(len(org_indices))}
-
-        # ---- Helper: add H to a given heavy atom ----
-        def _add_h_to(orig_idx):
-            parent_pos = np.array(coords[orig_idx])
-            nbs = []
-            for gi, gs in enumerate(species):
-                if gi == orig_idx or gs == "H":
+        def _heavy_and_h_nbs(atom_idx):
+            pos = coords_arr[atom_idx]
+            heavy, h_nb = [], []
+            for j in range(n):
+                if j == atom_idx:
                     continue
-                d = np.linalg.norm(parent_pos - np.array(coords[gi]))
-                r1 = QMReadinessChecker.COV_RAD.get(species[orig_idx], 0.77)
-                r2 = QMReadinessChecker.COV_RAD.get(gs, 0.77)
-                if d <= 1.3 * (r1 + r2):
-                    nbs.append(gi)
-            if len(nbs) == 0:
-                base_vec = np.array([0.0, 0.0, 1.0])
-            elif len(nbs) == 1:
-                vec = parent_pos - np.array(coords[nbs[0]])
+                d = float(np.linalg.norm(coords_arr[j] - pos))
+                if species[j] == "H":
+                    if d < 1.3:
+                        h_nb.append(j)
+                elif d < 2.2:
+                    heavy.append(j)
+            return heavy, h_nb
+
+        _ADD_ELIGIBLE = {"O", "N"}
+        add_candidates = []
+        for i, sym in enumerate(species):
+            if sym not in _ADD_ELIGIBLE:
+                continue
+            heavy_nbs, h_nbs = _heavy_and_h_nbs(i)
+            if len(h_nbs) > 0:
+                continue
+            if sym == "O" and len(heavy_nbs) != 1:
+                continue
+            if sym == "N" and len(heavy_nbs) != 2:
+                continue
+                
+            simulated_coords = np.vstack([coords_arr, coords_arr[i] + [0, 0, 1.0]])
+            score, group = self._classify_cap_removal_priority(n, species + ["H"], simulated_coords)
+            add_candidates.append((score, i, group, heavy_nbs))
+            
+        if add_candidates:
+            add_candidates.sort(key=lambda x: x[0], reverse=True)
+            score, target_idx, group, heavy_nbs = add_candidates[0]
+            target_sym = species[target_idx]
+            
+            parent_pos = coords_arr[target_idx]
+            if len(heavy_nbs) == 1:
+                vec = parent_pos - coords_arr[heavy_nbs[0]]
                 nn = np.linalg.norm(vec)
                 base_vec = vec / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
             else:
-                vecs = [parent_pos - np.array(coords[nb]) for nb in nbs]
+                vecs = [parent_pos - coords_arr[nb] for nb in heavy_nbs]
                 avg = np.mean(vecs, axis=0)
                 nn = np.linalg.norm(avg)
                 base_vec = avg / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
-            bl = self.cap_bond_length(species[orig_idx])
-            before_len = len(species)
-            self.place_capping_h(orig_idx, base_vec, bl,
-                                  species, coords, capped_h_flags=capped_h_flags)
-            if len(species) == before_len:
-                # No non-clashing spot found; force placement along base direction
-                h_pos = parent_pos + bl * base_vec
-                species.append("H")
-                coords.append(h_pos.tolist())
-                capped_h_flags.append(True)
-            print(f"QM-RDKit: Added H to {species[orig_idx]}[{orig_idx}].")
-
-        # ---- Helper: remove one capped H from a given heavy atom ----
-        def _remove_h_from(orig_idx):
-            parent_pos = np.array(coords[orig_idx])
-            # Find nearest capped H
-            best_h = None
-            best_d = 2.0
-            for gi, gs in enumerate(species):
-                if gs == "H" and capped_h_flags[gi]:
-                    d = np.linalg.norm(parent_pos - np.array(coords[gi]))
-                    if d < best_d:
-                        best_d = d
-                        best_h = gi
-            if best_h is None:
-                # Fall back to any H neighbour
-                for gi, gs in enumerate(species):
-                    if gs == "H":
-                        d = np.linalg.norm(parent_pos - np.array(coords[gi]))
-                        if d < best_d:
-                            best_d = d
-                            best_h = gi
-            if best_h is None:
-                return False
-            keep = [i for i in range(len(species)) if i != best_h]
-            # Rebuild lists in-place via slice assignment
-            species[:] = [species[i] for i in keep]
-            coords[:] = [coords[i] for i in keep]
-            capped_h_flags[:] = [capped_h_flags[i] for i in keep]
-            print(f"QM-RDKit: Removed H from {species[orig_idx]}[{orig_idx}].")
-            return True
-
-        succeeded = False
-
-        # --- CASE 1: Radical → add H to atom with most radical electrons ---
-        if multiplicity > 1:
-            best_atom = None
-            best_rad = 0
-            for atom in mol.GetAtoms():
-                rad = atom.GetNumRadicalElectrons()
-                if rad > best_rad:
-                    best_rad = rad
-                    best_atom = atom
-            if best_atom is not None:
-                _add_h_to(rdk2orig[best_atom.GetIdx()])
-                succeeded = True
-            else:
-                # Fallback: use _saturate_radical_site heuristic
-                species, coords, capped_h_flags = self._saturate_radical_site(
-                    species, coords, capped_h_flags)
-                succeeded = True
-            return species, coords, capped_h_flags, succeeded
-
-        # --- CASE 2: Negative charge → protonate ---
-        if charge < 0:
-            # Priority: O⁻ (formal charge -1), then N⁻, then C radical
-            candidates_o = []   # (rdkit_atom_idx, formal_charge)
-            candidates_n = []
-            for atom in mol.GetAtoms():
-                fc = atom.GetFormalCharge()
-                sym = atom.GetSymbol()
-                if fc < 0:
-                    if sym == "O":
-                        candidates_o.append((atom.GetIdx(), fc))
-                    elif sym == "N":
-                        candidates_n.append((atom.GetIdx(), fc))
-            # Sort most-negative first
-            candidates_o.sort(key=lambda x: x[1])
-            candidates_n.sort(key=lambda x: x[1])
-            all_cands = [a for a, _ in candidates_o] + [a for a, _ in candidates_n]
-
-            if all_cands:
-                _add_h_to(rdk2orig[all_cands[0]])
-                succeeded = True
-            else:
-                # No formal charge: use heuristic
-                species, coords, capped_h_flags = self._protonate_anions(
-                    species, coords, capped_h_flags, count=1)
-                succeeded = True
-            return species, coords, capped_h_flags, succeeded
-
-        # --- CASE 3: Positive charge → deprotonate ---
-        if charge > 0:
-            # Priority: O with H (acid OH), then N with H (amine/amide), then C-H
-            # Among O-H groups prefer carboxyl (O-C=O) over free OH
-            best_oh = None  # (score, rdkit_atom_idx)
-            for atom in mol.GetAtoms():
-                sym = atom.GetSymbol()
-                if sym not in ("O", "N", "C"):
-                    continue
-                # Count H neighbours
-                h_nbs = [nb for nb in atom.GetNeighbors() if nb.GetSymbol() == "H"]
-                if not h_nbs:
-                    continue
-                # Score: carboxyl O > free O-H > N-H > C-H
-                score = 0
-                if sym == "O":
-                    heavy_nbs = [nb for nb in atom.GetNeighbors() if nb.GetSymbol() != "H"]
-                    if any(nb.GetSymbol() == "C" for nb in heavy_nbs):
-                        c_nb = next(nb for nb in heavy_nbs if nb.GetSymbol() == "C")
-                        # Check if carbon is C=O (carboxyl)
-                        if any(b.GetBondTypeAsDouble() >= 1.5 for b in c_nb.GetBonds()
-                               if b.GetOtherAtom(c_nb).GetSymbol() == "O"
-                                  and b.GetOtherAtomIdx(c_nb.GetIdx()) != atom.GetIdx()):
-                            score = 3  # carboxyl OH
-                        else:
-                            score = 2  # phenol/alcohol OH
-                    else:
-                        score = 2
-                elif sym == "N":
-                    score = 1
-                else:  # C
-                    score = 0
-                if best_oh is None or score > best_oh[0]:
-                    best_oh = (score, atom.GetIdx())
-
-            if best_oh is not None:
-                _remove_h_from(rdk2orig[best_oh[1]])
-                succeeded = True
-            else:
-                species, coords, capped_h_flags = self._deprotonate_acids(
-                    species, coords, capped_h_flags, count=1)
-                succeeded = True
-            return species, coords, capped_h_flags, succeeded
-
-        return species, coords, capped_h_flags, False
-
-    def _remove_steric_clashing_h(self, species, coords, capped_h_flags,
-                                   hh_clash_threshold=0.8):
-        """
-        Final safety pass: remove capped H atoms that are impossibly close to
-        another H atom (H–H distance < ``hh_clash_threshold`` Å).
-
-        For each clashing pair:
-        * If one H is capped and the other is not, remove the capped one.
-        * If both are capped, remove the one added last (higher index).
-        * Non-capped H–H clashes are left untouched (they are the user's data).
-        """
-        import numpy as np
-
-        to_remove = set()
-        h_indices = [i for i, s in enumerate(species) if s == "H"]
-
-        for a in range(len(h_indices)):
-            for b in range(a + 1, len(h_indices)):
-                ia, ib = h_indices[a], h_indices[b]
-                if ia in to_remove or ib in to_remove:
-                    continue
-                d = np.linalg.norm(
-                    np.array(coords[ia]) - np.array(coords[ib]))
-                if d < hh_clash_threshold:
-                    ca, cb = capped_h_flags[ia], capped_h_flags[ib]
-                    if ca and not cb:
-                        to_remove.add(ia)
-                        print(f"QM-Engine: Removed steric-clashing capped H[{ia}] "
-                              f"(d={d:.3f} Å to H[{ib}]).")
-                    elif cb and not ca:
-                        to_remove.add(ib)
-                        print(f"QM-Engine: Removed steric-clashing capped H[{ib}] "
-                              f"(d={d:.3f} Å to H[{ia}]).")
-                    elif ca and cb:
-                        # Both capped – remove the later one
-                        victim = max(ia, ib)
-                        to_remove.add(victim)
-                        print(f"QM-Engine: Removed steric-clashing capped H[{victim}] "
-                              f"(d={d:.3f} Å).")
-
-        if not to_remove:
-            return species, coords, capped_h_flags
-
-        keep = sorted(set(range(len(species))) - to_remove)
-        species = [species[i] for i in keep]
-        coords = [coords[i] for i in keep]
-        capped_h_flags = [capped_h_flags[i] for i in keep]
-        return species, coords, capped_h_flags
-
-    # ------------------------------------------------------------------ #
-
-    def force_qm_readiness(self, species, coords, capped_h_flags):
-        """
-        Iteratively adjusts Hydrogen protonation/deprotonation and saturation
-        using RDKit bond determination and valence checks to force the fragment
-        to be a neutral singlet (charge = 0, multiplicity = 1).
-
-        Strategy (per iteration):
-        1. Check charge and multiplicity via QMReadinessChecker.
-        2. If both are already 0/1, check for RDKit-detected valence violations
-           (over-coordinated atoms) and remove extra H if needed.
-        3. Otherwise use _adjust_qm_readiness_rdkit (RDKit-based) or fall back
-           to distance-heuristic helpers when RDKit is unavailable.
-        4. Run capped-H geometry optimisation once at the end.
-        """
-        import numpy as np
-
-        # Normalise capped_h_flags to a boolean list aligned with species
-        is_bool_list = (
-            len(capped_h_flags) == len(species)
-            and all(isinstance(x, bool) for x in capped_h_flags)
-        )
-        if not is_bool_list:
-            indices_set = set(capped_h_flags)
-            capped_h_flags = [i in indices_set for i in range(len(species))]
-        if len(capped_h_flags) < len(species):
-            capped_h_flags = capped_h_flags + [False] * (len(species) - len(capped_h_flags))
-
-        try:
-            from rdkit import Chem
-            from rdkit.Chem import rdDetermineBonds
-            has_rdkit = True
-        except ImportError:
-            has_rdkit = False
-
-        for iteration in range(12):
-            qm_info = QMReadinessChecker.check_qm_readiness(species, coords)
-            charge = qm_info["charge"]
-            multiplicity = qm_info["multiplicity"]
-
-            if charge == 0 and multiplicity == 1:
-                # Still check for over-coordinated atoms (e.g. phenyl C with 2 Hs)
-                if has_rdkit:
-                    species, coords, capped_h_flags, changed = \
-                        self._fix_valence_violations_rdkit(species, coords, capped_h_flags)
-                    if changed:
-                        continue  # re-evaluate after removing extra H
-                break
-
-            if has_rdkit:
-                species, coords, capped_h_flags, succeeded = \
-                    self._adjust_qm_readiness_rdkit(
-                        species, coords, capped_h_flags, charge, multiplicity)
-                if succeeded:
-                    continue
-
-            # ---- Fallback: distance-heuristic helpers ----
-            if multiplicity > 1:
-                species, coords, capped_h_flags = self._saturate_radical_site(
-                    species, coords, capped_h_flags)
-            elif charge < 0:
-                species, coords, capped_h_flags = self._protonate_anions(
-                    species, coords, capped_h_flags, count=abs(charge))
-            elif charge > 0:
-                species, coords, capped_h_flags = self._deprotonate_acids(
-                    species, coords, capped_h_flags, count=charge)
-
-        # Safety net: remove any H atoms that are impossibly close to each other
-        # (can happen when the fallback heuristic forced a placement with no valid direction)
-        species, coords, capped_h_flags = self._remove_steric_clashing_h(
-            species, coords, capped_h_flags)
-
-        # Final geometry cleanup for all capped hydrogens
-        capped_h_indices = [i for i, f in enumerate(capped_h_flags) if f]
-        if capped_h_indices:
-            self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
-
-        return species, coords, capped_h_flags
-
-    def ensure_qm_ready(self, species, coords, capped_h_flags):
-        """
-        Lightweight gate in front of the heavy RDKit saturation engine.
-
-        1. Run a quick QMReadinessChecker pass on the fragment as-is.
-        2. If charge == 0 and multiplicity == 1  → return immediately (fast path).
-        3. Otherwise delegate to force_qm_readiness (RDKit-driven fix).
-
-        This avoids running the RDKit bond-perception pipeline on the majority
-        of fragments that are already chemically correct after geometric capping.
-        """
-        # Normalise capped_h_flags once here so both branches receive consistent input
-        is_bool_list = (
-            len(capped_h_flags) == len(species)
-            and all(isinstance(x, bool) for x in capped_h_flags)
-        )
-        if not is_bool_list:
-            indices_set = set(capped_h_flags)
-            capped_h_flags = [i in indices_set for i in range(len(species))]
-        if len(capped_h_flags) < len(species):
-            capped_h_flags = capped_h_flags + [False] * (len(species) - len(capped_h_flags))
-
-        qm_info = QMReadinessChecker.check_qm_readiness(species, coords)
-        if qm_info["charge"] == 0 and qm_info["multiplicity"] == 1:
-            # Already QM-ready – skip the heavy engine entirely
-            return species, coords, capped_h_flags
-
-        # Needs correction – delegate to the full RDKit-driven engine
-        return self.force_qm_readiness(species, coords, capped_h_flags)
-
+                
+            bl = self.cap_bond_length(target_sym)
+            before = len(species)
+            self.place_capping_h(target_idx, base_vec, bl, species, coords, min_hh=1.5, capped_h_flags=None)
+            if len(species) > before:
+                capped_h_indices.append(len(species) - 1)
+                print(f"QM-Fix [{group}]: Added H to {target_sym}[{target_idx}] (no removable non-C capping H found) to achieve even electron count for '{label}'.")
+                return species, coords, capped_h_indices
+                
+        print(f"[QM WARNING] Fragment '{label}': could not automatically fix odd electron count (Z_sum={z_sum}). Manual inspection needed.")
+        return species, coords, capped_h_indices
 
 class MOFFragmenter(BaseFragmenter):
     METALS = {"Mg", "Zn", "Cu", "Fe", "Co", "Ni", "Mn", "Zr", "Ti", "V", "Cr", "Al"}
@@ -2103,6 +1342,10 @@ class MOFFragmenter(BaseFragmenter):
             print(f"  moffragmentor node+linker failed: {exc}")
             return None
 
+        if getattr(result, "has_1d_sbu", False):
+            print("  moffragmentor detected 1D SBU. Skipping moffragmentor node extraction to allow --nmetals slicing via fallback path.")
+            return None
+
         nodes = list(getattr(getattr(result, "nodes", []), "sbus", []))
         linkers = list(getattr(getattr(result, "linkers", []), "sbus", []))
         if not nodes or not linkers:
@@ -2115,6 +1358,46 @@ class MOFFragmenter(BaseFragmenter):
         node = min(nodes, key=lambda s: np.linalg.norm(np.array(getattr(s, "center", np.mean(s.molecule.cart_coords, axis=0))) - center))
         node_sp = [str(x) for x in node.molecule.species]
         node_co = [np.array(c, dtype=float) for c in node.molecule.cart_coords]
+
+        # --- Merge nearby nodes that belong to the same polynuclear SBU ---
+        # moffragmentor may split a dinuclear/polynuclear SBU into individual
+        # 1-atom metal nodes.  Detect this by checking metal-metal distances
+        # (with periodic images) and merge when distance < 3.5 Å.
+        _merge_cutoff = 3.5
+        _lat = struct.lattice.matrix
+        merged_ids = {id(node)}
+        changed = True
+        while changed:
+            changed = False
+            node_metals = [node_co[k] for k in range(len(node_sp)) if node_sp[k] in self.METALS]
+            for other in nodes:
+                if id(other) in merged_ids:
+                    continue
+                osp = [str(x) for x in other.molecule.species]
+                oco = [np.array(c, dtype=float) for c in other.molecule.cart_coords]
+                should_merge = False
+                best_shift = np.zeros(3)
+                best_d = float("inf")
+                for ia in (-1, 0, 1):
+                    for ib in (-1, 0, 1):
+                        for ic in (-1, 0, 1):
+                            shift = ia * _lat[0] + ib * _lat[1] + ic * _lat[2]
+                            for om_pos in [oco[k] + shift for k in range(len(osp)) if osp[k] in self.METALS]:
+                                for nm_pos in node_metals:
+                                    d = float(np.linalg.norm(om_pos - nm_pos))
+                                    if 0.1 < d < _merge_cutoff and d < best_d:
+                                        should_merge = True
+                                        best_shift = shift
+                                        best_d = d
+                if should_merge:
+                    for k in range(len(osp)):
+                        node_sp.append(osp[k])
+                        node_co.append(oco[k] + best_shift)
+                    merged_ids.add(id(other))
+                    changed = True  # re-scan in case of chains of bridging metals
+
+        if len(merged_ids) > 1:
+            print(f"  -> Merged {len(merged_ids)} moffragmentor nodes into one polynuclear SBU.")
         node_ctr = np.mean(node_co, axis=0)
 
         image_vectors = []
@@ -2221,7 +1504,7 @@ class MOFFragmenter(BaseFragmenter):
                                             else:
                                                 # somehow it was a duplicate after all or append failed
                                                 continue
-                                            
+                                        capping_hs_added = 0
                                         # Find neighbors of this stray atom to continue BFS or cap
                                         for nia in (-1, 0, 1):
                                             for nib in (-1, 0, 1):
@@ -2241,16 +1524,30 @@ class MOFFragmenter(BaseFragmenter):
                                                                     is_core_metal = True
                                                                     break
                                                             if not is_core_metal:
+                                                                if curr_sp == "O":
+                                                                    h_count_struct = sum(1 for nn in struct.get_neighbors(struct[curr_si], 1.3) if nn.species_string == "H")
+                                                                    # Check if this O has a heavy non-metal neighbor (C, P, S, etc.)
+                                                                    # If so, it's a coordinating O (e.g. P-O-Metal, C-O-Metal),
+                                                                    # and should get at most 1 H total to replace the metal bond.
+                                                                    # Only pure water-like O (bonded only to metals/H) can have 2 H.
+                                                                    has_heavy_nonmetal = any(
+                                                                        nn.species_string not in self.METALS and nn.species_string != "H"
+                                                                        for nn in struct.get_neighbors(struct[curr_si], 1.8)
+                                                                    )
+                                                                    max_h = 1 if has_heavy_nonmetal else 2
+                                                                    if (h_count_struct + capping_hs_added) >= max_h:
+                                                                        continue
                                                                 # CAP IT
                                                                 base = n_pos - curr_pos
                                                                 before = len(species)
                                                                 capped_h_flags_temp = [False] * (len(species) + 1) # dummy
                                                                 self.place_capping_h(curr_idx_in_res, base, self.cap_bond_length(curr_sp), 
-                                                                                      species, coords, min_hh=1.5, capped_h_flags=capped_h_flags_temp)
+                                                                                      species, coords, min_hh=1.2, min_o_contact=1.2, capped_h_flags=capped_h_flags_temp)
                                                                 if len(species) > before:
                                                                     # The new H index is before
                                                                     partial_capped_h.append(before)
                                                                     all_species_coords.append((species[before], coords[before]))
+                                                                    capping_hs_added += 1
                                                             continue
 
                                                         if (n_s_idx, (curr_img[0]+nia, curr_img[1]+nib, curr_img[2]+nic)) not in visited_stray:
@@ -2273,9 +1570,12 @@ class MOFFragmenter(BaseFragmenter):
             if 0 <= hidx < len(capped_h_flags):
                 capped_h_flags[hidx] = True
         self._cap_path_j_open_oxygens(species, coords, capped_h_flags)
+        capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         # Path J keeps helper node/linker heavy atoms fixed. Only capped H
-        # coordinates are locally adjusted, and formal charge/multiplicity are pushed to 0/1.
-        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
+        # coordinates are locally adjusted.
+        self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+        _label = str(output_path or 'mof_fragment')
+        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(species, coords, capped_h_indices, label=_label)
 
         mol = Molecule(species, coords)
         if output_path:
@@ -2293,6 +1593,7 @@ class MOFFragmenter(BaseFragmenter):
             return combined
         self._fallback_export_mof_node_linker(mof_path)
         struct = Structure.from_file(mof_path)
+        structure_stem = Path(mof_path).stem
         if nmetals < 1:
             raise ValueError(f"--nmetals must be >= 1 (got {nmetals}).")
 
@@ -2566,8 +1867,11 @@ class MOFFragmenter(BaseFragmenter):
 
         bool_flags = [i in getattr(self, "_last_capped_h_indices", []) for i in range(len(final_species))]
         final_species, final_coords, bool_flags = self.enforce_single_molecule(final_species, final_coords, bool_flags)
-        final_species, final_coords, bool_flags = self.ensure_qm_ready(final_species, final_coords, bool_flags)
         self._last_capped_h_indices = [i for i, f in enumerate(bool_flags) if f]
+
+        self.optimize_capped_h_geometry_only(final_species, final_coords, self._last_capped_h_indices)
+        _label = str(output_path or 'mof_fragment')
+        final_species, final_coords, self._last_capped_h_indices = self.fix_odd_electron_multiplicity(final_species, final_coords, self._last_capped_h_indices, label=_label)
         if output_path:
             mol = Molecule(final_species, final_coords)
             mol.to(filename=output_path, fmt="xyz")
@@ -3569,7 +2873,10 @@ class COFFragmenter(BaseFragmenter):
             coords = [coords[i] for i in keep_idx]
             capped_h_flags = [capped_h_flags[i] for i in keep_idx]
 
-        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
+        capped_h_indices = [i for i, f in enumerate(capped_h_flags) if f and species[i] == "H"]
+        self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+        _label = str(output_path or 'cof_fragment')
+        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(species, coords, capped_h_indices, label=_label)
 
         # Normal dimer: preserve a complete monomer then place second copy at
         # the actual crystal layer vector to avoid one-sided linker loss.
@@ -3752,7 +3059,10 @@ class COFFragmenter(BaseFragmenter):
 
         # Keep helper heavy atoms fixed; only adjust capped H atoms.
         self._cap_open_oxygens(species, coords, capped_h_flags)
-        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
+        capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
+        self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+        _label = str(output_path or 'cof_fragment')
+        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(species, coords, capped_h_indices, label=_label)
 
         # Global layered-COF rule for Path J: if a face-to-face layer spacing is
         # present and dimer output is requested, duplicate the completed fragment
@@ -4038,7 +3348,10 @@ class COFFragmenter(BaseFragmenter):
                                 vec = np.array(unwrapped[v]) - np.array(unwrapped[u])
                                 self.place_capping_h(li, vec, self.cap_bond_length(su), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
-                        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
+                        capped_h_indices = [i for i, f in enumerate(capped_h_flags) if f and species[i] == "H"]
+                        self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+                        _label = str(output_path or 'cof_fragment')
+                        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(species, coords, capped_h_indices, label=_label)
 
                         if do_stack_dimer:
                             # Use geometric layer shift from nearest node component
@@ -5254,7 +4567,10 @@ class COFFragmenter(BaseFragmenter):
                 capped_h_flags = base_flags + base_flags
 
         self._cap_open_oxygens(species, coords, capped_h_flags)
-        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
+        capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
+        self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+        _label = str(output_path or 'cof_fragment')
+        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(species, coords, capped_h_indices, label=_label)
         print(f"Final size: {len(species)} atoms")
         mol = Molecule(species, coords)
         if output_path:
@@ -5653,8 +4969,10 @@ class BioMolFragmenter(BaseFragmenter):
         # 5) Ensure only a single connected component remains (remove floating molecules)
         species, coords, capped_h_flags = self.enforce_single_molecule(species, coords, capped_h_flags)
 
-        # 6) geometry-clean and force QM readiness (charge=0, multiplicity=1)
-        species, coords, capped_h_flags = self.ensure_qm_ready(species, coords, capped_h_flags)
+        # 6) geometry-clean only the cap H atoms (per project decision)
+        cap_h_indices = [i for i, f in enumerate(capped_h_flags) if f and species[i] == "H"]
+        self.optimize_capped_h_geometry_only(species, coords, cap_h_indices)
+        species, coords, cap_h_indices = self.fix_odd_electron_multiplicity(species, coords, cap_h_indices, label='bio_fragment')
 
         return species, coords, capped_h_flags
 
@@ -6198,11 +5516,11 @@ def main():
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
-                    suffix = "_min" if key == "min_res" else ""
+                    suffix = "Min" if key == "min_res" else ""
                     base_name = r["cif"]
                     if base_name.endswith(".cif"): base_name = base_name[:-4]
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
-                    frag_name = f"{clean_base}_frag_mof{suffix}"
+                    frag_name = f"{clean_base}FragMof{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
@@ -6292,11 +5610,11 @@ def main():
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
-                    suffix = "_min" if key == "min_res" else ""
+                    suffix = "Min" if key == "min_res" else ""
                     base_name = r["cif"]
                     if base_name.endswith(".cif"): base_name = base_name[:-4]
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
-                    frag_name = f"{clean_base}_frag_cof{suffix}"
+                    frag_name = f"{clean_base}FragCof{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
@@ -6380,7 +5698,7 @@ def main():
             new_extxyz_frags = []
             
             for win_idx, res_obj in enumerate(r["results"]):
-                win_name = f"{clean_base}_w{win_idx:03d}"
+                win_name = f"{clean_base}W{win_idx:03d}"
                 ckey = MOFFragmenter._species_coords_unique_key(res_obj.species, res_obj.coords)
                 if ckey in seen_keys:
                     rows_to_write.append(f"{r['pdb']},{win_name},{len(res_obj.species)},yes\n")
