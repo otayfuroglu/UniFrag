@@ -90,11 +90,11 @@ def _parse_extxyz(filepath):
     return frames
 
 
-def _load_seen_keys_from_extxyz(filepath, decimals=3):
+def _load_seen_keys_from_extxyz(filepath):
     seen_keys = set()
     frames = _parse_extxyz(filepath)
     for frame in frames:
-        key = MOFFragmenter._species_coords_unique_key(frame["species"], frame["coords"], decimals=decimals)
+        key = MOFFragmenter._chemical_identity_key(frame["species"], frame["coords"])
         seen_keys.add(key)
     return seen_keys
 
@@ -830,6 +830,25 @@ class MOFFragmenter(BaseFragmenter):
                 d = round(float(np.linalg.norm(coords[i] - coords[j])), decimals)
                 distances.append((pair[0], pair[1], d))
         return counts, tuple(sorted(distances))
+
+    @staticmethod
+    def _chemical_identity_key(species, coords, decimals=1):
+        """Coarse duplicate key (0.1 Å bins) that treats conformationally
+        different but chemically equivalent structures as duplicates.
+        Uses only composition + a sorted histogram of all pairwise distances
+        rounded to `decimals` decimal places."""
+        species = [str(sp) for sp in species]
+        coords = [np.array(c, dtype=float) for c in coords]
+        counts = tuple(sorted((sp, species.count(sp)) for sp in set(species)))
+        if len(coords) <= 1:
+            return counts, ()
+        distances = []
+        for i in range(len(coords)):
+            for j in range(i + 1, len(coords)):
+                d = round(float(np.linalg.norm(coords[i] - coords[j])), decimals)
+                distances.append(d)
+        distances.sort()
+        return counts, tuple(distances)
 
     @classmethod
     def _molecule_unique_key(cls, mol, decimals=3):
@@ -5502,17 +5521,17 @@ def main():
             norm_dup = "no"
             min_dup = "no"
             if r['norm_res']:
-                ckey = MOFFragmenter._species_coords_unique_key(r['norm_res'].species, r['norm_res'].coords)
+                ckey = MOFFragmenter._chemical_identity_key(r['norm_res'].species, r['norm_res'].coords)
                 if ckey in seen_keys: norm_dup = "yes"
             if r['min_res']:
-                ckey = MOFFragmenter._species_coords_unique_key(r['min_res'].species, r['min_res'].coords)
+                ckey = MOFFragmenter._chemical_identity_key(r['min_res'].species, r['min_res'].coords)
                 if ckey in seen_keys: min_dup = "yes"
 
             new_extxyz_frags = []
             for key in ["norm_res", "min_res"]:
                 res_obj = r[key]
                 if res_obj:
-                    ckey = MOFFragmenter._species_coords_unique_key(res_obj.species, res_obj.coords)
+                    ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -5596,17 +5615,17 @@ def main():
             norm_dup = "no"
             min_dup = "no"
             if r['norm_res']:
-                ckey = MOFFragmenter._species_coords_unique_key(r['norm_res'].species, r['norm_res'].coords)
+                ckey = MOFFragmenter._chemical_identity_key(r['norm_res'].species, r['norm_res'].coords)
                 if ckey in seen_keys: norm_dup = "yes"
             if r['min_res']:
-                ckey = MOFFragmenter._species_coords_unique_key(r['min_res'].species, r['min_res'].coords)
+                ckey = MOFFragmenter._chemical_identity_key(r['min_res'].species, r['min_res'].coords)
                 if ckey in seen_keys: min_dup = "yes"
 
             new_extxyz_frags = []
             for key in ["norm_res", "min_res"]:
                 res_obj = r[key]
                 if res_obj:
-                    ckey = MOFFragmenter._species_coords_unique_key(res_obj.species, res_obj.coords)
+                    ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -5699,7 +5718,7 @@ def main():
             
             for win_idx, res_obj in enumerate(r["results"]):
                 win_name = f"{clean_base}W{win_idx:03d}"
-                ckey = MOFFragmenter._species_coords_unique_key(res_obj.species, res_obj.coords)
+                ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
                 if ckey in seen_keys:
                     rows_to_write.append(f"{r['pdb']},{win_name},{len(res_obj.species)},yes\n")
                 else:
