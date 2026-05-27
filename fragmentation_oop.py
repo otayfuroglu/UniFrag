@@ -833,22 +833,19 @@ class MOFFragmenter(BaseFragmenter):
 
     @staticmethod
     def _chemical_identity_key(species, coords, decimals=1):
-        """Coarse duplicate key (0.1 Å bins) that treats conformationally
-        different but chemically equivalent structures as duplicates.
-        Uses only composition + a sorted histogram of all pairwise distances
-        rounded to `decimals` decimal places."""
+        """Chemical duplicate key based on heavy-atom formula only.
+        Hydrogen atoms are excluded so that minor H-capping differences
+        do not make otherwise identical skeletons appear unique.
+        Pairwise distances are intentionally not used because small
+        lattice parameter shifts across CIF files cause systematic
+        distance deviations that defeat histogram binning."""
         species = [str(sp) for sp in species]
-        coords = [np.array(c, dtype=float) for c in coords]
-        counts = tuple(sorted((sp, species.count(sp)) for sp in set(species)))
-        if len(coords) <= 1:
-            return counts, ()
-        distances = []
-        for i in range(len(coords)):
-            for j in range(i + 1, len(coords)):
-                d = round(float(np.linalg.norm(coords[i] - coords[j])), decimals)
-                distances.append(d)
-        distances.sort()
-        return counts, tuple(distances)
+        # Filter to heavy atoms only
+        heavy_species = [sp for sp in species if sp != "H"]
+        if not heavy_species:
+            return (("H", len(species)),)
+        counts = tuple(sorted((sp, heavy_species.count(sp)) for sp in set(heavy_species)))
+        return counts
 
     @classmethod
     def _molecule_unique_key(cls, mol, decimals=3):
