@@ -52,7 +52,7 @@ fi
 pass=0
 fail=0
 summary=""
-csv_summary=""
+# csv_summary=""
 failures=""
 
 formula_for_xyz() {
@@ -115,8 +115,8 @@ run_one() {
         min_formula="N/A"
     fi
 
-    summary+="$base\t$norm_atoms\t$norm_formula\t$min_atoms\t$min_formula\n"
-    csv_summary+="${base}.cif,$norm_atoms,$norm_formula,$min_atoms,$min_formula\n"
+    # summary+="$base\t$norm_atoms\t$norm_formula\t$min_atoms\t$min_formula\n"
+    # csv_summary+="${base}.cif,$norm_atoms,$norm_formula,$min_atoms,$min_formula\n"
     echo -e "  ${GREEN}OK${NC}: normal=$norm_atoms min=$min_atoms"
     ((pass++))
 }
@@ -139,11 +139,11 @@ echo -e "name\tnormal_atoms\tnormal_formula\tmin_atoms\tmin_formula"
 printf "%b" "$summary"
 echo "============================================================"
 
-csv_file="$FAMILY_DIR/fragmentation_summary.csv"
-echo "cif_file,normal_atoms,normal_formula,min_atoms,min_formula" > "$csv_file"
-printf "%b" "$csv_summary" >> "$csv_file"
-echo -e "CSV summary saved to: ${GREEN}$csv_file${NC}"
-echo "============================================================"
+# csv_file="$FAMILY_DIR/fragmentation_summary.csv"
+# echo "cif_file,normal_atoms,normal_formula,min_atoms,min_formula" > "$csv_file"
+# printf "%b" "$csv_summary" >> "$csv_file"
+# echo -e "CSV summary saved to: ${GREEN}$csv_file${NC}"
+# echo "============================================================"
 
 echo -e "Results: ${GREEN}$pass passed${NC}, ${RED}$fail failed${NC}"
 if [ $fail -ne 0 ]; then

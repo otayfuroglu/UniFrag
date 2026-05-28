@@ -149,6 +149,12 @@ For each item:
 
 ## 9) Decisions Log (ADR-lite)
 
+### Decision 2026-05-28: Heavy-Atom Formula-Only Chemical Identity Key for Robust Conformer Deduplication
+- Context: The user noticed that chemically equivalent structures (same formula and connectivity, but with minor conformational/torsional variations or hydrogen-capping differences) were not flagged as duplicates under the collection-level deduplication. Originally, deduplication relied on the strict `_species_coords_unique_key` (which encoded exact coordinates and pairwise distances), meaning conformers were treated as unique.
+- Decision: Implemented a robust chemical identity key helper (`_chemical_identity_key`) for collection-level duplicate detection. Instead of using exact coordinates or pairwise distance histograms (which suffer from binning issues due to small lattice parameter shifts across CIF files), the new key filters the fragment down to heavy atoms (excluding Hydrogen atoms entirely) and constructs a sorted count tuple of only heavy element occurrences (e.g. `(("C", 12), ("O", 4), ("Mg", 2))`).
+- Consequences: All collection-level duplicate checks across MOF, COF, and Bio modes (including sliding windows and batch directory sweeps) correctly identify and group chemically equivalent structures/conformers as duplicates. This ensures that only unique chemical topologies are saved to the `.extxyz` collections, while duplicates are correctly documented in the summary `.csv` files as duplicates.
+- Alternatives considered: Pairwise distance histograms binned at `0.1 A` resolution; rejected because minor lattice shifts across CIFs caused systematic deviations that defeated binning.
+
 ### Decision 2026-05-11: COF helper libraries use global chemical duplicate pruning
 - Context: COF node/linker helper folders are used for visual QA, and duplicate building blocks can appear under different COF stems. Exact/near-exact coordinate matching was too strict for chemically identical blocks such as COF-LZU8 nodes.
 - Decision: COF helper export prunes/checks duplicates across the whole `cof_nodes_lib/` or `cof_linkers_lib/` folder using composition plus internal pair-distance fingerprints rounded to `0.1 A`. This applies globally to every COF helper export before new node/linker files are written.

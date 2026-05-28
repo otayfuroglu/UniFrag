@@ -2,6 +2,18 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-28 - UniFrag: Chemical duplicate detection via heavy-atom formula key
+- **Changed files:**
+  - `fragmentation_oop.py` — Updated the collection-level deduplication to treat conformers and chemically equivalent structures as duplicates.
+- **Summary:**
+  - Replaced the coordinate-and-distance-based `_species_coords_unique_key` with a new `_chemical_identity_key` static method for collection-level duplicate checks in `_load_seen_keys_from_extxyz`, `_flush_mof_result`, `_flush_cof_result`, and `_flush_bio_result`.
+  - The `_chemical_identity_key` filters out Hydrogen atoms to avoid capping-based false uniqueness, and computes a sorted element count tuple of only heavy atoms (e.g. `(("C", 12), ("O", 4), ("Mg", 2))`).
+  - This robust chemical duplicate detection flags conformationally/torsionally different but chemically equivalent structures as duplicates, ensuring they are only documented in the summary `.csv` and omitted from the `.extxyz` collection.
+- **Validation:**
+  - Validated on `test_on_mof_mg_based/` folder sweep. Chemically identical structures and conformers are correctly flagged as duplicates in `fragmentation_summary.csv` and omitted from `fragments_collection.extxyz`.
+- **Follow-up risks:**
+  - Highly identical isomers with the same heavy-atom formula (e.g. ortho/meta/para isomers if fragmented as identical stoichiometry) might be treated as duplicates. For current MOF/COF/Bio workflows, this is the desired behavior to avoid conformer/isomeric redundancy.
+
 ## 2026-05-24 - UniFrag: RDKit-driven H Saturation and Neutralization Engine
 
 - **Changed files:**
