@@ -191,3 +191,12 @@ Durable implementation and architecture decisions for UniFrag. This file is the 
 - Decision: In COF coffragmentor Path J finalization, when output mode is not `monomer` and the shortest lattice vector is a plausible face-to-face stacking distance (2.5-5.0 A), duplicate the completed capped monomer fragment by that stacking vector. This keeps node+linker-first Path J behavior while enforcing layered dimer generation globally for stacked 2D COFs.
 - Consequences: COF-LZU1 dimer/min-dimer now double monomer/min atom counts and use 3.729 A layer spacing. COF-LZU8 dimer/min-dimer now double monomer/min atom counts and use 4.093 A layer spacing.
 - Alternatives considered: Let only later Path A/B layer detection handle dimers; rejected because Path J can return early for valid node+linker COFs and must still honor the dimer rule.
+
+## 2026-05-28: MOF SBU Extraction and Hydrogen Capping Refinements
+- **Moffragmentor Linker Validation**: If `moffragmentor` yields any linker containing a metal atom (e.g. Mg), the script will discard its output and use the robust fallback paths (A, B, C) to prevent metals from being falsely characterized as organic linkers.
+- **SBU Proximity Radius**: Increased the SBU topology detection neighbor search (`get_all_neighbors(r=)`) from `3.6 Å` to `5.5 Å` to correctly identify and group metals connected via longer `Metal-O-Metal` bridges (such as Mg-O-Mg which can be up to ~5.2 Å).
+- **Carboxylate Capping Rules**: Prevented double-capping on carboxylate oxygens. When the extraction script caps an oxygen coordinated to a central heavy atom (`C`, `P`, `S`), that central atom is tracked. If the same central atom has a second oxygen requiring capping, the second capping is skipped, resulting correctly in `-COOH` rather than `-C(OH)2`.
+
+## [2026-05-28] Partial Linker Minimization Logic
+- **Decision:** When minimizing the SBU fragment, partial linkers must be cut after their first local cyclic unit (ring size <= 8), rather than preserving the entire structural 2-core.
+- **Rationale:** A MOF linker can be a large fused ring system or contain macrocycles. If the entire 2-core is preserved, the `min` version becomes practically identical to the full structure, defeating its purpose. By explicitly finding the first local ring connected to the node, the min version correctly minimizes size while keeping the immediate coordination chemistry and rigidity.

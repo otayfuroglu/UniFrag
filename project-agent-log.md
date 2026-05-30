@@ -948,3 +948,22 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
   - Removed brackets and underscores from the base structure name.
 - Validation:
   - Tested on `2015[Mg][ins]3[ASR]1.cif`. The output label successfully formatted as `2015Mgins3ASR1FragMof`.
+
+## 2026-05-28: Fixed Mg MOF fragmentation and Carboxylate Hydrogen capping
+- **Changes**:
+  - `fragmentation_oop.py`: Updated `_try_moffragmentor_node_linker_fragment` to reject `moffragmentor` output if any generated linker contains a metal atom (e.g. Mg). This forces the tool to use our more robust fallback paths (Path A, B, C).
+  - `fragmentation_oop.py`: Increased the topology detection radius cutoff for SBU metals (`get_all_neighbors(r=...)`) from `3.6 Å` to `5.5 Å` to correctly identify dinuclear and infinite metal SBUs linked via longer `Metal-O-Metal` oxygen bridges (like Mg-O-Mg which can be ~5.2 Å).
+  - `fragmentation_oop.py`: Fixed the hydrogen capping on carboxylate oxygen atoms. Modified `_cap_path_j_open_oxygens` and the main BFS extraction capping logic to track `capped_central_atoms`. When an `O` atom coordinated to a `C`, `P`, or `S` is capped with an `H`, the central heavy atom is flagged. If a second `O` on the same central atom requires capping, it is skipped. This correctly yields `-COOH` instead of `-C(OH)2`.
+- **Validation**:
+  - Tested on `2009[Mg][lvt]3[ASR]1.cif` in `test_on_mof_mg_based/`. The script correctly rejected the faulty `moffragmentor` output, identified the SBU as a discrete dinuclear Mg cluster (`SBU size: 2`), and processed it via Path C. The carboxylates are now properly capped as `-COOH`.
+- **Risks/Follow-ups**:
+  - Increasing the radius to `5.5 Å` could potentially group unrelated metal centers in extremely dense MOFs, although the structural topology checks mitigate this risk.
+
+## 2026-05-28: Fixed min version generation for MOF fragments
+- **Changes**:
+  - `fragmentation_oop.py`: Updated `_get_first_ring_keep_heavy` to explicitly find the first cyclic structure (ring size <= 8) connected to the bridge atoms and stop traversing further.
+  - This logic replaces both the flawed `is_bridge` BFS logic in `_first_connected_ring_fragment` (which failed on infinite unrolled MOF linkers) and the inline `internal_bonds <= 1` core-pruning loop in `_get_fragment` (which kept the entire rigid multi-ring linker).
+- **Validation**:
+  - Re-ran fragmentation on `2009[Mg][lvt]3[ASR]1.cif`. The `min` version successfully kept exactly 1 complete linker and pruned the remaining 3 linkers down to only their first phenyl ring attached to the node, resulting in exactly the expected formula (`C61H44MgN2O11`).
+- **Risks/Follow-ups**:
+  - None immediately apparent.

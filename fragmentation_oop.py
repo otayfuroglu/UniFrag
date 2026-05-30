@@ -883,6 +883,20 @@ class MOFFragmenter(BaseFragmenter):
 
     def _cap_path_j_open_oxygens(self, species, coords, capped_h_flags):
         heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
+        capped_central_atoms = set()
+
+        for i in list(heavy_idx):
+            if i >= len(species) or species[i] != "O":
+                continue
+            if self.oxygen_already_protonated(i, species, coords):
+                opos = np.array(coords[i], dtype=float)
+                for j in heavy_idx:
+                    if i == j: continue
+                    d = np.linalg.norm(opos - np.array(coords[j], dtype=float))
+                    if self.is_valid_bond("O", species[j], d):
+                        if species[j] in ("C", "P", "S"):
+                            capped_central_atoms.add(j)
+
         for i in list(heavy_idx):
             if i >= len(species) or species[i] != "O":
                 continue
@@ -901,16 +915,77 @@ class MOFFragmenter(BaseFragmenter):
                         has_metal = True
             # Open carboxylate/terminal oxygens from helper linkers have only
             # the carbonyl/carboxyl carbon left after the missing node was cut.
-            # Cap them with H using the same placement/refinement machinery as
-            # the legacy MOF path.
-            if has_metal or len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in ("C", "P"):
+            if has_metal or len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in ("C", "P", "S"):
                 continue
-            base = opos - np.array(coords[heavy_neighbors[0]], dtype=float)
+
+            central_idx = heavy_neighbors[0]
+            if central_idx in capped_central_atoms:
+                continue
+
+            base = opos - np.array(coords[central_idx], dtype=float)
             cap_len = self.cap_bond_length("O")
             before = len(species)
             self.place_capping_h(i, base, cap_len, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
             if len(species) == before and np.linalg.norm(base) > 1e-12:
                 self.place_capping_h(i, -base, cap_len, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+
+    def _get_first_ring_keep_heavy(self, hadj, bridge_atoms):
+        ring_edges = set()
+        ring_nodes = set()
+        for u in hadj:
+            q = deque([(u, [u])])
+            while q:
+                curr, path = q.popleft()
+                if len(path) > 9: # up to 8-membered rings
+                    continue
+                for nb in hadj.get(curr, []):
+                    if nb == u and len(path) > 2:
+                        for i in range(len(path)-1):
+                            a, b = path[i], path[i+1]
+                            ring_edges.add((min(a,b), max(a,b)))
+                            ring_nodes.add(a)
+                            ring_nodes.add(b)
+                        ring_edges.add((min(path[-1], u), max(path[-1], u)))
+                    elif nb not in path:
+                        q.append((nb, path + [nb]))
+
+        keep_atoms = set(bridge_atoms)
+        first_layer = set()
+        for ba in bridge_atoms:
+            for nb in hadj.get(ba, []):
+                first_layer.add(nb)
+        keep_atoms.update(first_layer)
+
+        q = deque([(fl, [fl]) for fl in first_layer])
+        seen = set(first_layer)
+        path_to_ring = []
+        ring_target = None
+
+        while q:
+            curr, path = q.popleft()
+            if curr in ring_nodes:
+                path_to_ring = path
+                ring_target = curr
+                break
+            for nb in hadj.get(curr, []):
+                if nb not in seen:
+                    seen.add(nb)
+                    q.append((nb, path + [nb]))
+
+        if ring_target is not None:
+            keep_atoms.update(path_to_ring)
+            comp = {ring_target}
+            cq = deque([ring_target])
+            while cq:
+                c = cq.popleft()
+                for nb in hadj.get(c, []):
+                    if nb not in comp:
+                        if (min(c,nb), max(c,nb)) in ring_edges:
+                            comp.add(nb)
+                            cq.append(nb)
+            keep_atoms.update(comp)
+            
+        return keep_atoms
 
     def _first_connected_ring_fragment(self, linker_species, linker_coords, node_species, node_coords):
         heavy = [i for i, sp in enumerate(linker_species) if sp != "H"]
@@ -939,79 +1014,7 @@ class MOFFragmenter(BaseFragmenter):
         if not bridge_atoms:
             return [], [], []
 
-        # 1. Find the 2-core (all rings and their interconnects)
-        core_atoms = set(heavy)
-        changed = True
-        while changed:
-            changed = False
-            to_remove = set()
-            for u in core_atoms:
-                degree = sum(1 for v in hadj.get(u, []) if v in core_atoms)
-                if degree <= 1:
-                    to_remove.add(u)
-            if to_remove:
-                core_atoms -= to_remove
-                changed = True
-
-        keep_heavy = set(bridge_atoms)
-
-        # 2. Find shortest path from bridge_atoms to the nearest 2-core component
-        if core_atoms:
-            q = deque([(ba, [ba]) for ba in bridge_atoms])
-            seen = set(bridge_atoms)
-            path_to_core = []
-            while q:
-                curr, path = q.popleft()
-                if curr in core_atoms:
-                    path_to_core = path
-                    break
-                for nb in hadj.get(curr, []):
-                    if nb not in seen:
-                        seen.add(nb)
-                        q.append((nb, path + [nb]))
-            
-            if path_to_core:
-                keep_heavy.update(path_to_core)
-                core_target = path_to_core[-1]
-                
-                def is_bridge(u, v, adj_dict, valid_nodes):
-                    q_b = deque([u])
-                    seen_b = {u}
-                    while q_b:
-                        curr_b = q_b.popleft()
-                        if curr_b == v: return False
-                        for nb_b in adj_dict.get(curr_b, []):
-                            if nb_b in valid_nodes and nb_b not in seen_b:
-                                if (curr_b == u and nb_b == v) or (curr_b == v and nb_b == u):
-                                    continue
-                                seen_b.add(nb_b)
-                                q_b.append(nb_b)
-                    return True
-
-                core_comp = {core_target}
-                cq = deque([core_target])
-                found_cycle = False
-                
-                while cq:
-                    c = cq.popleft()
-                    
-                    curr_in_cycle = any(not is_bridge(c, nb, hadj, core_atoms) for nb in hadj.get(c, []) if nb in core_atoms)
-                    if curr_in_cycle:
-                        found_cycle = True
-                        
-                    for nb in hadj.get(c, []):
-                        if nb in core_atoms and nb not in core_comp:
-                            edge_is_bridge = is_bridge(c, nb, hadj, core_atoms)
-                            
-                            if found_cycle:
-                                if not edge_is_bridge:
-                                    core_comp.add(nb)
-                                    cq.append(nb)
-                            else:
-                                core_comp.add(nb)
-                                cq.append(nb)
-                                
-                keep_heavy.update(core_comp)
+        keep_heavy = self._get_first_ring_keep_heavy(hadj, bridge_atoms)
 
         removed_nbr_count = {i: sum(1 for nb in hadj.get(i, []) if nb not in keep_heavy) for i in keep_heavy}
 
@@ -1278,8 +1281,8 @@ class MOFFragmenter(BaseFragmenter):
                     continue
                 d = float(np.linalg.norm(ci - n.coords))
                 if self.is_valid_bond(si, symbols[j], d):
-                    graph[i].append(j)
-                    graph[j].append(i)
+                    graph[i].append((j, n.coords - ci))
+                    graph[j].append((i, ci - n.coords))
 
         metals = [i for i, s in enumerate(symbols) if s in self.METALS]
         if not metals:
@@ -1289,55 +1292,62 @@ class MOFFragmenter(BaseFragmenter):
         center_m = min(metals, key=lambda i: float(np.linalg.norm(struct[i].coords - center)))
 
         node = {center_m}
+        node_coords = {center_m: struct[center_m].coords}
         q = deque([center_m])
         while q:
             u = q.popleft()
-            for v in graph[u]:
+            for v, shift in graph[u]:
                 if symbols[v] in self.METALS and v not in node:
                     node.add(v)
+                    node_coords[v] = node_coords[u] + shift
                     q.append(v)
 
         expanded_node = set(node)
         for u in list(node):
-            for v in graph[u]:
-                if symbols[v] not in self.METALS:
+            for v, shift in graph[u]:
+                if symbols[v] not in self.METALS and v not in expanded_node:
                     expanded_node.add(v)
+                    node_coords[v] = node_coords[u] + shift
 
         linker_comp = set()
+        linker_coords = {}
         vis = set(expanded_node)
         seeds = []
         for u in expanded_node:
-            for v in graph[u]:
+            for v, shift in graph[u]:
                 if v not in expanded_node and symbols[v] != "H":
-                    seeds.append(v)
+                    seeds.append((v, node_coords[u] + shift))
 
-        for st in seeds:
+        for st, st_coord in seeds:
             if st in vis:
                 continue
             comp = {st}
+            comp_coords = {st: st_coord}
             qq = deque([st])
             vis.add(st)
             while qq:
                 u = qq.popleft()
-                for v in graph[u]:
+                for v, shift in graph[u]:
                     if v in vis or v in expanded_node or symbols[v] in self.METALS:
                         continue
                     vis.add(v)
                     comp.add(v)
+                    comp_coords[v] = comp_coords[u] + shift
                     qq.append(v)
             if len(comp) > len(linker_comp):
                 linker_comp = comp
+                linker_coords = comp_coords
 
         stem = Path(mof_path).stem
         node_sp = [symbols[i] for i in sorted(expanded_node)]
-        node_co = [np.array(struct[i].coords, dtype=float) for i in sorted(expanded_node)]
+        node_co = [np.array(node_coords[i], dtype=float) for i in sorted(expanded_node)]
         node_written = self._export_mof_component_library(node_sp, node_co, stem, "node")
 
         linker_written = False
         if linker_comp:
             lk = sorted(linker_comp)
             lsp = [symbols[i] for i in lk]
-            lco = [np.array(struct[i].coords, dtype=float) for i in lk]
+            lco = [np.array(linker_coords[i], dtype=float) for i in lk]
             linker_written = self._export_mof_component_library(lsp, lco, stem, "linker")
 
         if node_written or linker_written:
@@ -1366,6 +1376,14 @@ class MOFFragmenter(BaseFragmenter):
         linkers = list(getattr(getattr(result, "linkers", []), "sbus", []))
         if not nodes or not linkers:
             return None
+
+        for linker in linkers:
+            mol = getattr(linker, "molecule", None)
+            if mol is not None:
+                linker_species = [str(x) for x in mol.species]
+                if any(sp in self.METALS for sp in linker_species):
+                    print("  moffragmentor linker contains metal atoms. Skipping moffragmentor extraction to allow fallback path.")
+                    return None
 
         stem = Path(mof_path).stem
         self._export_moffragmentor_library(result, stem)
@@ -1475,6 +1493,7 @@ class MOFFragmenter(BaseFragmenter):
         # --- Coordination completion: Ensure full coordination sphere by adding any stray coordinating atoms ---
         all_species_coords = list(zip(species, coords))
         stray_found = False
+        capped_central_atoms = set()
         
         for i, sp_m in enumerate(node_sp):
             if sp_m not in self.METALS:
@@ -1542,17 +1561,22 @@ class MOFFragmenter(BaseFragmenter):
                                                             if not is_core_metal:
                                                                 if curr_sp == "O":
                                                                     h_count_struct = sum(1 for nn in struct.get_neighbors(struct[curr_si], 1.3) if nn.species_string == "H")
-                                                                    # Check if this O has a heavy non-metal neighbor (C, P, S, etc.)
-                                                                    # If so, it's a coordinating O (e.g. P-O-Metal, C-O-Metal),
-                                                                    # and should get at most 1 H total to replace the metal bond.
-                                                                    # Only pure water-like O (bonded only to metals/H) can have 2 H.
-                                                                    has_heavy_nonmetal = any(
-                                                                        nn.species_string not in self.METALS and nn.species_string != "H"
-                                                                        for nn in struct.get_neighbors(struct[curr_si], 1.8)
-                                                                    )
+                                                                    has_heavy_nonmetal = False
+                                                                    central_idx = None
+                                                                    for nn in struct.get_neighbors(struct[curr_si], 1.8):
+                                                                        if nn.species_string not in self.METALS and nn.species_string != "H":
+                                                                            has_heavy_nonmetal = True
+                                                                            if nn.species_string in ("C", "P", "S"):
+                                                                                central_idx = nn.index
+                                                                    
+                                                                    if central_idx is not None and central_idx in capped_central_atoms:
+                                                                        continue
+
                                                                     max_h = 1 if has_heavy_nonmetal else 2
                                                                     if (h_count_struct + capping_hs_added) >= max_h:
                                                                         continue
+                                                                    if central_idx is not None:
+                                                                        capped_central_atoms.add(central_idx)
                                                                 # CAP IT
                                                                 base = n_pos - curr_pos
                                                                 before = len(species)
@@ -2048,19 +2072,8 @@ class MOFFragmenter(BaseFragmenter):
 
             for comp, bridge_atoms, keep_linker in linker_evaluations:
                 if not keep_linker:
-                    keep_atoms = set(comp)
-
-                    changed = True
-                    while changed:
-                        changed = False
-                        to_remove = set()
-                        for ka in keep_atoms - bridge_atoms:
-                            internal_bonds = sum(1 for nb in local_adj[ka] if nb in keep_atoms)
-                            if internal_bonds <= 1:
-                                to_remove.add(ka)
-                        if to_remove:
-                            keep_atoms -= to_remove
-                            changed = True
+                    comp_hadj = {ka: [nb for nb in local_adj[ka] if nb in comp] for ka in comp}
+                    keep_atoms = self._get_first_ring_keep_heavy(comp_hadj, bridge_atoms)
 
                     atoms_to_cut = comp - keep_atoms
                     partial_to_remove.update(atoms_to_cut)
