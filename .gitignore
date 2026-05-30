@@ -1,6 +1,8 @@
 # Test folders
 test/
 test_on_*/
+run_fast_test.sh
+run_test.sh
 
 # Libraries
 cof_linkers_lib/
@@ -11,6 +13,7 @@ mof_nodes_lib/
 # Databases & Data
 mofs_from_raspa/
 CoRE-COF-Database/
+backup/
 
 # Python Cache
 __pycache__/

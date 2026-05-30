@@ -2,6 +2,18 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-30 - UniFrag: Remove Backup and Test Scripts from Git Tracking
+- **Changed files:**
+  - `.gitignore` — Added rules to ignore `backup/`, `run_fast_test.sh`, and `run_test.sh`.
+- **Summary:**
+  - Removed the `backup/` directory, `run_fast_test.sh`, and `run_test.sh` from GitHub tracking using `git rm -r --cached`.
+  - Added their patterns to `.gitignore` to prevent any future automated tracking of these helper files.
+  - Kept all directories and files intact in the local filesystem.
+- **Validation:**
+  - Verified they are staged as deleted in git and ignored in the local workspace.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-05-30 - UniFrag: Remove Generated Libraries, Raspa MOFs, and __pycache__ from Git Tracking
 - **Changed files:**
   - `.gitignore` — Added rules to ignore `*_lib/`, `mofs_from_raspa/`, `CoRE-COF-Database/`, and `__pycache__/` / `*.pyc` files.
