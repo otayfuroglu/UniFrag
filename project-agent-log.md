@@ -2,6 +2,17 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-30 - UniFrag: Add split_extxyz_by_atoms.py post-processing utility
+- **Changed files:**
+  - `split_extxyz_by_atoms.py` — New post-processing utility script to split multi-frame `.extxyz` files.
+- **Summary:**
+  - Added a new, robust Python script `split_extxyz_by_atoms.py` that separates frames in an ExtXYZ file by atom count.
+  - Supports both grouping by exact atom count (e.g. `atoms_50.extxyz`) and binning by specified upper-bound ranges (e.g. `range_51_to_100.extxyz`).
+- **Validation:**
+  - Checked package imports and CLI parser setup.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-05-30 - UniFrag: Remove Backup and Test Scripts from Git Tracking
 - **Changed files:**
   - `.gitignore` — Added rules to ignore `backup/`, `run_fast_test.sh`, and `run_test.sh`.
