@@ -2,6 +2,18 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-30 - UniFrag: Remove Generated Libraries, Raspa MOFs, and __pycache__ from Git Tracking
+- **Changed files:**
+  - `.gitignore` — Added rules to ignore `*_lib/`, `mofs_from_raspa/`, `CoRE-COF-Database/`, and `__pycache__/` / `*.pyc` files.
+- **Summary:**
+  - Removed generated/temporary output directories (`cof_linkers_lib`, `cof_nodes_lib`, `mof_linkers_lib`, `mof_nodes_lib`), database caching/inputs (`mofs_from_raspa`), and intermediate cache structures (`__pycache__` and `*.pyc` files) from GitHub tracking using `git rm -r --cached`.
+  - Kept all directories and files intact on the user's local filesystem as requested.
+  - Added explicit patterns to `.gitignore` to prevent future commits from tracking these directories.
+- **Validation:**
+  - Ran `git status -s` to verify that files are staged for deletion in the Git index while remaining untracked and fully ignored in the local workspace.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-05-28 - UniFrag: Chemical duplicate detection via heavy-atom formula key
 - **Changed files:**
   - `fragmentation_oop.py` — Updated the collection-level deduplication to treat conformers and chemically equivalent structures as duplicates.

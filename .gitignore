@@ -1,3 +1,17 @@
 # Test folders
 test/
 test_on_*/
+
+# Libraries
+cof_linkers_lib/
+cof_nodes_lib/
+mof_linkers_lib/
+mof_nodes_lib/
+
+# Databases & Data
+mofs_from_raspa/
+CoRE-COF-Database/
+
+# Python Cache
+__pycache__/
+*.pyc
