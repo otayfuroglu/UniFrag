@@ -4,10 +4,11 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 
 ## 2026-05-30 - UniFrag: Add split_extxyz_by_atoms.py post-processing utility
 - **Changed files:**
-  - `split_extxyz_by_atoms.py` — New post-processing utility script to split multi-frame `.extxyz` files.
+  - `split_extxyz_by_atoms.py` — New post-processing utility script to split multi-frame `.extxyz` files by atom count.
 - **Summary:**
-  - Added a new, robust Python script `split_extxyz_by_atoms.py` that separates frames in an ExtXYZ file by atom count.
-  - Supports both grouping by exact atom count (e.g. `atoms_50.extxyz`) and binning by specified upper-bound ranges (e.g. `range_51_to_100.extxyz`).
+  - Added a new, robust Python script `split_extxyz_by_atoms.py` that separates frames in an ExtXYZ file into exactly two output files based on a user-defined threshold $N$:
+    - `smaller_or_equal_to_{N}.extxyz` (containing structures with $\le N$ atoms)
+    - `larger_than_{N}.extxyz` (containing structures with $> N$ atoms)
 - **Validation:**
   - Checked package imports and CLI parser setup.
 - **Follow-up risks:**
