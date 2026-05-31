@@ -863,7 +863,7 @@ class MOFFragmenter(BaseFragmenter):
             coords.append(np.array([float(x) for x in parts[1:4]], dtype=float))
         if not species:
             return None
-        return cls._species_coords_unique_key(species, coords, decimals=decimals)
+        return cls._chemical_identity_key(species, coords, decimals=decimals)
 
 
 
@@ -1195,6 +1195,56 @@ class MOFFragmenter(BaseFragmenter):
         name = self._safe_name(stem).upper()
         return name.startswith("CU-BTC") or name.startswith("DUT-49")
 
+    def _clean_linker_molecule(self, species, coords):
+        species = [str(s) for s in species]
+        coords = [np.array(c, dtype=float) for c in coords]
+        
+        org_idx = [i for i, s in enumerate(species) if s not in self.METALS]
+        if not org_idx:
+            return [], []
+            
+        org_species = [species[i] for i in org_idx]
+        org_coords = [coords[i] for i in org_idx]
+        
+        if len(org_species) <= 1:
+            return org_species, org_coords
+            
+        graph = [[] for _ in range(len(org_species))]
+        for i in range(len(org_species)):
+            for j in range(i + 1, len(org_species)):
+                d = float(np.linalg.norm(org_coords[i] - org_coords[j]))
+                if self.is_valid_bond(org_species[i], org_species[j], d):
+                    graph[i].append((j, org_coords[j] - org_coords[i]))
+                    graph[j].append((i, org_coords[i] - org_coords[j]))
+                    
+        visited = set()
+        components = []
+        for i in range(len(org_species)):
+            if i in visited:
+                continue
+            comp_idx = []
+            comp_coords = {}
+            q = deque([i])
+            visited.add(i)
+            comp_coords[i] = org_coords[i]
+            
+            while q:
+                u = q.popleft()
+                comp_idx.append(u)
+                for v, shift in graph[u]:
+                    if v not in visited:
+                        visited.add(v)
+                        comp_coords[v] = comp_coords[u] + shift
+                        q.append(v)
+            components.append((comp_idx, comp_coords))
+            
+        largest_comp_idx, largest_comp_coords = max(components, key=lambda x: len(x[0]))
+        
+        clean_species = [org_species[i] for i in sorted(largest_comp_idx)]
+        clean_coords = [largest_comp_coords[i] for i in sorted(largest_comp_idx)]
+        
+        return clean_species, clean_coords
+
     def _export_moffragmentor_library(self, result, stem):
         node_dir = Path("mof_nodes_lib")
         linker_dir = Path("mof_linkers_lib")
@@ -1202,7 +1252,7 @@ class MOFFragmenter(BaseFragmenter):
         linker_dir.mkdir(exist_ok=True)
         file_stem = self._safe_name(stem)
 
-        for collection, out_dir in ((getattr(result, "nodes", []), node_dir), (getattr(result, "linkers", []), linker_dir)):
+        for collection, out_dir, kind in ((getattr(result, "nodes", []), node_dir, "node"), (getattr(result, "linkers", []), linker_dir, "linker")):
             if any(out_dir.glob(f"{file_stem}_*.xyz")):
                 continue
 
@@ -1222,15 +1272,25 @@ class MOFFragmenter(BaseFragmenter):
                 mol = getattr(sbu, "molecule", None)
                 if mol is None:
                     continue
-                key = self._molecule_unique_key(mol)
+                    
+                sp = [str(x) for x in mol.species]
+                co = [c for c in mol.cart_coords]
+                
+                if kind == "linker":
+                    sp, co = self._clean_linker_molecule(sp, co)
+                    if not sp:
+                        continue
+                        
+                key = self._chemical_identity_key(sp, co)
                 if key in seen:
                     continue
                 seen.add(key)
+                
                 out = out_dir / f"{file_stem}_{out_idx:02d}.xyz"
                 while out.exists():
                     out_idx += 1
                     out = out_dir / f"{file_stem}_{out_idx:02d}.xyz"
-                mol.to(filename=str(out), fmt="xyz")
+                Molecule(sp, co).to(filename=str(out), fmt="xyz")
                 out_idx += 1
 
     def _export_mof_component_library(self, species, coords, stem, kind):
@@ -1250,7 +1310,12 @@ class MOFFragmenter(BaseFragmenter):
             if key is not None:
                 existing_keys.add(key)
 
-        key = self._species_coords_unique_key(species, coords)
+        if kind == "linker":
+            species, coords = self._clean_linker_molecule(species, coords)
+            if not species:
+                return False
+
+        key = self._chemical_identity_key(species, coords)
         if key in existing_keys:
             return False
 
