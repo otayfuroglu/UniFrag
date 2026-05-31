@@ -4,9 +4,9 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 
 ## 2026-05-30 - UniFrag: Add get_elements_from_extxyz.py utility
 - **Changed files:**
-  - `get_elements_from_extxyz.py` — New post-processing utility script to extract unique element types from an ExtXYZ file.
+  - `get_elements_from_extxyz.py` — Post-processing utility script to extract unique element types from an ExtXYZ file.
 - **Summary:**
-  - Added a new Python utility script `get_elements_from_extxyz.py` that parses a multi-frame `.extxyz` file, collects all unique chemical symbols across all frames, sorts them alphabetically, and writes them to a line-separated `.txt` file.
+  - Added a new Python utility script `get_elements_from_extxyz.py` that parses a multi-frame `.extxyz` file, collects all unique chemical symbols across all frames, sorts them by atomic number (smallest first, e.g., H, C, O, Mg, Zn), and writes them to a line-separated `.txt` file.
 - **Validation:**
   - Checked package imports and CLI parser setup.
 - **Follow-up risks:**
