@@ -2,6 +2,18 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-05-31 - UniFrag: Fix MOF Helper Linker Library Export (Metals, Wrapping, Deduplication)
+- **Changed files:**
+  - `fragmentation_oop.py` — Modified helper library export functions to filter metals, unwrap geometries, and use heavy-atom formula chemical identity keys for duplicate detection.
+- **Summary:**
+  - Added `_clean_linker_molecule` to strip metal atoms from extracted linker molecules, unwrap them across periodic boundaries using a BFS neighbor graph, and keep only the largest fully-connected organic component (fixing broken aromatic rings and stray atoms).
+  - Switched `mof_linkers_lib` and `mof_nodes_lib` helper exports from using the strict geometric `_species_coords_unique_key` to using the more robust `_chemical_identity_key` (heavy-atom formula only). This accurately merges duplicate structures across ASR/FSR variants and families with minor lattice shifts.
+- **Validation:**
+  - Ran fragmentation on the `test_on_mof_mg_based` set using 8 cores. Verified that `mof_linkers_lib` output correctly merges identical linkers, producing only unique topologies, and contains no `Mg` or other metals.
+- **Follow-up risks:**
+  - Linker component splitting: Removing metal atoms naturally severs connections to the node. If the linker topology implies that a single linker spans across multiple metals and relies on them for internal connectivity, our "largest connected component" rule will split it. This is biologically correct (they are separate linkers coordinated to the same metal) but worth noting if visually inspecting complex topologies.
+  - `moffragmentor` occasionally hangs on complex 3D MOFs with 8 cores. Might require limiting `--nproc` or using a timeout wrapper in the future.
+
 ## 2026-05-30 - UniFrag: Add get_elements_from_extxyz.py utility
 - **Changed files:**
   - `get_elements_from_extxyz.py` — Post-processing utility script to extract unique element types from an ExtXYZ file.
