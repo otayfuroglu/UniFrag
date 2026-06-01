@@ -1036,3 +1036,15 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Validation:
   - Multiplicity and zero-distance failures resolved on the reported Mg-based test cases.
 
+
+## 2026-06-01 - Fix: preserve carboxylate -COOH oxygens in minimized MOF fragments
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+- Summary:
+  - Fixed a bug in `_get_first_ring_keep_heavy` where the second oxygen of a carboxylate group (-OH or =O, bonded to the carboxylate C) was being dropped during minimize trimming. The method correctly kept the bridge O (bonded to metal) and the carboxylate C (first-layer neighbor), but the other O was excluded because it is not part of any ring and not on the BFS path to the ring.
+  - Added a `species_map` optional parameter to `_get_first_ring_keep_heavy`. After computing the ring-based `keep_atoms`, a single-pass expansion is done: for every kept C/Si/B atom, any directly-bonded O/S/P/N that was not already kept is added to `keep_atoms`. This is intentionally limited to one pass to avoid expanding into the rest of the linker arm.
+  - Updated both call sites: `_first_connected_ring_fragment` passes `{i: linker_species[i] for i in heavy}`, and `_get_fragment` passes `{ka: supercell[ka].species_string for ka in comp}`.
+- Validation:
+  - The full -COOH group (both oxygens) is now always preserved in the minimized fragment of Mg-based MOFs.
+

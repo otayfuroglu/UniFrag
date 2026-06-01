@@ -947,7 +947,7 @@ class MOFFragmenter(BaseFragmenter):
             if len(species) == before and np.linalg.norm(base) > 1e-12:
                 self.place_capping_h(i, -base, cap_len, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
-    def _get_first_ring_keep_heavy(self, hadj, bridge_atoms):
+    def _get_first_ring_keep_heavy(self, hadj, bridge_atoms, species_map=None):
         ring_edges = set()
         ring_nodes = set()
         for u in hadj:
@@ -1002,7 +1002,23 @@ class MOFFragmenter(BaseFragmenter):
                             comp.add(nb)
                             cq.append(nb)
             keep_atoms.update(comp)
-            
+
+        # Carboxylate/phosphonate/sulfonate preservation:
+        # Do a single-pass expansion to retain O/S/P/N atoms that are directly bonded
+        # to any already-kept C/Si/B atom. This ensures both oxygens of a -COOH group
+        # (the bridge O and the =O / -OH) are always kept when the carboxylate C is kept.
+        if species_map is not None:
+            _carbon_like = {"C", "Si", "B"}
+            _hetero = {"O", "S", "P", "N"}
+            extra = set()
+            for u in keep_atoms:
+                if species_map.get(u) not in _carbon_like:
+                    continue
+                for nb in hadj.get(u, []):
+                    if nb not in keep_atoms and species_map.get(nb) in _hetero:
+                        extra.add(nb)
+            keep_atoms.update(extra)
+
         return keep_atoms
 
     def _first_connected_ring_fragment(self, linker_species, linker_coords, node_species, node_coords):
@@ -1032,7 +1048,10 @@ class MOFFragmenter(BaseFragmenter):
         if not bridge_atoms:
             return [], [], []
 
-        keep_heavy = self._get_first_ring_keep_heavy(hadj, bridge_atoms)
+        keep_heavy = self._get_first_ring_keep_heavy(
+            hadj, bridge_atoms,
+            species_map={i: linker_species[i] for i in heavy}
+        )
 
         removed_nbr_count = {i: sum(1 for nb in hadj.get(i, []) if nb not in keep_heavy) for i in keep_heavy}
 
@@ -2156,7 +2175,8 @@ class MOFFragmenter(BaseFragmenter):
             for comp, bridge_atoms, keep_linker in linker_evaluations:
                 if not keep_linker:
                     comp_hadj = {ka: [nb for nb in local_adj[ka] if nb in comp] for ka in comp}
-                    keep_atoms = self._get_first_ring_keep_heavy(comp_hadj, bridge_atoms)
+                    comp_smap = {ka: supercell[ka].species_string for ka in comp}
+                    keep_atoms = self._get_first_ring_keep_heavy(comp_hadj, bridge_atoms, species_map=comp_smap)
 
                     atoms_to_cut = comp - keep_atoms
                     partial_to_remove.update(atoms_to_cut)
