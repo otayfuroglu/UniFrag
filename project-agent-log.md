@@ -1025,3 +1025,14 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
   - Re-ran fragmentation on `2009[Mg][lvt]3[ASR]1.cif`. The `min` version successfully kept exactly 1 complete linker and pruned the remaining 3 linkers down to only their first phenyl ring attached to the node, resulting in exactly the expected formula (`C61H44MgN2O11`).
 - **Risks/Follow-ups**:
   - None immediately apparent.
+
+## 2026-06-01 - Fix QM Geometry Flattening and Multiplicity Failures
+- Changed files:
+  - `fragmentation_oop.py`
+  - `project-agent-log.md`
+- Summary:
+  - Fixed 'Zero distance between atoms' error in QM optimizations. Added a check in `enforce_sp2_capped_h_geometry` to skip SP2 planar enforcement on carbon atoms that already have >= 2 hydrogens (e.g. CH2 groups). Previously, trimming aliphatic linkers caused both capping hydrogens to be artificially collapsed onto the exact same bisector vector.
+  - Fixed 'multiplicity is odd' errors by adding progressive fallback relaxation (down to `min_hh=0.0`) in `fix_odd_electron_multiplicity` when strict steric constraints prevented placing the parity-fixing H atom.
+- Validation:
+  - Multiplicity and zero-distance failures resolved on the reported Mg-based test cases.
+

@@ -374,6 +374,17 @@ class BaseFragmenter:
             nbs = heavy_neighbors(parent)
             if len(nbs) < 2:
                 continue
+            
+            h_nbs = 0
+            ci = np.array(coords[parent], dtype=float)
+            for j, spj in enumerate(species):
+                if j == parent or spj != "H":
+                    continue
+                d = np.linalg.norm(ci - np.array(coords[j], dtype=float))
+                if self.is_valid_bond(species[parent], "H", d):
+                    h_nbs += 1
+            if len(nbs) == 2 and h_nbs >= 2:
+                continue
 
             p = np.array(coords[parent], dtype=float)
             u = []
@@ -787,6 +798,13 @@ class BaseFragmenter:
             bl = self.cap_bond_length(target_sym)
             before = len(species)
             self.place_capping_h(target_idx, base_vec, bl, species, coords, min_hh=1.5, capped_h_flags=None)
+            if len(species) == before:
+                self.place_capping_h(target_idx, base_vec, bl, species, coords, min_hh=1.0, capped_h_flags=None)
+            if len(species) == before:
+                self.place_capping_h(target_idx, base_vec, bl, species, coords, min_hh=0.5, capped_h_flags=None)
+            if len(species) == before:
+                self.place_capping_h(target_idx, base_vec, bl, species, coords, min_hh=0.0, min_heavy=0.0, min_o_contact=0.0, capped_h_flags=None)
+            
             if len(species) > before:
                 capped_h_indices.append(len(species) - 1)
                 print(f"QM-Fix [{group}]: Added H to {target_sym}[{target_idx}] (no removable non-C capping H found) to achieve even electron count for '{label}'.")
