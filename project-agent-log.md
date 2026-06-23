@@ -2,6 +2,104 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-23 - UniFrag: Collect modified screening MOFs using CSD-modified cifs
+- **Changed files:**
+  - `runUniFrag/collect_modified_screening_mofs.py` [NEW] — Created a script to read `8806-recommended-screening-list.txt`, map standard REFCODE filenames to their corresponding `coreid` names using the CR CSV mapping, and copy them from `CSD-modified/cifs/` to the target folder.
+  - `runUniFrag/8806_screening_cifs/` [NEW DIR] — Folder populated with 5,308 modified CIF structures.
+  - `runUniFrag/modified_screening_missing_report.txt` [NEW] — Report detailing the 3,498 screening list structures that are missing from `CSD-modified`.
+- **Summary:**
+  - Standardized the filenames in the screening list to find their physical files in `CSD-modified/cifs/`. Since CR files are stored under `coreid` names, the script maps them dynamically.
+  - Successfully collected **5,308** files, renaming them to their clean target `refcode` names (e.g. `[REFCODE]_[ASR/FSR/ION]_pacman.cif`).
+  - The remaining 3,498 files are not present in the `CSD-modified` dataset because they were excluded from CORE-MOF or are literature/non-CSD entries.
+- **Validation:**
+  - Verified 5,308 files in `runUniFrag/8806_screening_cifs/`.
+  - Logged all missing structures in `modified_screening_missing_report.txt`.
+- **Follow-up risks:**
+  - None.
+
+## 2026-06-23 - UniFrag: Correct metal distribution deduplication and collect screening MOFs from CSD
+- **Changed files:**
+  - `runUniFrag/plot_metals.py` [MODIFY] — Updated the plotting script to group both `CSD-modified` and `CSD-unmodified` datasets by unique 6-letter parent REFCODE. This avoids double-counting of solvent variations (ASR vs FSR) and conformers, updating the Y-axis to "Number of Unique Parent MOFs".
+  - `runUniFrag/mof_metals_histogram.png` [MODIFY] — Re-generated the comparative metals distribution histogram with correct unique parent counts.
+  - `runUniFrag/collect_screening_mofs.py` [NEW] — Created a script to read `8806-recommended-screening-list.txt`, extract unique standard REFCODEs, and query the local CSD database using the CSD Python API to fetch their original unmodified CIF structures.
+  - `runUniFrag/8806_screening_unmodified_cifs/` [NEW DIR] — Folder populated with 6,033 unmodified CIF structures collected from the database.
+  - `runUniFrag/screening_collection_report.txt` [NEW] — Report detailing successful extractions (6,033), lookup failures (8), and non-standard skipped entries (1,271).
+- **Summary:**
+  - Corrected the double-counting of metal centers in the modified dataset. Deduplicating by 6-letter parent REFCODE reduced the CSD-modified Zn-based structure count from the raw file sum of 4,437 to a unique parent count of **1,725** (while CSD-unmodified unique Zn count remains **2,439**).
+  - Successfully ran `collect_screening_mofs.py` using local CSD Portfolio database connection to retrieve 6,033 crystal structures. The remaining 1,271 entries are non-standard literature identifiers (such as DOI suffixes like `c9cc09664g2`) which do not correspond to standard CSD database entries and were documented in the summary report.
+- **Validation:**
+  - Visual check of the updated `mof_metals_histogram.png` in the brain artifact directory confirms accurate parent framework distribution.
+  - Verified 6,033 extracted CIF files in `runUniFrag/8806_screening_unmodified_cifs/` and reviewed the lookup failure list in `screening_collection_report.txt`.
+- **Follow-up risks:**
+  - The 1,271 non-standard/publication-coded CIF files cannot be retrieved from the CSD database because they are not standard deposited CSD entries. They must be collected directly from literature supplementary materials if needed.
+
+## 2026-06-22 - UniFrag: Generate comparative metal distribution histogram
+- **Changed files:**
+  - `runUniFrag/mof_metals_histogram.png` [MODIFY] — Generated side-by-side histogram comparing metal distributions in `CSD-modified` vs `CSD-unmodified` datasets.
+- **Summary:**
+  - Ran `runUniFrag/plot_metals.py` in the miniconda environment to generate a side-by-side comparative bar chart.
+  - The script scans `CSD-unmodified` and `CSD-modified` directories, extracts metals dynamically from the loop columns of all CIF structures, groups counts by unique parent 6-letter REFCODE, identifies the top 10 metals (Zn, Cu, Co, Cd, Mn, Ni, Fe, Ag, Eu, Zr), and aggregates the rest under "Others".
+  - The resulting plot has no baked-in title as requested by the user, has clear axis labels, and has a professional high-contrast aesthetic (soft royal blue for CSD-modified, emerald green for CSD-unmodified).
+  - Saved output to `runUniFrag/mof_metals_histogram.png` and copied it to the brain artifact directory for user visualization.
+- **Validation:**
+  - Successfully ran `plot_metals.py` and visually verified `mof_metals_histogram.png`.
+- **Follow-up risks:**
+  - None.
+
+## 2026-06-20 - UniFrag: Reinstall Miniconda dependencies and create CSD extraction script
+- **Changed files:**
+  - `runUniFrag/fetch_cifs_from_csd.py` [NEW] — Created a script to automate the retrieval of original, unmodified CIFs for CR and NCR datasets using the CSD Python API.
+- **Summary:**
+  - Reinstalled all required Python libraries in the fresh Miniconda environment (`/Users/omert/miniconda3`), including `pymatgen`, `rdkit`, `pdbfixer`, and `openmm` from `conda-forge`, and `moffragmentor` from PyPI via pip.
+  - Investigated CSD Python API requirements: verified that the `ccdc` python package is already installed but requires local CSD Portfolio database files and active license registration.
+- **Validation:**
+  - Executed `fragmentation_oop.py --help` using the new Miniconda python and confirmed successful package loads and help printout.
+  - Run the `ccdc` import check and diagnosed the exact license activation check output.
+- **Follow-up risks:**
+  - The CSD Python API will fail to execute until CSD Portfolio 2026.1 (or similar) is installed and the CCDC Software Activation tool is run on the system.
+
+## 2026-06-20 - UniFrag: Analyze metal centers distribution and plot histogram
+- **Changed files:**
+  - `runUniFrag/mof_dataset_analysis.md` [MODIFY] — Added a new section detailing the distribution of metal centers (top 10 metals and others) with counts and percentages, and embedded the histogram.
+  - `runUniFrag/plot_metals.py` [NEW] — Created a python plotting script that groups MOFs by 6-letter parent REFCODE, counts metal occurrences, and renders a bar chart using matplotlib without a baked-in title.
+  - `runUniFrag/mof_metals_histogram.png` [NEW] — Generated bar chart showing top 10 metal centers and Others.
+- **Summary:**
+  - Analyzed the metal center distribution of unique parent frameworks (5,741 structures) in the database.
+  - Zinc (Zn) is the most abundant metal center in unique frameworks (1,316 structures, 22.92%), followed by Cu (14.37%), Cd (11.08%), and Co (11.01%).
+  - Refined the plot script to output the figure without a baked-in title, making it ideal for academic reporting.
+- **Validation:**
+  - Successfully ran `plot_metals.py` using conda python and verified that `mof_metals_histogram.png` is generated and saved correctly in `runUniFrag/` without a title.
+- **Follow-up risks:**
+  - None.
+
+## 2026-06-16 - UniFrag: Analyze Zn-based MOF dataset and prepare run UniFrag pipeline
+- **Changed files:**
+  - `runUniFrag/mof_dataset_analysis.md` [MODIFY] — Documented the concepts, definitions, counts of total vs Zn-based structures, ASR vs FSR overlap, and detailed conformer/chemical identity analysis.
+  - `runUniFrag/prepare_zn_cifs.py` [NEW] — Created a curation script that automatically identifies all Zn-based CIF files and prepares them via relative symlinks in separate directories for batch fragmentation.
+  - `runUniFrag/compare_asr_fsr.py` [NEW] — Compares the CR_ASR and CR_FSR datasets byte-for-byte and by framework Stem ID label.
+  - `runUniFrag/compare_asr_fsr_csv.py` [NEW] — Compares the datasets using the base CSD REFCODE parsed from the CSV metadata.
+  - `runUniFrag/compare_chemical_identity.py` [NEW] — Performs grouping by 6-letter parent CSD REFCODE and MOFid to analyze conformers and topological matches.
+- **Summary:**
+  - Analyzed the CSD-modified database under `runUniFrag/CSD-modified/` to count total and Zn-based structures.
+  - Evaluated the overlap of identical structures between ASR and FSR subsets: 0 are byte-for-byte identical, 3,163 have matching framework stem IDs, and 3,624 share parent CSD REFCODEs.
+  - Analyzed chemical identity/conformers: ASR contains 1 conformer pair, FSR has 0, and Ion has 19. ASR and FSR share 3,377 parent 6-letter CSD REFCODEs (89.2% of FSR matches ASR).
+  - Placed all analysis markdown files and Python-related setup/comparison codes inside the `runUniFrag` folder as requested.
+- **Validation:**
+  - Successfully ran `prepare_zn_cifs.py` to create Zn-only directories under `runUniFrag/zn_cifs/` (symlinked 1282, 969, 76, and 2118 Zn-based MOFs respectively).
+  - Successfully ran `compare_asr_fsr.py`, `compare_asr_fsr_csv.py`, and `compare_chemical_identity.py` to count and verify the overlaps.
+- **Follow-up risks:**
+  - None.
+
+## 2026-06-04 - UniFrag: Draft Methodology Section for Academic Paper
+- **Changed files:**
+  - `methodology_draft.md` [NEW] — Created the complete draft for the Methodology section of the UniFrag paper in markdown.
+- **Summary:**
+  - Drafted a highly detailed Methodology section explaining the package's architecture, processing pipeline (MOF, COF, and Bio modes), shared geometric algorithms (`BaseFragmenter` helpers, orthonormal basis, polar-azimuthal search grid, SVD aromatic planarity projection, single-molecule contiguity BFS), MOF-specific pathways (Path J node-linker merging, coordination completion, open-connector recovery, graph fallback, topological skeleton pruning), COF layered dimer stacking, and `BioMolFragmenter` sliding-window peptide extraction and charge neutralization mechanism.
+- **Validation:**
+  - Manually reviewed and verified all parameters, limits, and mathematical logic against the actual implementations in `fragmentation_oop.py`.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-05-31 - UniFrag: Fix MOF Helper Linker Library Export (Metals, Wrapping, Deduplication)
 - **Changed files:**
   - `fragmentation_oop.py` — Modified helper library export functions to filter metals, unwrap geometries, and use heavy-atom formula chemical identity keys for duplicate detection.
@@ -1047,4 +1145,68 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
   - Updated both call sites: `_first_connected_ring_fragment` passes `{i: linker_species[i] for i in heavy}`, and `_get_fragment` passes `{ka: supercell[ka].species_string for ka in comp}`.
 - Validation:
   - The full -COOH group (both oxygens) is now always preserved in the minimized fragment of Mg-based MOFs.
+
+## 2026-06-21 - CCDC API activation check, unmodified CIF extraction, and classification
+- Changed files:
+  - `project-agent-log.md`
+  - `runUniFrag/analyze_cifs.py`
+- Summary:
+  - Verified CCDC Python API (`ccdc` v3.7.1) activation and database connection in Miniconda environment `/Users/omert/miniconda3`.
+  - Discovered local SQLite database file at `/Users/omert/CCDC/ccdc-data/csd/as601be_CIP.sqlite`.
+  - Resolved `UserWarning` about missing database by setting `CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd` environment variable.
+  - Successfully ran `runUniFrag/fetch_cifs_from_csd.py` using the CCDC API to extract unmodified CIFs for CR (from CSV metadata) and NCR (from folder filename scan) datasets.
+  - Wrote and executed `runUniFrag/analyze_cifs.py` to classify the extracted CIF files (renamed to `CSD-unmodified/`) into CR (ASR, FSR, Ion) and NCR subsets.
+- Validation:
+  - Extracted 11,338 unmodified CIFs out of 11,367 requested REFCODEs into `runUniFrag/CSD-unmodified/` (29 REFCODEs were missing/not found in CSD database).
+  - Out of 11,338 extracted: 5,006 are exclusively CR, 5,609 are exclusively NCR, and 723 are present in both subsets.
+
+## 2026-06-22 - Zn-based Unmodified CIF extraction, merging, collection, and auto-continue flag
+- Changed files:
+  - `project-agent-log.md`
+  - `project-memory.md`
+  - `fragmentation_oop.py`
+  - `runUniFrag/merge_zn_cifs.py`
+  - `runUniFrag/collect_all_zn_cifs.py`
+- Summary:
+  - Wrote and executed `runUniFrag/merge_zn_cifs.py` to extract all Zn-based unmodified CIFs from `runUniFrag/CSD-unmodified/`.
+  - Merged these extracted CIFs into parallel subdirectories in `runUniFrag/zn_cifs/` with name prefixes `unmodified_` (e.g. `unmodified_CR_ASR`, `unmodified_CR_FSR`, `unmodified_NCR`, `unmodified_CR_ASR_FSR_merged`).
+  - Mapped each Zn-based structure to its corresponding category using CR metadata and NCR folder listings, resolving duplicates by base REFCODE (ensuring unique filename symlinks).
+  - Wrote and executed `runUniFrag/collect_all_zn_cifs.py` to compile ALL unique Zn-based MOFs into a single directory `runUniFrag/zn_cifs_noduplicated/`. If a structure exists in both unmodified and modified, it prioritizes the unmodified version and falls back to the modified version if the unmodified file is missing (to maximize coverage). Rename the target files to a clean `[REFCODE].cif` format.
+  - Implemented automatic continue/resume behavior by default in `fragmentation_oop.py` for folder mode (MOF, COF, and Bio modes). It skips already completed files listed in the CSV summary and preserves the existing ExtXYZ collection, loading its signatures to properly handle duplicate detection.
+  - Added the `--overwrite` flag to allow users to bypass auto-continue and force starting folder-mode runs from scratch.
+- Validation:
+  - Identified 2,439 Zn-based structures out of the 11,338 unmodified CIFs.
+  - Successfully symlinked categories under `zn_cifs/` (1223 ASR, 919 FSR, 0 Ion, 1255 NCR, 1247 merged).
+  - Collected exactly **2,443** unique Zn-based structures in `zn_cifs_noduplicated/` (2,439 unmodified structures + 4 modified-only fallback structures).
+  - Verified compilation of `fragmentation_oop.py` runs successfully.
+
+## 2026-06-23 - Collection of unique Computationally Ready (CR) MOFs from modified and unmodified subsets
+- Changed files:
+  - `project-memory.md`
+  - `project-agent-log.md`
+- Summary:
+  - Updated `runUniFrag/collect_cr_cifs.py` to include robust metal element parsing and mixed-metal filtering (excluding structures with more than one metal type).
+  - Executed the updated script to compile unique single-metal CR MOFs from `CSD-modified` (ASR/FSR/Ion) and `CSD-unmodified` subsets.
+  - Used CR metadata `CR_data_CSD_modified_20250227.csv` to map filenames (`coreid`) to base parent REFCODEs and deduplicated by 6-letter base parent CSD REFCODE (ensuring exactly one representative file per framework).
+  - Priority hierarchy: ASR -> FSR -> Ion -> Unmodified fallback.
+  - Saved output files to `runUniFrag/cr_cifs_noduplicated/` in a clean `[REFCODE].cif` format.
+  - Generated summary report at `runUniFrag/cr_collection_summary.txt`.
+  - Created and ran `runUniFrag/plot_cr_metals.py` to compile the metal center distribution histogram for the final `cr_cifs_noduplicated/` collection.
+- Validation:
+  - Confirmed exactly **5,226** single-metal files collected in `runUniFrag/cr_cifs_noduplicated/` (515 mixed-metal structures were successfully filtered out and skipped).
+  - Distribution of source files in the final collection:
+    - Copied from ASR: 4,810
+    - Copied from FSR: 121
+    - Copied from Ion: 295
+    - Copied from Unmodified fallback: 0
+  - Verified that all output filenames are exactly 6 uppercase letters (base REFCODE format).
+  - Confirmed no empty (0 bytes) files are present in the output folder.
+  - Successfully generated the updated `mof_metals_histogram.png` plot and copied it to the brain artifact directory.
+  - Top metal counts in the single-metal CR collection: Zn (1220), Cu (664), Cd (602), Co (539), Mn (209), Ni (204), Eu (170), Ag (147), Tb (138), Gd (113), and Others (1220).
+  - Created and ran `runUniFrag/collect_zn_cr_cifs.py` to extract all Zn-based single-metal CR MOFs from `cr_cifs_noduplicated/`.
+- Validation:
+  - Extracted exactly **1,220** Zn-based structures into `runUniFrag/zn_cr_cifs_noduplicated/`.
+  - All filenames are exactly `[REFCODE].cif` and match standard 6-letter base refcodes.
+  - Confirmed no empty (0 bytes) files are present in the output folder.
+
 

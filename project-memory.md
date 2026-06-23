@@ -71,20 +71,49 @@ Use this file as a persistent engineering memory for this project. Keep entries 
 - Build system:
 
 ### 4.3 Environment assumptions
-- Python/Node/Compiler version:
-- OS notes:
+- Python/Node/Compiler version: Python 3.13 (Miniconda)
+- OS notes: macOS, requires setting CSD_DATA_DIRECTORY environment variable for CCDC Python API
 - GPU/CPU notes:
 
 ## 5) Commands (Copy/Paste)
 
 ### 5.1 Setup
 ```bash
-# install deps
+# Export the CSD database directory for CCDC Python API
+export CSD_DATA_DIRECTORY="/Users/omert/CCDC/ccdc-data/csd"
 ```
 
 ### 5.2 Run
 ```bash
-# run app/script
+# Run the CIF extraction script
+CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/fetch_cifs_from_csd.py
+
+# Analyze the extracted CIFs and classify them into CR (ASR/FSR) and NCR subsets
+/Users/omert/miniconda3/bin/python runUniFrag/analyze_cifs.py
+
+# Extract Zn-based unmodified CIFs and merge them into categories (removing duplicates)
+/Users/omert/miniconda3/bin/python runUniFrag/merge_zn_cifs.py
+
+# Collect all unique Zn-based MOFs into a single deduplicated folder (naming files [REFCODE].cif)
+/Users/omert/miniconda3/bin/python runUniFrag/collect_all_zn_cifs.py
+
+# Collect all unique CR MOFs into a single deduplicated folder (prioritizing modified files)
+/Users/omert/miniconda3/bin/python runUniFrag/collect_cr_cifs.py
+
+# Extract Zn-based CR MOFs from the unique CR collection
+/Users/omert/miniconda3/bin/python runUniFrag/collect_zn_cr_cifs.py
+
+# Plot and update comparative metal distribution histogram for CSD-modified and CSD-unmodified subsets
+/Users/omert/miniconda3/bin/python runUniFrag/plot_metals.py
+
+# Plot and update metal distribution histogram for the unique CR collection
+/Users/omert/miniconda3/bin/python runUniFrag/plot_cr_metals.py
+
+# Collect original unmodified CIFs for standard CSD entries in the 8806 screening list
+CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/collect_screening_mofs.py
+
+# Collect modified CIFs (ASR/FSR/Ion/NCR) matching the 8806 screening list from CSD-modified
+/Users/omert/miniconda3/bin/python runUniFrag/collect_modified_screening_mofs.py
 ```
 
 ### 5.3 Test

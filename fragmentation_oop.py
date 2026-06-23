@@ -1367,7 +1367,7 @@ class MOFFragmenter(BaseFragmenter):
 
     def _fallback_export_mof_node_linker(self, mof_path):
         try:
-            struct = Structure.from_file(mof_path)
+            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
         except Exception:
             return False
 
@@ -1464,7 +1464,7 @@ class MOFFragmenter(BaseFragmenter):
             print(f"  moffragmentor unavailable: {exc}")
             return None
         try:
-            struct = Structure.from_file(mof_path)
+            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
             result = MOF.from_cif(mof_path).fragment()
         except Exception as exc:
             print(f"  moffragmentor node+linker failed: {exc}")
@@ -1734,7 +1734,7 @@ class MOFFragmenter(BaseFragmenter):
         if combined is not None:
             return combined
         self._fallback_export_mof_node_linker(mof_path)
-        struct = Structure.from_file(mof_path)
+        struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
         structure_stem = Path(mof_path).stem
         if nmetals < 1:
             raise ValueError(f"--nmetals must be >= 1 (got {nmetals}).")
@@ -2660,7 +2660,7 @@ class COFFragmenter(BaseFragmenter):
 
     def _try_cof_graph_node_linker_fragment(self, cif_path, output_path, minimize=False):
         try:
-            struct = Structure.from_file(cif_path)
+            struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
         except Exception:
             return None
 
@@ -3069,7 +3069,7 @@ class COFFragmenter(BaseFragmenter):
             print(f"  coffragmentor unavailable: {exc}")
             return None
         try:
-            struct = Structure.from_file(cif_path)
+            struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
             result = COF.from_cif(cif_path).fragment()
         except Exception as exc:
             print(f"  coffragmentor node+linker failed: {exc}")
@@ -3224,7 +3224,7 @@ class COFFragmenter(BaseFragmenter):
     def extract(self, cif_path, output_path="cof_fragment.xyz", center_idx=-1, minimize=False):
         print(f"Loading '{cif_path}'...")
         try:
-            struct = Structure.from_file(cif_path)
+            struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
         except Exception as exc:
             print(f"  Standard CIF load failed: {exc}")
             print("  Retrying with tolerant CIF parser...")
@@ -5592,6 +5592,10 @@ def main():
         "--no-pdbfixer", dest="no_pdbfixer", action="store_true",
         help="Skip PDBFixer pre-processing and use the PDB as-is (bio mode).",
     )
+    parser.add_argument(
+        "--overwrite", dest="overwrite", action="store_true",
+        help="Overwrite previous runs and start from scratch in folder mode (disables auto-continue).",
+    )
     args = parser.parse_args()
 
     if args.kind == "mof":
@@ -5619,11 +5623,34 @@ def main():
         
         seen_keys = set()
         if is_dir:
-            # Initialize files
-            with open(csv_path, "w") as f:
-                f.write("cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n")
-            if os.path.exists(extxyz_path):
-                os.remove(extxyz_path)
+            if os.path.exists(csv_path) and not args.overwrite:
+                # Load completed files from CSV
+                completed_files = set()
+                try:
+                    with open(csv_path, "r") as f:
+                        lines = f.readlines()
+                    for line in lines[1:]:
+                        if line.strip():
+                            parts = line.split(",")
+                            if parts:
+                                completed_files.add(parts[0].strip())
+                except Exception as e:
+                    print(f"Warning: could not read existing summary CSV: {e}")
+                
+                # Load seen keys from existing extxyz
+                if os.path.exists(extxyz_path):
+                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                
+                # Filter out files that are already completed
+                cif_files = [f for f in cif_files if os.path.basename(f) not in completed_files]
+                print(f"Auto-resuming run. Found {len(completed_files)} already completed files. {len(cif_files)} files remaining.")
+                print("To start from scratch instead, run with the --overwrite flag.")
+            else:
+                # Initialize files
+                with open(csv_path, "w") as f:
+                    f.write("cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n")
+                if os.path.exists(extxyz_path):
+                    os.remove(extxyz_path)
         else:
             if os.path.exists(extxyz_path):
                 seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
@@ -5714,10 +5741,33 @@ def main():
         
         seen_keys = set()
         if is_dir:
-            with open(csv_path, "w") as f:
-                f.write("cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n")
-            if os.path.exists(extxyz_path):
-                os.remove(extxyz_path)
+            if os.path.exists(csv_path) and not args.overwrite:
+                # Load completed files from CSV
+                completed_files = set()
+                try:
+                    with open(csv_path, "r") as f:
+                        lines = f.readlines()
+                    for line in lines[1:]:
+                        if line.strip():
+                            parts = line.split(",")
+                            if parts:
+                                completed_files.add(parts[0].strip())
+                except Exception as e:
+                    print(f"Warning: could not read existing summary CSV: {e}")
+                
+                # Load seen keys from existing extxyz
+                if os.path.exists(extxyz_path):
+                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                
+                # Filter out files that are already completed
+                cif_files = [f for f in cif_files if os.path.basename(f) not in completed_files]
+                print(f"Auto-resuming run. Found {len(completed_files)} already completed files. {len(cif_files)} files remaining.")
+                print("To start from scratch instead, run with the --overwrite flag.")
+            else:
+                with open(csv_path, "w") as f:
+                    f.write("cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n")
+                if os.path.exists(extxyz_path):
+                    os.remove(extxyz_path)
         else:
             if os.path.exists(extxyz_path):
                 seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
@@ -5808,10 +5858,33 @@ def main():
         
         seen_keys = set()
         if is_dir:
-            with open(csv_path, "w") as f:
-                f.write("pdb_file,window_name,n_atoms,is_duplicate\n")
-            if os.path.exists(extxyz_path):
-                os.remove(extxyz_path)
+            if os.path.exists(csv_path) and not args.overwrite:
+                # Load completed files from CSV
+                completed_files = set()
+                try:
+                    with open(csv_path, "r") as f:
+                        lines = f.readlines()
+                    for line in lines[1:]:
+                        if line.strip():
+                            parts = line.split(",")
+                            if parts:
+                                completed_files.add(parts[0].strip())
+                except Exception as e:
+                    print(f"Warning: could not read existing summary CSV: {e}")
+                
+                # Load seen keys from existing extxyz
+                if os.path.exists(extxyz_path):
+                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                
+                # Filter out files that are already completed
+                pdb_files = [f for f in pdb_files if os.path.basename(f) not in completed_files]
+                print(f"Auto-resuming run. Found {len(completed_files)} already completed files. {len(pdb_files)} files remaining.")
+                print("To start from scratch instead, run with the --overwrite flag.")
+            else:
+                with open(csv_path, "w") as f:
+                    f.write("pdb_file,window_name,n_atoms,is_duplicate\n")
+                if os.path.exists(extxyz_path):
+                    os.remove(extxyz_path)
         else:
             if os.path.exists(extxyz_path):
                 seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
