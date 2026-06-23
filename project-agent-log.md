@@ -1209,4 +1209,24 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
   - All filenames are exactly `[REFCODE].cif` and match standard 6-letter base refcodes.
   - Confirmed no empty (0 bytes) files are present in the output folder.
 
-
+## 2026-06-23 - Atom types coverage analysis and parent-fragment comparison
+- Changed files:
+  - `runUniFrag/analyze_atom_types.py` [NEW]
+  - `runUniFrag/atom_types_analysis.md` [NEW]
+  - `runUniFrag/atom_types_distribution.png` [NEW]
+  - `project-memory.md`
+  - `project-agent-log.md`
+- Summary:
+  - Developed and ran `runUniFrag/analyze_atom_types.py` to compare Sybyl atom types of parent MOFs and fragments.
+  - Scanned all 1,220 single-metal Zn parent structures, identifying 27 unique Sybyl atom types.
+  - Typed the 1,465 fragments using two approaches:
+    - **Method A (Mapped)**: Atoms are mapped back to parent crystal fractional coordinates (modulo 1) to inherit their parent environment types.
+    - **Method B (Direct)**: The fragment is typed as an isolated molecule in a temporary CIF file to let CCDC perceive chemistry directly.
+  - Achieved **88.89%** coverage (24 out of 27 parent types) for both methods.
+  - Identified the three missing types (`S.2`, `S.o`, `Se`) and chemically analyzed their omission:
+    - `Se` in `BAFVOX.cif` and `S.o` in `XINFUW.cif` represent pore solvent/guest molecules, which were correctly discarded during fragmentation.
+    - `S.2` in `BUCXUT.cif` was omitted during fragment partitioning of the framework.
+  - Generated a comparative relative-frequency bar chart of the top 15 atom types and a detailed markdown report.
+- Validation:
+  - Confirmed 0 mapping errors across all 1,465 fragments.
+  - Checked that output markdown and distribution plot are correctly written to the workspace and the brain artifacts directory.
