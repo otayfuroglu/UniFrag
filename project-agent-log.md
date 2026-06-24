@@ -2,6 +2,21 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-24 - UniFrag: Configurable Processing Timeout and Relocation of Timed-Out Structures
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Added `_timeout_context` context manager using Unix `signal.alarm`, added `--timeout` parameter, wrapped workers in the context manager, caught `TimeoutError` explicitly, and added structure file relocation behavior.
+  - `project-memory.md` [MODIFY] — Added a decision entry to the Decisions Log.
+  - `project-decisions.md` [MODIFY] — Added the timeout design decision entry.
+- **Summary:**
+  - Implemented a configurable timeout (default 300s) to interrupt worker processes during complex crystal structure extraction.
+  - Custom `TimeoutError` inherits from `BaseException` to propagate properly through internal `try-except Exception:` blocks.
+  - On timeout, the worker automatically moves the offending structure file (`.cif` or `.pdb`) to a `timed_out_structures` folder in its directory, and reports `"TIMEOUT"` status for atoms and formulas in the summary CSV.
+- **Validation:**
+  - Ran a normal test on `IRMOF-1.cif` with a 10s timeout (passed).
+  - Forced a timeout with a 1s limit on a copied structure and verified it caught the error, moved the file to `timed_out_structures`, and recorded `"TIMEOUT"` values in the CSV summary.
+- **Follow-up risks:**
+  - `signal.alarm` is Unix/macOS only; if run on Windows, it will behave as if no timeout is set (timeout ignored). This is fine since the user's OS is macOS.
+
 ## 2026-06-24 - UniFrag: Rename Script to prepare_linker4qm.py
 - **Changed files:**
   - `runUniFrag/prepare_linker_extxyz.py` -> `runUniFrag/prepare_linker4qm.py` [RENAME] — Renamed the post-processing script.

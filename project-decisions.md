@@ -2,6 +2,11 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
+## Decision 2026-06-24: Configurable Processing Timeout and Relocation of Timed-Out Structures
+- Context: Processing certain highly-connected, large, or topologically complex crystal structures using `fragmentation_oop.py` could hang indefinitely or consume excessive CPU time.
+- Decision: Introduced a configurable timeout parameter `--timeout` (default 300.0s / 5 minutes) using a Unix `SIGALRM` based context manager. If a structure execution exceeds this timeout, the worker process catches a custom `TimeoutError` (inheriting from `BaseException` to prevent swallowing by local `except Exception` blocks), moves the timed-out CIF or PDB file to a `timed_out_structures/` folder within its parent directory, logs the timeout event to the console, and updates the summary CSV with `"TIMEOUT"` values to gracefully proceed with the batch.
+- Consequences: Long-running or stuck structures are isolated automatically, preventing stalls in the batch execution pipeline.
+
 ## Decision 2026-05-28: Heavy-Atom Formula-Only Chemical Identity Key for Robust Conformer Deduplication
 - Context: The user noticed that chemically equivalent structures (same formula and connectivity, but with minor conformational/torsional variations or hydrogen-capping differences) were not flagged as duplicates under the collection-level deduplication. Originally, deduplication relied on the strict `_species_coords_unique_key` (which encoded exact coordinates and pairwise distances), meaning conformers were treated as unique.
 - Decision: Implemented a robust chemical identity key helper (`_chemical_identity_key`) for collection-level duplicate detection. Instead of using exact coordinates or pairwise distance histograms (which suffer from binning issues due to small lattice parameter shifts across CIF files), the new key filters the fragment down to heavy atoms (excluding Hydrogen atoms entirely) and constructs a sorted count tuple of only heavy element occurrences (e.g. `(("C", 12), ("O", 4), ("Mg", 2))`).

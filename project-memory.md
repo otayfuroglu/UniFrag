@@ -352,3 +352,9 @@ Use this section only if you want this template to include a concrete reference 
 
 
 - 2026-05-11: COF Path J layered dimer rule added. For coffragmentor node+linker COFs, non-monomer output now duplicates the completed capped fragment along the shortest lattice vector when that vector is a plausible face-to-face layer spacing (2.5-5.0 A). Validated on COF-LZU1 (3.729 A) and COF-LZU8 (4.093 A), normal and min dimers.
+
+### Decision 2026-06-24: Configurable Processing Timeout and Relocation of Timed-Out Structures
+- Context: Processing certain highly-connected, large, or topologically complex crystal structures using `fragmentation_oop.py` could hang indefinitely or consume excessive CPU time.
+- Decision: Introduced a configurable timeout parameter `--timeout` (default 300.0s / 5 minutes) using a Unix `SIGALRM` based context manager. If a structure execution exceeds this timeout, the worker process catches a custom `TimeoutError` (inheriting from `BaseException` to prevent swallowing by local `except Exception` blocks), moves the timed-out CIF or PDB file to a `timed_out_structures/` folder within its parent directory, logs the timeout event to the console, and updates the summary CSV with `"TIMEOUT"` values to gracefully proceed with the batch.
+- Consequences: Long-running or stuck structures are isolated automatically, preventing stalls in the batch execution pipeline.
+

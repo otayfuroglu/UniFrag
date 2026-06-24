@@ -5420,6 +5420,31 @@ class BioMolFragmenter(BaseFragmenter):
         return dist <= cutoff
 
 
+import signal
+from contextlib import contextmanager
+
+class TimeoutError(BaseException):
+    pass
+
+@contextmanager
+def _timeout_context(seconds):
+    if seconds is None or seconds <= 0:
+        yield
+        return
+
+    def signal_handler(signum, frame):
+        raise TimeoutError(f"Execution timed out after {seconds} seconds")
+
+    old_handler = signal.signal(signal.SIGALRM, signal_handler)
+    signal.alarm(int(seconds))
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+
 def _get_formula(species):
     from collections import Counter
     c = Counter(species)
@@ -5427,25 +5452,26 @@ def _get_formula(species):
 
 
 def _process_cof_file(args_tuple):
-    cif_path, radius, center, layer_mode = args_tuple
+    cif_path, radius, center, layer_mode, timeout = args_tuple
     import os
     base = os.path.basename(cif_path)
     if base.endswith(".cif"):
         base = base[:-4]
     try:
-        frag = COFFragmenter(radius=radius, layer_mode=layer_mode)
-        res = frag.extract(cif_path, center_idx=center, output_path=None, minimize=False)
-        norm_atoms = len(res.species) if res else 0
-        norm_formula = _get_formula(res.species) if res else "N/A"
-        min_atoms = "N/A"
-        min_formula = "N/A"
-        res_min = None
-        if res and len(res.species) > 50:
-            print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
-            res_min = frag.extract(cif_path, center_idx=center, output_path=None, minimize=True)
-            if res_min:
-                min_atoms = len(res_min.species)
-                min_formula = _get_formula(res_min.species)
+        with _timeout_context(timeout):
+            frag = COFFragmenter(radius=radius, layer_mode=layer_mode)
+            res = frag.extract(cif_path, center_idx=center, output_path=None, minimize=False)
+            norm_atoms = len(res.species) if res else 0
+            norm_formula = _get_formula(res.species) if res else "N/A"
+            min_atoms = "N/A"
+            min_formula = "N/A"
+            res_min = None
+            if res and len(res.species) > 50:
+                print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
+                res_min = frag.extract(cif_path, center_idx=center, output_path=None, minimize=True)
+                if res_min:
+                    min_atoms = len(res_min.species)
+                    min_formula = _get_formula(res_min.species)
         return {
             "cif": os.path.basename(cif_path),
             "norm_atoms": norm_atoms,
@@ -5454,6 +5480,22 @@ def _process_cof_file(args_tuple):
             "min_formula": min_formula,
             "norm_res": res,
             "min_res": res_min,
+        }
+    except TimeoutError as e:
+        print(f"[{base}] TimeoutError: {e}")
+        try:
+            import shutil
+            dest_dir = os.path.join(os.path.dirname(cif_path), "timed_out_structures")
+            os.makedirs(dest_dir, exist_ok=True)
+            shutil.move(cif_path, os.path.join(dest_dir, os.path.basename(cif_path)))
+            print(f"[{base}] Moved timed-out file to {dest_dir}")
+        except Exception as move_err:
+            print(f"[{base}] Failed to move timed-out file: {move_err}")
+        return {
+            "cif": os.path.basename(cif_path),
+            "norm_atoms": "TIMEOUT", "norm_formula": "TIMEOUT",
+            "min_atoms": "TIMEOUT", "min_formula": "TIMEOUT",
+            "norm_res": None, "min_res": None,
         }
     except Exception as e:
         print(f"[{base}] Error: {e}")
@@ -5466,25 +5508,42 @@ def _process_cof_file(args_tuple):
 
 
 def _process_bio_file(args_tuple):
-    pdb_path, window_size, stride, use_pdbfixer, ph, chain = args_tuple
+    pdb_path, window_size, stride, use_pdbfixer, ph, chain, timeout = args_tuple
     import os
     base = os.path.basename(pdb_path)
     if base.lower().endswith(".pdb"):
         base = base[:-4]
     try:
-        frag = BioMolFragmenter(
-            window_size=window_size, stride=stride,
-            use_pdbfixer=use_pdbfixer, ph=ph,
-        )
-        # Pass write_files=False to avoid saving individual window XYZs on disk
-        results = frag.extract(pdb_path, output_dir=None, chain=chain, write_files=False)
-        n_windows = len(results) if results else 0
-        total_atoms = sum(len(r.species) for r in results) if results else 0
+        with _timeout_context(timeout):
+            frag = BioMolFragmenter(
+                window_size=window_size, stride=stride,
+                use_pdbfixer=use_pdbfixer, ph=ph,
+            )
+            # Pass write_files=False to avoid saving individual window XYZs on disk
+            results = frag.extract(pdb_path, output_dir=None, chain=chain, write_files=False)
+            n_windows = len(results) if results else 0
+            total_atoms = sum(len(r.species) for r in results) if results else 0
         return {
             "pdb": os.path.basename(pdb_path),
             "n_windows": n_windows,
             "total_atoms": total_atoms,
             "results": results or [],
+        }
+    except TimeoutError as e:
+        print(f"[{base}] TimeoutError: {e}")
+        try:
+            import shutil
+            dest_dir = os.path.join(os.path.dirname(pdb_path), "timed_out_structures")
+            os.makedirs(dest_dir, exist_ok=True)
+            shutil.move(pdb_path, os.path.join(dest_dir, os.path.basename(pdb_path)))
+            print(f"[{base}] Moved timed-out file to {dest_dir}")
+        except Exception as move_err:
+            print(f"[{base}] Failed to move timed-out file: {move_err}")
+        return {
+            "pdb": os.path.basename(pdb_path),
+            "n_windows": "TIMEOUT",
+            "total_atoms": "TIMEOUT",
+            "results": [],
         }
     except Exception as e:
         print(f"[{base}] Error: {e}")
@@ -5495,8 +5554,9 @@ def _process_bio_file(args_tuple):
             "results": [],
         }
 
+
 def _process_mof_file(args_tuple):
-    cif_path, radius, center, nmetals = args_tuple
+    cif_path, radius, center, nmetals, timeout = args_tuple
     import os
     base = os.path.basename(cif_path)
     if base.endswith(".cif"):
@@ -5507,24 +5567,25 @@ def _process_mof_file(args_tuple):
     out_min = None
     
     try:
-        frag = MOFFragmenter(radius=radius)
-        res = frag.extract(cif_path, center_idx=center, nmetals=nmetals,
-                           output_path=out_norm, minimize=False)
-        
-        norm_atoms = len(res.species) if res else 0
-        norm_formula = _get_formula(res.species) if res else "N/A"
-        
-        min_atoms = "N/A"
-        min_formula = "N/A"
-        res_min = None
-        
-        if res and len(res.species) > 50:
-            print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
-            res_min = frag.extract(cif_path, center_idx=center, nmetals=nmetals,
-                                   output_path=out_min, minimize=True)
-            if res_min:
-                min_atoms = len(res_min.species)
-                min_formula = _get_formula(res_min.species)
+        with _timeout_context(timeout):
+            frag = MOFFragmenter(radius=radius)
+            res = frag.extract(cif_path, center_idx=center, nmetals=nmetals,
+                               output_path=out_norm, minimize=False)
+            
+            norm_atoms = len(res.species) if res else 0
+            norm_formula = _get_formula(res.species) if res else "N/A"
+            
+            min_atoms = "N/A"
+            min_formula = "N/A"
+            res_min = None
+            
+            if res and len(res.species) > 50:
+                print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
+                res_min = frag.extract(cif_path, center_idx=center, nmetals=nmetals,
+                                       output_path=out_min, minimize=True)
+                if res_min:
+                    min_atoms = len(res_min.species)
+                    min_formula = _get_formula(res_min.species)
                 
         return {
             "cif": os.path.basename(cif_path),
@@ -5534,6 +5595,25 @@ def _process_mof_file(args_tuple):
             "min_formula": min_formula,
             "norm_res": res,
             "min_res": res_min
+        }
+    except TimeoutError as e:
+        print(f"[{base}] TimeoutError: {e}")
+        try:
+            import shutil
+            dest_dir = os.path.join(os.path.dirname(cif_path), "timed_out_structures")
+            os.makedirs(dest_dir, exist_ok=True)
+            shutil.move(cif_path, os.path.join(dest_dir, os.path.basename(cif_path)))
+            print(f"[{base}] Moved timed-out file to {dest_dir}")
+        except Exception as move_err:
+            print(f"[{base}] Failed to move timed-out file: {move_err}")
+        return {
+            "cif": os.path.basename(cif_path),
+            "norm_atoms": "TIMEOUT",
+            "norm_formula": "TIMEOUT",
+            "min_atoms": "TIMEOUT",
+            "min_formula": "TIMEOUT",
+            "norm_res": None,
+            "min_res": None
         }
     except Exception as e:
         print(f"[{base}] Error: {e}")
@@ -5546,6 +5626,7 @@ def _process_mof_file(args_tuple):
             "norm_res": None,
             "min_res": None
         }
+
 
 
 def main():
@@ -5595,6 +5676,10 @@ def main():
     parser.add_argument(
         "--overwrite", dest="overwrite", action="store_true",
         help="Overwrite previous runs and start from scratch in folder mode (disables auto-continue).",
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=300.0,
+        help="Timeout in seconds for processing a single structure (default 300.0s / 5 min). Set to 0 to disable.",
     )
     args = parser.parse_args()
 
@@ -5655,7 +5740,7 @@ def main():
             if os.path.exists(extxyz_path):
                 seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
                 
-        pool_args = [(cif, args.radius, args.center, args.nmetals) for cif in cif_files]
+        pool_args = [(cif, args.radius, args.center, args.nmetals, args.timeout) for cif in cif_files]
         
         def _flush_mof_result(r, seen_keys, csv_path, extxyz_path, is_dir):
             norm_dup = "no"
@@ -5772,7 +5857,7 @@ def main():
             if os.path.exists(extxyz_path):
                 seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
 
-        pool_args = [(cif, args.radius, args.center, args.cof_layer) for cif in cif_files]
+        pool_args = [(cif, args.radius, args.center, args.cof_layer, args.timeout) for cif in cif_files]
 
         def _flush_cof_result(r, seen_keys, csv_path, extxyz_path, is_dir):
             norm_dup = "no"
@@ -5890,7 +5975,7 @@ def main():
                 seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
 
         pool_args = [
-            (pdb, args.window_size, args.stride, not args.no_pdbfixer, args.ph, args.chain)
+            (pdb, args.window_size, args.stride, not args.no_pdbfixer, args.ph, args.chain, args.timeout)
             for pdb in pdb_files
         ]
 
