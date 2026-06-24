@@ -115,6 +115,10 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Purify parent Zn MOFs by moving structures containing I, Si, Br, B, Se, As to another folder
 CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/purify_zn_cifs.py
 
+# Detect and remove guest/solvent molecules and counter-ions from purified parent Zn MOFs
+/Users/omert/miniconda3/bin/python runUniFrag/remove_guests.py
+
+
 # Plot and update comparative metal distribution histogram for CSD-modified and CSD-unmodified subsets
 /Users/omert/miniconda3/bin/python runUniFrag/plot_metals.py
 

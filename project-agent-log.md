@@ -1284,6 +1284,27 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Validation:
   - Verified that all 6 Boron files were moved back successfully and file counts match.
 
+## 2026-06-24 - Guest Molecule Detection and Removal
+- Changed files:
+  - `runUniFrag/remove_guests.py` [NEW]
+  - `runUniFrag/guest_removal_report.md` [NEW]
+  - Modified 50 parent CIF files under `runUniFrag/zn_cr_cifs_noduplicated/cifs/`
+  - Created backup of 50 original structures in `runUniFrag/zn_cr_cifs_noduplicated/cifs_backup_guests/`
+  - `project-memory.md`
+  - `project-agent-log.md`
+- Summary:
+  - Developed and executed a python script to scan the 1,111 purified Zn parent MOFs for guest molecules.
+  - Used CCDC Python API pre-filtering to identify 50 structures containing guest components (components without Zinc).
+  - Isolated the framework and removed the guests from the 50 structures in-place using Pymatgen and NetworkX connected component graph analysis.
+  - Implemented JmolNN as a robust fallback bonding strategy for 6 problem structures (5 that failed with Voronoi errors in CrystalNN, and 1 structure, RUGXOI, that over-connected its guests to the framework in CrystalNN).
+  - Verified each modified structure with CCDC to confirm complete guest removal while keeping framework structures intact.
+  - Generated a comprehensive markdown report listing all cleaned refcodes, original vs cleaned formulas, and removed atom counts.
+- Validation:
+  - Confirmed all 50 parent CIF structures were successfully purified.
+  - CCDC post-cleaning verification shows 0 remaining guest components across all 50 files.
+  - Backups of all 50 original structures are safely stored in `cifs_backup_guests/`.
+
+
 
 
 
