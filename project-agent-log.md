@@ -1261,4 +1261,17 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Validation:
   - Checked that output CSV was successfully created in both the workspace and the brain artifacts directory.
 
+## 2026-06-24 - Purify Zn parent MOF CIF collection
+- Changed files:
+  - `runUniFrag/purify_zn_cifs.py` [NEW]
+  - `project-memory.md`
+  - `project-agent-log.md`
+- Summary:
+  - Wrote and ran `runUniFrag/purify_zn_cifs.py` to separate CIFs containing heavy/semi-metal elements (`I`, `Si`, `Br`, `B`, `Se`, `As`) into a dedicated folder.
+  - Successfully moved exactly **115** parent CIFs to `runUniFrag/zn_cr_cifs_noduplicated/cifs_heavy_elements/`.
+  - Left exactly **1,105** purified structures in the main `runUniFrag/zn_cr_cifs_noduplicated/cifs/` directory.
+- Validation:
+  - Verified that the remaining file count is exactly 1,105 and the moved files are present in the target directory.
+
+
 

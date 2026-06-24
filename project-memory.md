@@ -112,6 +112,9 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Extract parent Zn MOFs with Zn CN=0, 1, or 3 to a separate CSV file
 CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/extract_low_coordination_mofs.py
 
+# Purify parent Zn MOFs by moving structures containing I, Si, Br, B, Se, As to another folder
+CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/purify_zn_cifs.py
+
 # Plot and update comparative metal distribution histogram for CSD-modified and CSD-unmodified subsets
 /Users/omert/miniconda3/bin/python runUniFrag/plot_metals.py
 
