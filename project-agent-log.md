@@ -1248,3 +1248,17 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
   - Confirmed 0 mapping errors across all 3,010 Zn centers in the fragments collection.
   - Checked that output markdown and distribution plot are correctly written to the workspace and the brain artifacts directory.
 
+## 2026-06-24 - Extract parent Zn MOFs with Zn CN=0, 1, or 3
+- Changed files:
+  - `runUniFrag/extract_low_coordination_mofs.py` [NEW]
+  - `runUniFrag/zn_low_coordination_parents.csv` [NEW]
+  - `project-memory.md`
+  - `project-agent-log.md`
+- Summary:
+  - Wrote and ran `runUniFrag/extract_low_coordination_mofs.py` to filter parent MOFs containing Zn centers with CN in [0, 1, 3].
+  - Identified exactly **1,198** parent structures containing at least one low-coordination Zn atom.
+  - Exported the results mapping refcodes to their specific CN=0, 1, 3 environments.
+- Validation:
+  - Checked that output CSV was successfully created in both the workspace and the brain artifacts directory.
+
+
