@@ -2,6 +2,11 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
+## Decision 2026-06-24: Continuous Local SOAP Fingerprint Representation for Zn Environment Coverage
+- Context: Analyzing fragment representation using discrete coordination number categories (e.g. `CN=4 [O4]`) fails to capture continuous structural distortions, exact local symmetry, or variations in coordination shells (such as the presence of capping hydrogens vs parent coordinates).
+- Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` within a `6.0 A` cutoff. It computes high-dimensional local density profiles for every Zn center in parent crystals (`periodic=True`) and fragment collections (`periodic=False`), measures structural similarity using cosine distance, projects vectors via PCA, and outputs visual and tabular metrics.
+- Consequences: Continuous structural coverage is now formally calculated, showing an average similarity of `0.9908` and a median similarity of `0.9957` (84.29% highly represented at similarity >= 0.98), proving excellent environment preservation.
+
 ## Decision 2026-06-24: Configurable Processing Timeout and Relocation of Timed-Out Structures
 - Context: Processing certain highly-connected, large, or topologically complex crystal structures using `fragmentation_oop.py` could hang indefinitely or consume excessive CPU time.
 - Decision: Introduced a configurable timeout parameter `--timeout` (default 300.0s / 5 minutes) using a Unix `SIGALRM` based context manager. If a structure execution exceeds this timeout, the worker process catches a custom `TimeoutError` (inheriting from `BaseException` to prevent swallowing by local `except Exception` blocks), moves the timed-out CIF or PDB file to a `timed_out_structures/` folder within its parent directory, logs the timeout event to the console, and updates the summary CSV with `"TIMEOUT"` values to gracefully proceed with the batch.

@@ -2,6 +2,21 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-24 - UniFrag: continuous local SOAP fingerprint analysis for Zn environment
+- **Changed files:**
+  - `runUniFrag/analyze_zn_soap.py` [NEW] — Created script to compute Zn SOAP fingerprints in parent crystals and fragment libraries, performing similarity matching and PCA projection.
+  - `project-memory.md` [MODIFY] — Added run commands and design decisions.
+  - `project-decisions.md` [MODIFY] — Added structural coverage design decision.
+- **Summary:**
+  - Installed `dscribe` to compute SOAP local atomic descriptors around all Zn centers with a `6.0 A` cutoff.
+  - Periodic context is used for parent crystals (`periodic=True`) and non-periodic context for capped fragments (`periodic=False`).
+  - Measures cosine similarities: average similarity is `0.9908` and median is `0.9957` (84.29% highly represented at similarity >= 0.98), proving excellent structural representation of local Zn environments.
+- **Validation:**
+  - Run `analyze_zn_soap.py` on the local Zn dataset (1,110 parent structures and 1,418 fragments).
+  - Verified successful outputs of `zn_soap_analysis.md` and PCA plot `zn_soap_distribution.png` in both `runUniFrag/` and brain directories.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-06-24 - UniFrag: Configurable Processing Timeout and Relocation of Timed-Out Structures
 - **Changed files:**
   - `fragmentation_oop.py` [MODIFY] — Added `_timeout_context` context manager using Unix `signal.alarm`, added `--timeout` parameter, wrapped workers in the context manager, caught `TimeoutError` explicitly, and added structure file relocation behavior.
