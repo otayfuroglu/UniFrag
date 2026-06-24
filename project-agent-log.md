@@ -2,6 +2,21 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-24 - UniFrag: Configurable SOAP Cutoff and Side-by-side PCA/UMAP Projections
+- **Changed files:**
+  - `runUniFrag/analyze_zn_soap.py` [MODIFY] — Added `umap` projection to the dimensionality reduction step, updated the plot layout to show PCA and UMAP side-by-side, resolved remaining hardcoded cutoff references in the report template, and set default parameters for reproducible UMAP projections.
+  - `project-memory.md` [MODIFY] — Documented user-configurable commands and updated decision logs.
+  - `project-decisions.md` [MODIFY] — Updated the SOAP environment coverage decision log.
+- **Summary:**
+  - Installed `umap-learn` package (version `<=0.5.6` to preserve compatibility with `scikit-learn 1.5.2` and `csd-python-api`).
+  - Added UMAP dimension reduction calculation using cosine distance metric (matches cosine similarity analysis).
+  - Updated visualization from a single PCA plot to a side-by-side 1x2 PCA and UMAP subplot grid in `zn_soap_distribution.png`.
+  - Updated the markdown report template in the analysis script to dynamically insert the chosen cutoff in all text fields and included discussion on PCA vs UMAP.
+- **Validation:**
+  - Ran the analysis with default cutoff (`--r_cut 6.0`) and custom cutoff (`--r_cut 5.0`). Both finished successfully, writing reports and combined figures in `runUniFrag/` and brain artifacts directories.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-06-24 - UniFrag: continuous local SOAP fingerprint analysis for Zn environment
 - **Changed files:**
   - `runUniFrag/analyze_zn_soap.py` [NEW] — Created script to compute Zn SOAP fingerprints in parent crystals and fragment libraries, performing similarity matching and PCA projection.

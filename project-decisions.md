@@ -2,10 +2,10 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
-## Decision 2026-06-24: Continuous Local SOAP Fingerprint Representation for Zn Environment Coverage
+## Decision 2026-06-24: Continuous Local SOAP Fingerprint Representation with Configurable Cutoff and PCA/UMAP
 - Context: Analyzing fragment representation using discrete coordination number categories (e.g. `CN=4 [O4]`) fails to capture continuous structural distortions, exact local symmetry, or variations in coordination shells (such as the presence of capping hydrogens vs parent coordinates).
-- Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` within a `6.0 A` cutoff. It computes high-dimensional local density profiles for every Zn center in parent crystals (`periodic=True`) and fragment collections (`periodic=False`), measures structural similarity using cosine distance, projects vectors via PCA, and outputs visual and tabular metrics.
-- Consequences: Continuous structural coverage is now formally calculated, showing an average similarity of `0.9908` and a median similarity of `0.9957` (84.29% highly represented at similarity >= 0.98), proving excellent environment preservation.
+- Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` with a user-configurable cutoff (`--r_cut`, default `6.0 A`). It computes high-dimensional local density profiles for every Zn center in parent crystals (`periodic=True`) and fragment collections (`periodic=False`), measures structural similarity using cosine distance, projects vectors via PCA and UMAP, and outputs visual and tabular metrics.
+- Consequences: Continuous structural coverage is now formally calculated, showing an average similarity of `0.9908` and a median similarity of `0.9957` (84.29% highly represented at similarity >= 0.98 for 6.0 A cutoff), proving excellent environment preservation. Side-by-side PCA and UMAP projections are generated as a combined scatter plot `zn_soap_distribution.png` to map both linear global variance and non-linear neighborhood topology.
 
 ## Decision 2026-06-24: Configurable Processing Timeout and Relocation of Timed-Out Structures
 - Context: Processing certain highly-connected, large, or topologically complex crystal structures using `fragmentation_oop.py` could hang indefinitely or consume excessive CPU time.

@@ -16,11 +16,11 @@ SOAP compares environments within a continuous **6.0 Å cutoff**, capturing deta
 | **$[0.90, 0.98)$** | Moderately Represented | 1424 | **15.52%** | Local environment is structurally similar, with minor variations (e.g. capped bonds, minor coordinates shift). |
 | **$< 0.90$** | Poorly Represented / Missing | 18 | **0.20%** | Environment has significant structural/coordination divergence in the fragment library. |
 
-## PCA Environment Distribution Map
+## PCA and UMAP Environment Distribution Map
 
-Below is a 2D PCA projection of the SOAP fingerprints. The overlap of the parent (blue) and fragment (green) points visually represents chemical coverage:
+Below are 2D PCA and UMAP projections of the SOAP fingerprints. The close overlap between parent crystal centers (blue) and fragment library centers (green) visually demonstrates excellent chemical coverage:
 
-![Zn SOAP PCA Map](file:///Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_distribution.png)
+![Zn SOAP PCA and UMAP Map](file:///Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_distribution.png)
 
 ## Poorly Represented Zn Environments (Bottom 25 Worst Matches)
 
@@ -64,6 +64,10 @@ These Zn centers in parent crystals have the lowest similarity scores to any fra
    
 3. **Capping Effects**:
    Capped terminals (like O-H, C-H) introduce small hydrogen atoms at boundaries that were originally occupied by other framework atoms. This contributes to moderate similarity values ($0.90 - 0.98$) for some Zn centers located close to linker cut sites.
+
+4. **PCA vs UMAP Projection**:
+   * **PCA** shows the global directions of largest linear variance, capturing the primary geometric axes of Zn-coordination variations across the dataset.
+   * **UMAP** preserves non-linear local neighborhood structures. The tight grouping and consistent overlap in UMAP space further verify that the fragment library does not form isolated topological clusters detached from the parent distributions, but rather covers the continuous space of parent environments.
 
 ## Conclusion
 

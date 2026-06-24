@@ -109,8 +109,11 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Run Zn coordination environment analysis and compare parent MOFs vs fragments library
 CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/analyze_zn_coordination.py
 
-# Run Zn-centered SOAP fingerprint environment analysis (6.0 A cutoff)
+# Run Zn-centered SOAP fingerprint environment analysis (configurable cutoff, PCA + UMAP)
+# Default 6.0 A cutoff:
 /Users/omert/miniconda3/bin/python runUniFrag/analyze_zn_soap.py
+# Custom cutoff (e.g. 5.0 A):
+/Users/omert/miniconda3/bin/python runUniFrag/analyze_zn_soap.py --r_cut 5.0
 
 # Extract parent Zn MOFs with Zn CN=0, 1, or 3 to a separate CSV file
 CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/extract_low_coordination_mofs.py
@@ -361,9 +364,9 @@ Use this section only if you want this template to include a concrete reference 
 - Decision: Introduced a configurable timeout parameter `--timeout` (default 300.0s / 5 minutes) using a Unix `SIGALRM` based context manager. If a structure execution exceeds this timeout, the worker process catches a custom `TimeoutError` (inheriting from `BaseException` to prevent swallowing by local `except Exception` blocks), moves the timed-out CIF or PDB file to a `timed_out_structures/` folder within its parent directory, logs the timeout event to the console, and updates the summary CSV with `"TIMEOUT"` values to gracefully proceed with the batch.
 - Consequences: Long-running or stuck structures are isolated automatically, preventing stalls in the batch execution pipeline.
 
-### Decision 2026-06-24: Continuous Local SOAP Fingerprint Representation for Zn Environment Coverage
+### Decision 2026-06-24: Continuous Local SOAP Fingerprint Representation with Configurable Cutoff and PCA/UMAP
 - Context: Analyzing fragment representation using discrete coordination number categories (e.g. `CN=4 [O4]`) fails to capture continuous structural distortions, exact local symmetry, or variations in coordination shells (such as the presence of capping hydrogens vs parent coordinates).
-- Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` within a `6.0 A` cutoff. It computes high-dimensional local density profiles for every Zn center in parent crystals (`periodic=True`) and fragment collections (`periodic=False`), measures structural similarity using cosine distance, projects vectors via PCA, and outputs visual and tabular metrics.
-- Consequences: Continuous structural coverage is now formally calculated, showing an average similarity of `0.9908` and a median similarity of `0.9957` (84.29% highly represented at similarity >= 0.98), proving excellent environment preservation.
+- Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` with a user-configurable cutoff (`--r_cut`, default `6.0 A`). It computes high-dimensional local density profiles for every Zn center in parent crystals (`periodic=True`) and fragment collections (`periodic=False`), measures structural similarity using cosine distance, projects vectors via PCA and UMAP, and outputs visual and tabular metrics.
+- Consequences: Continuous structural coverage is now formally calculated, showing an average similarity of `0.9908` and a median similarity of `0.9957` (84.29% highly represented at similarity >= 0.98 for 6.0 A cutoff), proving excellent environment preservation. Side-by-side PCA and UMAP projections are generated as a combined scatter plot `zn_soap_distribution.png` to map both linear global variance and non-linear neighborhood topology.
 
 
