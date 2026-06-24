@@ -118,6 +118,14 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Detect and remove guest/solvent molecules and counter-ions from purified parent Zn MOFs
 /Users/omert/miniconda3/bin/python runUniFrag/remove_guests.py
 
+# Convert a linker library folder (from moffragmentor helper) to a QM-ready ExtXYZ collection
+# Outputs <linker_folder>/linkers_collection.extxyz with label=<REFCODE>LinkerMof
+# Also outputs a summary CSV file <linker_folder>/linkers_collection_summary.csv
+# Includes even-electron QM-fix and heavy-atom formula deduplication
+/Users/omert/miniconda3/bin/python runUniFrag/prepare_linker_extxyz.py mof_linkers_lib/
+# Optional: specify a custom output path
+/Users/omert/miniconda3/bin/python runUniFrag/prepare_linker_extxyz.py mof_linkers_lib/ runUniFrag/zn_cr_cifs_noduplicated/linkers_collection.extxyz
+
 
 # Plot and update comparative metal distribution histogram for CSD-modified and CSD-unmodified subsets
 /Users/omert/miniconda3/bin/python runUniFrag/plot_metals.py

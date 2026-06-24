@@ -2,6 +2,37 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-24 - UniFrag: Linker QM-Ready Summary CSV Output
+- **Changed files:**
+  - `runUniFrag/prepare_linker_extxyz.py` [MODIFY] — Added CSV summary generation reporting metadata for each processed structure.
+  - `project-memory.md` [MODIFY] — Updated command instructions to reference the output summary CSV.
+- **Summary:**
+  - Added code to collect detailed metadata for each parsed structure in `prepare_linker_extxyz.py`, including `filename`, `label`, `num_atoms`, `num_heavy_atoms`, `num_hydrogens`, `formula`, `metals_stripped`, `atoms_capped`, `qm_fixed` status, and processing `status` / `reason`.
+  - The script now writes a matching summary CSV file alongside the `.extxyz` file (e.g. `mof_linkers_lib/linkers_collection_summary.csv`).
+- **Validation:**
+  - Executed the script on `mof_linkers_lib/` with python.
+  - Verified successful generation of `/Users/omert/Desktop/UniFrag_main/UniFrag/mof_linkers_lib/linkers_collection_summary.csv` with 222 data rows and the requested column metrics.
+- **Follow-up risks:**
+  - None.
+
+## 2026-06-24 - UniFrag: Linker QM-Ready ExtXYZ Post-Processing Script
+- **Changed files:**
+  - `runUniFrag/prepare_linker_extxyz.py` [NEW] — Post-processing script that converts a linker .xyz library folder (produced by moffragmentor helper fragmentation) into a single QM-ready ExtXYZ collection file (`linkers_collection.extxyz`).
+  - `project-memory.md` [MODIFY] — Added `prepare_linker_extxyz.py` command to the Run section.
+- **Summary:**
+  - The script reads every `.xyz` file in a given folder, applies even-electron QM-fix (mirrors `fix_odd_electron_multiplicity` from `fragmentation_oop.py`), deduplicates by heavy-atom composition key, and writes each unique linker as an ExtXYZ frame with the label convention `{REFCODE}LinkerMof`.
+  - Label naming: `MOYPOG_00.xyz` → `MOYPOGLinkerMof`; for multi-character stems like `2016_Mg__stp_3_ASR_1_00.xyz` → `2016MgStp3ASR1LinkerMof`. Second linker for same stem uses `{stem}01LinkerMof`.
+  - Run on `mof_linkers_lib/` (222 input files): 222 frames written, 0 duplicates, 86 QM-fixes (H removed).
+  - Output: `mof_linkers_lib/linkers_collection.extxyz`
+- **Validation:**
+  - Ran full batch on `mof_linkers_lib/` — all 222 XYZ files processed without errors.
+  - Confirmed output ExtXYZ format matches existing pipeline (`Properties=species:S:1:pos:R:3 label=...LinkerMof pbc="F F F"`).
+  - Verified 222 frames in output file via `grep "LinkerMof" ... | wc -l`.
+- **Follow-up risks:**
+  - 86 linkers had odd electron counts and required H removal. These should be reviewed before QM production runs — particularly structures like `CACZUF` (As1O4, no H, could not be fixed) and `PIDNEX` (C26N1, no H).
+  - The QM-fix currently removes the H with the fewest heavy-atom neighbors. For open-shell/radical linkers, manual review or a higher-level charge/multiplicity assignment may be needed.
+
+
 ## 2026-06-23 - UniFrag: Collect modified screening MOFs using CSD-modified cifs
 - **Changed files:**
   - `runUniFrag/collect_modified_screening_mofs.py` [NEW] — Created a script to read `8806-recommended-screening-list.txt`, map standard REFCODE filenames to their corresponding `coreid` names using the CR CSV mapping, and copy them from `CSD-modified/cifs/` to the target folder.
