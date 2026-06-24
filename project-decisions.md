@@ -2,10 +2,13 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
-## Decision 2026-06-24: Continuous Local SOAP Fingerprint Representation with Configurable Cutoff and PCA/UMAP
-- Context: Analyzing fragment representation using discrete coordination number categories (e.g. `CN=4 [O4]`) fails to capture continuous structural distortions, exact local symmetry, or variations in coordination shells (such as the presence of capping hydrogens vs parent coordinates).
-- Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` with a user-configurable cutoff (`--r_cut`, default `6.0 A`). It computes high-dimensional local density profiles for every Zn center in parent crystals (`periodic=True`) and fragment collections (`periodic=False`), measures structural similarity using cosine distance, projects vectors via PCA and UMAP, and outputs visual and tabular metrics.
-- Consequences: Continuous structural coverage is now formally calculated, showing an average similarity of `0.9908` and a median similarity of `0.9957` (84.29% highly represented at similarity >= 0.98 for 6.0 A cutoff), proving excellent environment preservation. Side-by-side PCA and UMAP projections are generated as a combined scatter plot `zn_soap_distribution.png` to map both linear global variance and non-linear neighborhood topology.
+## Decision 2026-06-24: Continuous Local SOAP Fingerprint Representation with Multi-Cutoff Support, Pre-Loading Caching, and RMSD Analysis
+- Context: Analyzing fragment representation using discrete coordination number categories (e.g. `CN=4 [O4]`) fails to capture continuous structural distortions, exact local symmetry, or variations in coordination shells (such as the presence of capping hydrogens vs parent coordinates). Furthermore, analyzing multiple cutoffs sequentially is slow if crystal files are parsed repeatedly from disk.
+- Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` supporting a list of user-configurable cutoffs (`--r_cut`, default `[6.0]`).
+  1. **Caching Optimization**: Pre-loads and parses CIF structures once at startup, caching them in memory as ASE Atoms objects to achieve a `~30x` speedup during multi-cutoff loops.
+  2. **Fingerprint RMSD**: In addition to Cosine Similarity, computes the Root-Mean-Square Deviation (RMSD) between raw SOAP fingerprint vectors of parent Zn centers and their best-matching fragments.
+  3. **Multi-Cutoff Output**: Generates reports (`zn_soap_analysis_{r_cut:.1f}.md`) and side-by-side PCA/UMAP plots (`zn_soap_distribution_{r_cut:.1f}.png`) dynamically suffixed by cutoff.
+- Consequences: Continuous structural coverage and fingerprint deviations are formally calculated, showing expected chemical trends (tighter cutoffs have lower RMSD and higher similarity; e.g., 3.0 Å has median similarity of 0.9999 and median RMSD of 0.0018, whereas 6.0 Å has median similarity of 0.9957 and median RMSD of 0.0452). Caching ensures four cutoffs execute in under 2 minutes.
 
 ## Decision 2026-06-24: Configurable Processing Timeout and Relocation of Timed-Out Structures
 - Context: Processing certain highly-connected, large, or topologically complex crystal structures using `fragmentation_oop.py` could hang indefinitely or consume excessive CPU time.

@@ -8,6 +8,8 @@ SOAP compares environments within a continuous **4.0 Å cutoff**, capturing deta
 
 * **Average SOAP Cosine Similarity**: `0.9976`
 * **Median SOAP Cosine Similarity**: `0.9995`
+* **Average SOAP Fingerprint RMSD**: `0.0120`
+* **Median SOAP Fingerprint RMSD**: `0.0084`
 * **Total Zn Centers Analyzed**: `9176`
 
 | Similarity Range | Category | Count | Percentage | Description |
@@ -20,39 +22,39 @@ SOAP compares environments within a continuous **4.0 Å cutoff**, capturing deta
 
 Below are 2D PCA and UMAP projections of the SOAP fingerprints. The close overlap between parent crystal centers (blue) and fragment library centers (green) visually demonstrates excellent chemical coverage:
 
-![Zn SOAP PCA and UMAP Map](file:///Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_distribution.png)
+![Zn SOAP PCA and UMAP Map](file:///Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_distribution_4.0.png)
 
 ## Poorly Represented Zn Environments (Bottom 25 Worst Matches)
 
 These Zn centers in parent crystals have the lowest similarity scores to any fragment in the library, highlighting potential distortions caused by capping or trimming:
 
-| Rank | Parent REFCODE | Zn Index | Max Cosine Similarity | Best Matching Fragment |
-| :---: | :---: | :---: | :---: | :--- |
-| 1 | `REDYEG` | 0 | `0.8253` | `REDYEGFragMof` |
-| 2 | `REDYEG` | 1 | `0.8253` | `REDYEGFragMof` |
-| 3 | `OQOXAV` | 3 | `0.8328` | `OQOXAVFragMof` |
-| 4 | `OQOXAV` | 4 | `0.8328` | `OQOXAVFragMof` |
-| 5 | `OQOXAV` | 2 | `0.8328` | `OQOXAVFragMof` |
-| 6 | `OQOXAV` | 5 | `0.8328` | `OQOXAVFragMof` |
-| 7 | `RUMRUO` | 1 | `0.8331` | `OQOXAVFragMof` |
-| 8 | `RUMRUO` | 0 | `0.8331` | `OQOXAVFragMof` |
-| 9 | `REDYEG` | 2 | `0.8813` | `REDYEGFragMof` |
-| 10 | `REDYEG` | 4 | `0.8813` | `REDYEGFragMof` |
-| 11 | `REDYEG` | 3 | `0.8813` | `REDYEGFragMof` |
-| 12 | `REDYEG` | 5 | `0.8813` | `REDYEGFragMof` |
-| 13 | `MOMRIR` | 8 | `0.9110` | `CACBUGFragMofMin` |
-| 14 | `MOMRIR` | 6 | `0.9110` | `CACBUGFragMofMin` |
-| 15 | `MOMRIR` | 7 | `0.9110` | `CACBUGFragMofMin` |
-| 16 | `MOMRIR` | 9 | `0.9110` | `CACBUGFragMofMin` |
-| 17 | `MOMRIR` | 14 | `0.9131` | `CACBUGFragMofMin` |
-| 18 | `MOMRIR` | 15 | `0.9131` | `CACBUGFragMofMin` |
-| 19 | `WAWGOQ` | 1 | `0.9299` | `MUDTAJFragMofMin` |
-| 20 | `WAWGOQ` | 5 | `0.9299` | `MUDTAJFragMofMin` |
-| 21 | `WAWGOQ` | 0 | `0.9299` | `MUDTAJFragMofMin` |
-| 22 | `WAWGOQ` | 4 | `0.9299` | `MUDTAJFragMofMin` |
-| 23 | `XATZOK` | 0 | `0.9301` | `MUDTAJFragMofMin` |
-| 24 | `XATZOK` | 3 | `0.9301` | `MUDTAJFragMofMin` |
-| 25 | `XAGDAL` | 2 | `0.9490` | `NINTEMFragMof` |
+| Rank | Parent REFCODE | Zn Index | Max Cosine Similarity | Fingerprint RMSD | Best Matching Fragment |
+| :---: | :---: | :---: | :---: | :---: | :--- |
+| 1 | `REDYEG` | 0 | `0.8253` | `0.1392` | `REDYEGFragMof` |
+| 2 | `REDYEG` | 1 | `0.8253` | `0.1392` | `REDYEGFragMof` |
+| 3 | `OQOXAV` | 3 | `0.8328` | `0.1680` | `OQOXAVFragMof` |
+| 4 | `OQOXAV` | 4 | `0.8328` | `0.1680` | `OQOXAVFragMof` |
+| 5 | `OQOXAV` | 2 | `0.8328` | `0.1680` | `OQOXAVFragMof` |
+| 6 | `OQOXAV` | 5 | `0.8328` | `0.1680` | `OQOXAVFragMof` |
+| 7 | `RUMRUO` | 1 | `0.8331` | `0.1675` | `OQOXAVFragMof` |
+| 8 | `RUMRUO` | 0 | `0.8331` | `0.1675` | `OQOXAVFragMof` |
+| 9 | `REDYEG` | 2 | `0.8813` | `0.1106` | `REDYEGFragMof` |
+| 10 | `REDYEG` | 4 | `0.8813` | `0.1106` | `REDYEGFragMof` |
+| 11 | `REDYEG` | 3 | `0.8813` | `0.1106` | `REDYEGFragMof` |
+| 12 | `REDYEG` | 5 | `0.8813` | `0.1106` | `REDYEGFragMof` |
+| 13 | `MOMRIR` | 8 | `0.9110` | `0.1388` | `CACBUGFragMofMin` |
+| 14 | `MOMRIR` | 6 | `0.9110` | `0.1388` | `CACBUGFragMofMin` |
+| 15 | `MOMRIR` | 7 | `0.9110` | `0.1388` | `CACBUGFragMofMin` |
+| 16 | `MOMRIR` | 9 | `0.9110` | `0.1388` | `CACBUGFragMofMin` |
+| 17 | `MOMRIR` | 14 | `0.9131` | `0.1387` | `CACBUGFragMofMin` |
+| 18 | `MOMRIR` | 15 | `0.9131` | `0.1387` | `CACBUGFragMofMin` |
+| 19 | `WAWGOQ` | 1 | `0.9299` | `0.0955` | `MUDTAJFragMofMin` |
+| 20 | `WAWGOQ` | 5 | `0.9299` | `0.0955` | `MUDTAJFragMofMin` |
+| 21 | `WAWGOQ` | 0 | `0.9299` | `0.0955` | `MUDTAJFragMofMin` |
+| 22 | `WAWGOQ` | 4 | `0.9299` | `0.0955` | `MUDTAJFragMofMin` |
+| 23 | `XATZOK` | 0 | `0.9301` | `0.0958` | `MUDTAJFragMofMin` |
+| 24 | `XATZOK` | 3 | `0.9301` | `0.0958` | `MUDTAJFragMofMin` |
+| 25 | `XAGDAL` | 2 | `0.9490` | `0.1421` | `NINTEMFragMof` |
 
 ## Discussion & Chemical Analysis
 
