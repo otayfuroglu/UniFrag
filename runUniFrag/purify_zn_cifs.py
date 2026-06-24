@@ -13,7 +13,7 @@ def main():
     cif_paths = sorted(glob.glob(os.path.join(cif_dir, "*.cif")))
     print(f"Scanning {len(cif_paths)} parent CIFs in {cif_dir}...")
     
-    heavy_elements = {'I', 'Si', 'Br', 'B', 'Se', 'As'}
+    heavy_elements = {'I', 'Si', 'Br', 'Se', 'As'}
     moved_count = 0
     moved_files = []
     

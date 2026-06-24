@@ -1273,5 +1273,17 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Validation:
   - Verified that the remaining file count is exactly 1,105 and the moved files are present in the target directory.
 
+## 2026-06-24 - Revert Boron (B) purification exclusion
+- Changed files:
+  - `runUniFrag/purify_zn_cifs.py`
+  - `project-agent-log.md`
+- Summary:
+  - Removed Boron (`B`) from the exclusion list in `runUniFrag/purify_zn_cifs.py`.
+  - Moved the **6** Boron-containing structures (`CUGFAN`, `FAFJIH`, `GATSAY`, `HABREJ`, `HABRIN`, `WORSUT`) from `cifs_heavy_elements/` back to `runUniFrag/zn_cr_cifs_noduplicated/cifs/`.
+  - Restored the main `cifs/` directory to exactly **1,111** structures, leaving exactly **109** structures in `cifs_heavy_elements/`.
+- Validation:
+  - Verified that all 6 Boron files were moved back successfully and file counts match.
+
+
 
 
