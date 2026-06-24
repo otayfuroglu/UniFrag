@@ -106,6 +106,9 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Run atom types coverage analysis and compare parent MOFs vs fragments library
 CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/analyze_atom_types.py
 
+# Run Zn coordination environment analysis and compare parent MOFs vs fragments library
+CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/analyze_zn_coordination.py
+
 # Plot and update comparative metal distribution histogram for CSD-modified and CSD-unmodified subsets
 /Users/omert/miniconda3/bin/python runUniFrag/plot_metals.py
 

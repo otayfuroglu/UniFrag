@@ -1230,3 +1230,21 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Validation:
   - Confirmed 0 mapping errors across all 1,465 fragments.
   - Checked that output markdown and distribution plot are correctly written to the workspace and the brain artifacts directory.
+
+## 2026-06-24 - Zn coordination environment analysis and parent-fragment comparison
+- Changed files:
+  - `runUniFrag/analyze_zn_coordination.py` [NEW]
+  - `runUniFrag/zn_coordination_analysis.md` [NEW]
+  - `runUniFrag/zn_coordination_distribution.png` [NEW]
+  - `project-memory.md`
+  - `project-agent-log.md`
+- Summary:
+  - Developed and ran `runUniFrag/analyze_zn_coordination.py` to compare Zn coordination environments.
+  - Identified 68 unique coordination shells in the 1,220 parents (CN=0 to CN=9 with O, N, S, Zn, and Halogens).
+  - Achieved **67.65%** coverage (46 / 68 types) for Method A (Mapped) and **70.59%** (48 / 68 types) for Method B (Direct).
+  - Explained that the missing environments correspond to lone guest ions, incomplete crystallographic CIF parameters, or rare halogen/metal clusters.
+  - Generated a comparative relative-frequency bar chart of the top 10 Zn environments and a detailed markdown report.
+- Validation:
+  - Confirmed 0 mapping errors across all 3,010 Zn centers in the fragments collection.
+  - Checked that output markdown and distribution plot are correctly written to the workspace and the brain artifacts directory.
+
