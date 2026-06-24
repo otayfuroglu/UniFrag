@@ -122,9 +122,9 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Outputs <linker_folder>/linkers_collection.extxyz with label=<REFCODE>LinkerMof
 # Also outputs a summary CSV file <linker_folder>/linkers_collection_summary.csv
 # Includes even-electron QM-fix and heavy-atom formula deduplication
-/Users/omert/miniconda3/bin/python runUniFrag/prepare_linker_extxyz.py mof_linkers_lib/
+/Users/omert/miniconda3/bin/python runUniFrag/prepare_linker4qm.py mof_linkers_lib/
 # Optional: specify a custom output path
-/Users/omert/miniconda3/bin/python runUniFrag/prepare_linker_extxyz.py mof_linkers_lib/ runUniFrag/zn_cr_cifs_noduplicated/linkers_collection.extxyz
+/Users/omert/miniconda3/bin/python runUniFrag/prepare_linker4qm.py mof_linkers_lib/ runUniFrag/zn_cr_cifs_noduplicated/linkers_collection.extxyz
 
 
 # Plot and update comparative metal distribution histogram for CSD-modified and CSD-unmodified subsets

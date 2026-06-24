@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-prepare_linker_extxyz.py
+prepare_linker4qm.py
 
 Post-processing script that converts a folder of linker structure files
 (.xyz or .cif, produced by UniFrag/moffragmentor helper fragmentation) into
@@ -22,7 +22,7 @@ fragmentation_oop.py:
   Step 7  Write ExtXYZ frame with label=<REFCODE>LinkerMof
 
 Usage:
-    python runUniFrag/prepare_linker_extxyz.py <linker_folder> [output_extxyz]
+    python runUniFrag/prepare_linker4qm.py <linker_folder> [output_extxyz]
 
 Arguments:
     linker_folder   Path to folder containing .xyz and/or .cif linker files
@@ -761,7 +761,7 @@ def _make_label(stem, extra_index):
 # Main
 # ---------------------------------------------------------------------------
 
-def prepare_linker_extxyz(linker_folder, output_extxyz=None):
+def prepare_linker4qm(linker_folder, output_extxyz=None):
     """Full QM-ready linker preparation pipeline."""
 
     if output_extxyz is None:
@@ -962,4 +962,4 @@ if __name__ == "__main__":
         sys.exit(1)
     folder = sys.argv[1]
     out    = sys.argv[2] if len(sys.argv) > 2 else None
-    prepare_linker_extxyz(folder, out)
+    prepare_linker4qm(folder, out)

@@ -2,6 +2,17 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-24 - UniFrag: Rename Script to prepare_linker4qm.py
+- **Changed files:**
+  - `runUniFrag/prepare_linker_extxyz.py` -> `runUniFrag/prepare_linker4qm.py` [RENAME] — Renamed the post-processing script.
+  - `project-memory.md` [MODIFY] — Updated execution command paths to use the new name.
+- **Summary:**
+  - Renamed `prepare_linker_extxyz.py` to `prepare_linker4qm.py` to align with script's ultimate goal (preparing linkers for QM calculations).
+- **Validation:**
+  - Ran the renamed script successfully on the `mof_linkers_lib/` dataset and confirmed identical output behavior.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-06-24 - UniFrag: Linker QM-Ready Summary CSV Output
 - **Changed files:**
   - `runUniFrag/prepare_linker_extxyz.py` [MODIFY] — Added CSV summary generation reporting metadata for each processed structure.
