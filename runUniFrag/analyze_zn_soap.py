@@ -72,8 +72,8 @@ def main():
         print(f"Analyzing with Cutoff r_cut = {r_cut} Å")
         print(f"==================================================")
         
-        output_md_path = f"/Users/omert/Desktop/UniFrag_main/UniFrag/runUniFrag/zn_soap_analysis_{r_cut:.1f}.md"
-        output_png_path = f"/Users/omert/Desktop/UniFrag_main/UniFrag/runUniFrag/zn_soap_distribution_{r_cut:.1f}.png"
+        output_md_path = f"/Users/omert/Desktop/UniFrag_main/UniFrag/runUniFrag/zn_cr_cifs_noduplicated/zn_soap_analysis_{r_cut:.1f}.md"
+        output_png_path = f"/Users/omert/Desktop/UniFrag_main/UniFrag/runUniFrag/zn_cr_cifs_noduplicated/zn_soap_distribution_{r_cut:.1f}.png"
         
         # Artifact paths
         artifact_md_path = f"/Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_analysis_{r_cut:.1f}.md"
@@ -264,7 +264,7 @@ def main():
         plt.savefig(output_png_path, dpi=300)
         plt.savefig(artifact_png_path, dpi=300)
         if also_write_default:
-            default_output_png_path = "/Users/omert/Desktop/UniFrag_main/UniFrag/runUniFrag/zn_soap_distribution.png"
+            default_output_png_path = "/Users/omert/Desktop/UniFrag_main/UniFrag/runUniFrag/zn_cr_cifs_noduplicated/zn_soap_distribution.png"
             default_artifact_png_path = "/Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_distribution.png"
             plt.savefig(default_output_png_path, dpi=300)
             plt.savefig(default_artifact_png_path, dpi=300)
@@ -344,7 +344,7 @@ The SOAP fingerprint analysis confirms that **the fragment library provides exce
             f.write(report_content)
             
         if also_write_default:
-            default_output_md_path = "/Users/omert/Desktop/UniFrag_main/UniFrag/runUniFrag/zn_soap_analysis.md"
+            default_output_md_path = "/Users/omert/Desktop/UniFrag_main/UniFrag/runUniFrag/zn_cr_cifs_noduplicated/zn_soap_analysis.md"
             default_artifact_md_path = "/Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_analysis.md"
             default_report_content = report_content.replace(report_img_path, "file:///Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_distribution.png")
             with open(default_output_md_path, "w") as f:
