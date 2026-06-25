@@ -2,6 +2,20 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-25 - UniFrag: Extract Mg-Based CR MOFs and Support Dynamic Brain Directory Reporting
+- **Changed files:**
+  - `runUniFrag/preprocess_dataset.py` [MODIFY] — Added optional `--brain_dir` command-line argument to allow dynamically specifying where the pre-processing report is copied (falls back to the previous default path).
+  - `project-memory.md` [MODIFY] — Added example commands for running `preprocess_dataset.py` for both Zn and Mg CR MOF extraction.
+- **Summary:**
+  - Extracted Mg-based single-metal CR MOFs from the deduplicated CR collection. Out of 5,226 scanned crystal structures, 77 Mg-based structures were identified and processed.
+  - Of the 77 structures, 14 contained guest/solvent molecules that were successfully stripped (e.g. `XUFYAA` with 312 guest atoms removed), while 63 were intact.
+  - The results were saved in `runUniFrag/mg_cr_cifs_noduplicated/`.
+- **Validation:**
+  - Ran the pipeline successfully with `/Users/omert/miniconda3/bin/python runUniFrag/preprocess_dataset.py --src_dir runUniFrag/cr_cifs_noduplicated --dest_dir runUniFrag/mg_cr_cifs_noduplicated --metal Mg --brain_dir /Users/omert/.gemini/antigravity/brain/5cc8c9bc-d53e-489b-a932-9474aaa71491`.
+  - Confirmed 77 output `.cif` files and `preprocess_report.md` were correctly created, and the report copy was successfully written to the active conversation's brain folder.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-06-25 - UniFrag: Relocate SOAP Reports and Plots to zn_cr_cifs_noduplicated Directory
 - **Changed files:**
   - `runUniFrag/analyze_zn_soap.py` [MODIFY] — Updated all output file path variables (`output_md_path`, `output_png_path`, `default_output_md_path`, and `default_output_png_path`) to save files inside the `zn_cr_cifs_noduplicated/` subdirectory.

@@ -91,6 +91,12 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Analyze the extracted CIFs and classify them into CR (ASR/FSR) and NCR subsets
 /Users/omert/miniconda3/bin/python runUniFrag/analyze_cifs.py
 
+# Preprocess the dataset (filter target metal, exclude elements, and strip guests/solvents)
+# Example for Zn:
+/Users/omert/miniconda3/bin/python runUniFrag/preprocess_dataset.py --src_dir runUniFrag/cr_cifs_noduplicated --dest_dir runUniFrag/zn_cr_cifs_noduplicated --metal Zn --brain_dir /Users/omert/.gemini/antigravity/brain/<conversation-id>
+# Example for Mg:
+/Users/omert/miniconda3/bin/python runUniFrag/preprocess_dataset.py --src_dir runUniFrag/cr_cifs_noduplicated --dest_dir runUniFrag/mg_cr_cifs_noduplicated --metal Mg --brain_dir /Users/omert/.gemini/antigravity/brain/<conversation-id>
+
 # Extract Zn-based unmodified CIFs and merge them into categories (removing duplicates)
 /Users/omert/miniconda3/bin/python runUniFrag/merge_zn_cifs.py
 
