@@ -115,11 +115,11 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Run Zn coordination environment analysis and compare parent MOFs vs fragments library
 CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/analyze_zn_coordination.py
 
-# Run Zn-centered SOAP fingerprint environment analysis (configurable cutoff, PCA + UMAP)
-# Default 6.0 A cutoff:
-/Users/omert/miniconda3/bin/python runUniFrag/analyze_zn_soap.py
-# Custom cutoff (e.g. 5.0 A):
-/Users/omert/miniconda3/bin/python runUniFrag/analyze_zn_soap.py --r_cut 5.0
+# Run metal-centered SOAP fingerprint coordination environment analysis (configurable cutoff, PCA + UMAP)
+# Example for Zn (cutoffs 3.0, 4.0, 5.0, 6.0 Å):
+/Users/omert/miniconda3/bin/python runUniFrag/analyze_soap.py --metal Zn --r_cut 3.0 4.0 5.0 6.0 --brain_dir /Users/omert/.gemini/antigravity/brain/<conversation-id>
+# Example for Mg (cutoff 6.0 Å):
+/Users/omert/miniconda3/bin/python runUniFrag/analyze_soap.py --metal Mg --r_cut 6.0 --brain_dir /Users/omert/.gemini/antigravity/brain/<conversation-id>
 
 # Extract parent Zn MOFs with Zn CN=0, 1, or 3 to a separate CSV file
 CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/extract_low_coordination_mofs.py

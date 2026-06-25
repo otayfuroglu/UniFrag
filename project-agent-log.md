@@ -2,6 +2,22 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-25 - UniFrag: Implement Generalized Post-processing SOAP Fingerprint Analysis Script
+- **Changed files:**
+  - `runUniFrag/analyze_soap.py` [NEW] — General post-processing coordination environment analysis script supporting customizable target metals, input directories, ExtXYZ paths, and output destinations.
+  - `project-memory.md` [MODIFY] — Documented new generalized post-processing SOAP commands.
+  - `project-decisions.md` [MODIFY] — Logged the post-processing script architectural decision.
+- **Summary:**
+  - Generalized `analyze_zn_soap.py` to `analyze_soap.py` by parameterizing target metals, parent CIF directories, ExtXYZ paths, and destination directories.
+  - Dynamically extracts elements from parent and fragment files to compile the unified SOAP species list.
+  - Automates loop analyses for multiple cutoffs, generates side-by-side PCA/UMAP scatter plots, writes detailed Markdown reports, and copies results to the active conversation's brain folder.
+- **Validation:**
+  - Ran Zn verification sweep (`--metal Zn --r_cut 3.0 4.0 5.0 6.0`) on the full unmodified parent collection (1110 parents, 1418 fragments).
+  - Ran Mg verification run (`--metal Mg --r_cut 6.0`) on the Mg collection (76 parents, 101 fragments).
+  - Verified that all reports and PCA/UMAP distribution figures were correctly created in both the destination and brain artifacts directories with 0 errors.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-06-25 - UniFrag: Extract Mg-Based CR MOFs and Support Dynamic Brain Directory Reporting
 - **Changed files:**
   - `runUniFrag/preprocess_dataset.py` [MODIFY] — Added optional `--brain_dir` command-line argument to allow dynamically specifying where the pre-processing report is copied (falls back to the previous default path).

@@ -220,3 +220,13 @@ Durable implementation and architecture decisions for UniFrag. This file is the 
   1. Developed a self-contained, parallel pre-processing script `runUniFrag/preprocess_dataset.py` using Pymatgen and NetworkX.
   2. Implemented a robust structure-ordering helper (`make_ordered_structure`) to construct an ordered copy of disordered/mixed-occupancy CIF structures by selecting the highest-occupancy species for each site. This ordered structure is used strictly for graph-based connected component analysis (CrystalNN and JmolNN), while guest sites are deleted from the original structure to preserve occupancy coordinates.
 - Consequences: All 1,834 Zn structures from the CSD-unmodified dataset were processed with 0 warnings or failures. 1,564 structures had guest molecules successfully stripped (with original files backed up to `cifs_backup_guests/`), and a detailed pre-processing report (`preprocess_report.md`) was automatically generated.
+
+## Decision 2026-06-25: Generalized Post-processing Fingerprint Coordination Analysis Script
+- Context: Analyzing coordination environment preservation in the fragment libraries requires a unified, customizable post-processing comparison tool. The previous script `analyze_zn_soap.py` was Zn-specific, with hardcoded folder paths and output configurations, preventing its application to other metal collections like Magnesium.
+- Decision: Implemented a generalized analysis script `runUniFrag/analyze_soap.py` supporting:
+  1. **Any Target Metal:** Dynamic parameter resolution and center identification for any metal symbol.
+  2. **Configurable CLI parameters:** Cutoffs list, CIF folder, ExtXYZ path, output destination, and copy destination parameters.
+  3. **Universal Species Universe:** Scans all parent structures and fragments to compile the SOAP elements list.
+  4. **Multi-Cutoff execution & Brain Copying:** Automates loop analyses, PCA/UMAP generation, and copies Markdown summaries and plots to the active conversation's brain folder.
+- Consequences: Successfully verified the script by running Zn (3.0, 4.0, 5.0, 6.0 Å cutoffs) and Mg (6.0 Å cutoff) analyses, yielding beautiful comparative plots and detailed environment preservation reports.
+
