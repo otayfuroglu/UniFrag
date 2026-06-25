@@ -2,6 +2,18 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-06-25 - UniFrag: Relocate SOAP Reports and Plots to zn_cr_cifs_noduplicated Directory
+- **Changed files:**
+  - `runUniFrag/analyze_zn_soap.py` [MODIFY] — Updated all output file path variables (`output_md_path`, `output_png_path`, `default_output_md_path`, and `default_output_png_path`) to save files inside the `zn_cr_cifs_noduplicated/` subdirectory.
+  - `project-memory.md` [MODIFY] — Updated decision paths.
+  - `project-decisions.md` [MODIFY] — Updated decision paths.
+- **Summary:**
+  - Moved existing SOAP analysis markdown reports (`zn_soap_analysis*.md`) and PCA/UMAP plots (`zn_soap_distribution*.png`) from `runUniFrag/` to `runUniFrag/zn_cr_cifs_noduplicated/`.
+- **Validation:**
+  - Staged files in Git and verified that Git successfully detected the relocations as renames (`renamed: runUniFrag/zn_soap_analysis.md -> runUniFrag/zn_cr_cifs_noduplicated/zn_soap_analysis.md`, etc.).
+- **Follow-up risks:**
+  - None.
+
 ## 2026-06-24 - UniFrag: Multi-Cutoff SOAP Run Loop, Caching Optimization, and SOAP Vector RMSD Analysis
 - **Changed files:**
   - `runUniFrag/analyze_zn_soap.py` [MODIFY] — Restructured script to support parsing a list of cutoffs (nargs="+") in argparse, pre-load and cache CIF structures in memory once at startup, compute raw SOAP fingerprint vector RMSDs between parent and best-matching fragment Zn centers, dynamically suffix output reports and plots by cutoff value, and update report templates with RMSD statistics.

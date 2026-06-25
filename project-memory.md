@@ -369,7 +369,7 @@ Use this section only if you want this template to include a concrete reference 
 - Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` supporting a list of user-configurable cutoffs (`--r_cut`, default `[6.0]`).
   1. **Caching Optimization**: Pre-loads and parses CIF structures once at startup, caching them in memory as ASE Atoms objects to achieve a `~30x` speedup during multi-cutoff loops.
   2. **Fingerprint RMSD**: In addition to Cosine Similarity, computes the Root-Mean-Square Deviation (RMSD) between raw SOAP fingerprint vectors of parent Zn centers and their best-matching fragments.
-  3. **Multi-Cutoff Output**: Generates reports (`zn_soap_analysis_{r_cut:.1f}.md`) and side-by-side PCA/UMAP plots (`zn_soap_distribution_{r_cut:.1f}.png`) dynamically suffixed by cutoff.
+  3. **Multi-Cutoff Output**: Generates reports (`zn_cr_cifs_noduplicated/zn_soap_analysis_{r_cut:.1f}.md`) and side-by-side PCA/UMAP plots (`zn_cr_cifs_noduplicated/zn_soap_distribution_{r_cut:.1f}.png`) dynamically suffixed by cutoff.
 - Consequences: Continuous structural coverage and fingerprint deviations are formally calculated, showing expected chemical trends (tighter cutoffs have lower RMSD and higher similarity; e.g., 3.0 Å has median similarity of 0.9999 and median RMSD of 0.0018, whereas 6.0 Å has median similarity of 0.9957 and median RMSD of 0.0452). Caching ensures four cutoffs execute in under 2 minutes.
 
 
