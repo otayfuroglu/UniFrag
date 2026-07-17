@@ -84,11 +84,12 @@ class COF:
             if bond_pair == {'B', 'O'}:
                 edges_to_remove.append((u, v))
             elif bond_pair == {'C', 'N'}:
-                # Cut on the aromatic C side (degree >= 3) so that N stays with the linker.
-                # E.g. in imine COFs: BDA-CH=N-Ar(node) → cut Ar(node)-N bond.
+                # Cut the imine C=N double bond itself (where Carbon has heavy degree == 2)
+                # so that the terminal Nitrogen atoms stay with the amine-derived building block
+                # and terminal Oxygen/Carbon atoms stay with the aldehyde-derived building block.
                 # Protect C-N bonds that are part of small rings (porphyrin, triazine, pyridine).
                 c_idx = u if atom_u == 'C' else v
-                if heavy_degree(c_idx) >= 3 and not in_small_ring(u, v):
+                if heavy_degree(c_idx) == 2 and not in_small_ring(u, v):
                     edges_to_remove.append((u, v))
                 
         # 3. Cleave the bonds in the graph

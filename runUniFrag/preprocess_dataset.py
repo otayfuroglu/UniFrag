@@ -131,13 +131,15 @@ def process_guest_stripping(args_tuple):
     
     indices_to_remove = set()
     method_used = None
+    e_jmol = None
     e_cnn = None
     
-    # Try CrystalNN first
+    # Try JmolNN first (much more robust for MOF frameworks)
     try:
         import networkx as nx
-        cnn = CrystalNN(search_cutoff=3.0)
-        sg = StructureGraph.with_local_env_strategy(ordered_struct, cnn)
+        from pymatgen.analysis.local_env import JmolNN
+        jnn = JmolNN()
+        sg = StructureGraph.with_local_env_strategy(ordered_struct, jnn)
         g = sg.graph.to_undirected()
         pmg_components = list(nx.connected_components(g))
         
@@ -148,32 +150,32 @@ def process_guest_stripping(args_tuple):
                 indices_to_keep.extend(comp)
                 
         indices_to_remove = set(range(len(struct))) - set(indices_to_keep)
-        if indices_to_remove:
-            method_used = "CrystalNN"
+        method_used = "JmolNN"
     except Exception as ex:
-        e_cnn = ex
+        e_jmol = ex
         indices_to_remove = set()
+        method_used = None
         
-    # Fallback to JmolNN
-    if not indices_to_remove:
+    # Fallback to CrystalNN
+    if method_used is None:
         try:
             import networkx as nx
-            from pymatgen.analysis.local_env import JmolNN
-            sg_jmol = StructureGraph.with_local_env_strategy(ordered_struct, JmolNN())
-            g_jmol = sg_jmol.graph.to_undirected()
-            pmg_components_jmol = list(nx.connected_components(g_jmol))
+            cnn = CrystalNN(search_cutoff=3.0)
+            sg_cnn = StructureGraph.with_local_env_strategy(ordered_struct, cnn)
+            g_cnn = sg_cnn.graph.to_undirected()
+            pmg_components_cnn = list(nx.connected_components(g_cnn))
             
             indices_to_keep = []
-            for comp in pmg_components_jmol:
+            for comp in pmg_components_cnn:
                 has_metal = any(ordered_struct[idx].species_string == metal for idx in comp)
                 if has_metal:
                     indices_to_keep.extend(comp)
                     
             indices_to_remove = set(range(len(struct))) - set(indices_to_keep)
-            if indices_to_remove:
-                method_used = "JmolNN"
-        except Exception as e_jmol:
-            err_msg = f"CrystalNN failed ({str(e_cnn)}) and JmolNN failed ({str(e_jmol)})"
+            method_used = "CrystalNN"
+        except Exception as ex:
+            e_cnn = ex
+            err_msg = f"JmolNN failed ({str(e_jmol)}) and CrystalNN failed ({str(e_cnn)})"
             shutil.copy(path, dest_path)
             return {
                 "status": "warning",

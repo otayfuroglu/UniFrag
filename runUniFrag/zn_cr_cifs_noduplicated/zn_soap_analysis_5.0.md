@@ -1,6 +1,6 @@
 # Zn-Centered SOAP Fingerprint Environment Analysis
 
-This report evaluates the preservation of local chemical environments around Zinc (`Zn`) centers in the fragment library using high-dimensional **SOAP (Smooth Overlap of Atomic Positions)** fingerprints. 
+This report evaluates the preservation of local chemical environments around Zn (`Zn`) centers in the fragment library using high-dimensional **SOAP (Smooth Overlap of Atomic Positions)** fingerprints. 
 
 SOAP compares environments within a continuous **5.0 Å cutoff**, capturing details like geometry, coordination shells, and local density.
 
@@ -22,7 +22,7 @@ SOAP compares environments within a continuous **5.0 Å cutoff**, capturing deta
 
 Below are 2D PCA and UMAP projections of the SOAP fingerprints. The close overlap between parent crystal centers (blue) and fragment library centers (green) visually demonstrates excellent chemical coverage:
 
-![Zn SOAP PCA and UMAP Map](file:///Users/omert/.gemini/antigravity/brain/153d2da2-7e4a-4474-b36a-6be8db573d0d/zn_soap_distribution_5.0.png)
+![Zn SOAP PCA and UMAP Map](zn_soap_distribution_5.0.png)
 
 ## Poorly Represented Zn Environments (Bottom 25 Worst Matches)
 
@@ -59,18 +59,18 @@ These Zn centers in parent crystals have the lowest similarity scores to any fra
 ## Discussion & Chemical Analysis
 
 1. **High Overall Similarity**:
-   The median similarity of SOAP descriptors is extremely high (above 0.98). This indicates that the local coordination environment of Zinc (including coordination shell composition, distance distribution, and local symmetry) is well preserved by the UniFrag extraction algorithm within the 5.0 Å sphere.
+   The median similarity of SOAP descriptors is extremely high. This indicates that the local coordination environment of Zn (including coordination shell composition, distance distribution, and local symmetry) is well preserved by the UniFrag extraction algorithm within the 5.0 Å sphere.
    
 2. **Periodic vs Non-Periodic Context**:
-   Because SOAP descriptors for parent MOFs are calculated with `periodic=True` (capturing atoms extending outside the unit cell boundaries) while fragments are computed with `periodic=False` (treating them as isolated molecules), some divergence is expected. The fact that the overlap is so tight demonstrates that the `5.0 Å` extraction shell captures almost all relevant local chemical details.
+   Because SOAP descriptors for parent structures are calculated with `periodic=True` (capturing atoms extending outside the unit cell boundaries) while fragments are computed with `periodic=False` (treating them as isolated molecules), some divergence is expected. The fact that the overlap is so tight demonstrates that the `5.0 Å` extraction shell captures almost all relevant local chemical details.
    
 3. **Capping Effects**:
-   Capped terminals (like O-H, C-H) introduce small hydrogen atoms at boundaries that were originally occupied by other framework atoms. This contributes to moderate similarity values ($0.90 - 0.98$) for some Zn centers located close to linker cut sites.
+   Capped terminals (like O-H, C-H) introduce small hydrogen atoms at boundaries that were originally occupied by other framework atoms. This contributes to moderate similarity values ($0.90 - 0.98$) for some metal centers located close to linker cut sites.
 
 4. **PCA vs UMAP Projection**:
-   * **PCA** shows the global directions of largest linear variance, capturing the primary geometric axes of Zn-coordination variations across the dataset.
+   * **PCA** shows the global directions of largest linear variance, capturing the primary geometric axes of metal coordination variations across the dataset.
    * **UMAP** preserves non-linear local neighborhood structures. The tight grouping and consistent overlap in UMAP space further verify that the fragment library does not form isolated topological clusters detached from the parent distributions, but rather covers the continuous space of parent environments.
 
 ## Conclusion
 
-The SOAP fingerprint analysis confirms that **the fragment library provides exceptional, continuous structural coverage of the local Zinc environments** in the parent crystal structures, making the generated fragments highly representative models for downstream Quantum Chemical (QM) calculations.
+The SOAP fingerprint analysis confirms that **the fragment library provides exceptional, continuous structural coverage of the local Zn environments** in the parent crystal structures, making the generated fragments highly representative models for downstream Quantum Chemical (QM) calculations.

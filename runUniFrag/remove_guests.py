@@ -122,48 +122,48 @@ def clean_guests():
                 raise ValueError("No Zinc atoms found in the structure")
                 
             indices_to_remove = set()
-            method_used = "CrystalNN"
+            method_used = None
             
             try:
-                # Build periodic structure graph with CrystalNN
-                cnn = CrystalNN(search_cutoff=3.0)
-                sg = StructureGraph.with_local_env_strategy(struct, cnn)
-                
-                # Connected components
-                g = sg.graph.to_undirected()
-                pmg_components = list(nx.connected_components(g))
+                # Build periodic structure graph with JmolNN
+                from pymatgen.analysis.local_env import JmolNN
+                sg_jmol = StructureGraph.with_local_env_strategy(struct, JmolNN())
+                g_jmol = sg_jmol.graph.to_undirected()
+                pmg_components_jmol = list(nx.connected_components(g_jmol))
                 
                 indices_to_keep = []
-                for comp in pmg_components:
+                for comp in pmg_components_jmol:
                     has_zn = any(struct[idx].species_string == 'Zn' for idx in comp)
                     if has_zn:
                         indices_to_keep.extend(comp)
                         
                 indices_to_remove = set(range(len(struct))) - set(indices_to_keep)
+                method_used = "JmolNN"
                 
-            except Exception as e_cnn:
-                print(f"  CrystalNN failed: {str(e_cnn)}. Falling back to JmolNN...")
+            except Exception as e_jmol:
+                print(f"  JmolNN failed: {str(e_jmol)}. Falling back to CrystalNN...")
                 indices_to_remove = set()
+                method_used = None
                 
-            # If CrystalNN failed or didn't isolate any guests, try JmolNN as fallback
-            if not indices_to_remove:
+            # Fallback to CrystalNN
+            if method_used is None:
                 try:
-                    from pymatgen.analysis.local_env import JmolNN
-                    sg_jmol = StructureGraph.with_local_env_strategy(struct, JmolNN())
-                    g_jmol = sg_jmol.graph.to_undirected()
-                    pmg_components_jmol = list(nx.connected_components(g_jmol))
+                    cnn = CrystalNN(search_cutoff=3.0)
+                    sg = StructureGraph.with_local_env_strategy(struct, cnn)
+                    g = sg.graph.to_undirected()
+                    pmg_components = list(nx.connected_components(g))
                     
                     indices_to_keep = []
-                    for comp in pmg_components_jmol:
+                    for comp in pmg_components:
                         has_zn = any(struct[idx].species_string == 'Zn' for idx in comp)
                         if has_zn:
                             indices_to_keep.extend(comp)
                             
                     indices_to_remove = set(range(len(struct))) - set(indices_to_keep)
-                    method_used = "JmolNN"
-                    print(f"  Successfully fell back to JmolNN for component isolation.")
-                except Exception as e_jmol:
-                    print(f"  JmolNN fallback also failed: {str(e_jmol)}")
+                    method_used = "CrystalNN"
+                    print(f"  Successfully fell back to CrystalNN for component isolation.")
+                except Exception as e_cnn:
+                    print(f"  CrystalNN fallback also failed: {str(e_cnn)}")
                     indices_to_remove = set()
             
             if not indices_to_remove:

@@ -165,6 +165,7 @@ def _update_extxyz_collection(extxyz_path, clean_base, new_fragments):
 
 
 class BaseFragmenter:
+    METALS = set()
     def __init__(self, radius=6.0):
         self.radius = float(radius)
 
@@ -813,12 +814,179 @@ class BaseFragmenter:
         print(f"[QM WARNING] Fragment '{label}': could not automatically fix odd electron count (Z_sum={z_sum}). Manual inspection needed.")
         return species, coords, capped_h_indices
 
+    @staticmethod
+    def _chemical_identity_key(species, coords, decimals=1):
+        """Chemical duplicate key based on heavy-atom formula only.
+        Hydrogen atoms are excluded so that minor H-capping differences
+        do not make otherwise identical skeletons appear unique.
+        Pairwise distances are intentionally not used because small
+        lattice parameter shifts across CIF files cause systematic
+        distance deviations that defeat histogram binning."""
+        species = [str(sp) for sp in species]
+        # Filter to heavy atoms only
+        heavy_species = [sp for sp in species if sp != "H"]
+        if not heavy_species:
+            return (("H", len(species)),)
+        counts = tuple(sorted((sp, heavy_species.count(sp)) for sp in set(heavy_species)))
+        return counts
+
+    def _cap_open_oxygens(self, species, coords, capped_h_flags):
+        heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
+        for i in list(heavy_idx):
+            if i >= len(species) or species[i] not in {"O", "N", "C"}:
+                continue
+            sp = species[i]
+            pos = np.array(coords[i], dtype=float)
+            h_cut = 1.25 if sp in {"N", "O"} else 1.20
+            has_h = any(
+                spj == "H" and np.linalg.norm(pos - np.array(coords[j], dtype=float)) <= h_cut
+                for j, spj in enumerate(species)
+            )
+            if has_h:
+                continue
+            if sp == "O" and self.oxygen_already_protonated(i, species, coords):
+                continue
+
+            heavy_neighbors = []
+            for j, spj in enumerate(species):
+                if i == j or spj == "H":
+                    continue
+                d = np.linalg.norm(pos - np.array(coords[j], dtype=float))
+                if self.is_valid_bond(sp, spj, d):
+                    heavy_neighbors.append(j)
+
+            if sp == "O":
+                if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "B", "Si", "P", "S", "N"}:
+                    continue
+                base = pos - np.array(coords[heavy_neighbors[0]], dtype=float)
+            elif sp == "N":
+                if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "N"}:
+                    continue
+                base = pos - np.array(coords[heavy_neighbors[0]], dtype=float)
+            else:
+                # Phenyl/aromatic edge C: two retained heavy neighbors but no H.
+                # Avoid carbonyl-like C by requiring C/N neighbors only.
+                if len(heavy_neighbors) != 2:
+                    continue
+                if not all(species[j] in {"C", "N"} for j in heavy_neighbors):
+                    continue
+                base = np.zeros(3)
+                for nb in heavy_neighbors:
+                    base -= np.array(coords[nb], dtype=float) - pos
+                if np.linalg.norm(base) < 1e-12:
+                    base = pos - np.mean([np.array(coords[nb], dtype=float) for nb in heavy_neighbors], axis=0)
+
+            before = len(species)
+            self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+            if len(species) == before and np.linalg.norm(base) > 1e-12:
+                self.place_capping_h(i, -base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+
+    def _make_qm_ready_linker(self, species, coords, label="only_linker"):
+        species_copy = list(species)
+        coords_copy = [np.array(c, dtype=float) for c in coords]
+        capped_h_flags = [False] * len(species_copy)
+        
+        self._cap_open_oxygens(species_copy, coords_copy, capped_h_flags)
+        
+        capped_h_indices = [idx for idx, flag in enumerate(capped_h_flags) if flag and species_copy[idx] == "H"]
+        self.optimize_capped_h_geometry_only(species_copy, coords_copy, capped_h_indices)
+        
+        species_copy, coords_copy, capped_h_indices = self.fix_odd_electron_multiplicity(
+            species_copy, coords_copy, capped_h_indices, label=label
+        )
+        return FragmentResult(species=species_copy, coords=coords_copy)
+
+    def _clean_linker_molecule(self, species, coords, orig_indices=None):
+        species = [str(s) for s in species]
+        coords = [np.array(c, dtype=float) for c in coords]
+        
+        org_idx = [i for i, s in enumerate(species) if s not in self.METALS]
+        if not org_idx:
+            return [], []
+            
+        org_species = [species[i] for i in org_idx]
+        org_coords = [coords[i] for i in org_idx]
+        org_orig_indices = [orig_indices[i] for i in org_idx] if orig_indices else None
+        
+        if len(org_species) <= 1:
+            return org_species, org_coords
+            
+        graph = [[] for _ in range(len(org_species))]
+        for i in range(len(org_species)):
+            for j in range(i + 1, len(org_species)):
+                d = float(np.linalg.norm(org_coords[i] - org_coords[j]))
+                if self.is_valid_bond(org_species[i], org_species[j], d):
+                    graph[i].append((j, org_coords[j] - org_coords[i]))
+                    graph[j].append((i, org_coords[i] - org_coords[j]))
+                    
+        visited = set()
+        components = []
+        for i in range(len(org_species)):
+            if i in visited:
+                continue
+            comp_idx = []
+            comp_coords = {}
+            q = deque([i])
+            visited.add(i)
+            comp_coords[i] = org_coords[i]
+            
+            while q:
+                u = q.popleft()
+                comp_idx.append(u)
+                for v, shift in graph[u]:
+                    if v not in visited:
+                        visited.add(v)
+                        comp_coords[v] = comp_coords[u] + shift
+                        q.append(v)
+            components.append((comp_idx, comp_coords))
+            
+        largest_comp_idx, largest_comp_coords = max(components, key=lambda x: len(x[0]))
+        
+        sorted_comp_idx = sorted(largest_comp_idx)
+        clean_species = [org_species[i] for i in sorted_comp_idx]
+        clean_coords = [largest_comp_coords[i] for i in sorted_comp_idx]
+        clean_orig_indices = [org_orig_indices[i] for i in sorted_comp_idx] if org_orig_indices else None
+        
+        if clean_orig_indices and hasattr(self, "structure") and self.structure:
+            orig_heavy_deg = {}
+            for oi in clean_orig_indices:
+                neighs = self.structure.get_neighbors(self.structure[oi], r=2.2)
+                orig_heavy_deg[oi] = sum(1 for n in neighs if n.specie.symbol not in self.METALS and n.specie.symbol != "H")
+            
+            boundary_indices = []
+            for i, oi in enumerate(clean_orig_indices):
+                sp = clean_species[i]
+                if sp in {"C", "N", "O"}:
+                    linker_heavy_deg = sum(
+                        1 for j, sp_j in enumerate(clean_species) 
+                        if sp_j != "H" and np.linalg.norm(clean_coords[i] - clean_coords[j]) <= 2.2 and i != j
+                    )
+                    if orig_heavy_deg.get(oi, 0) > linker_heavy_deg:
+                        boundary_indices.append(i)
+            
+            to_remove = set()
+            for bi in boundary_indices:
+                bi_coords = clean_coords[bi]
+                for j, sp_j in enumerate(clean_species):
+                    if sp_j == "H":
+                        d = np.linalg.norm(bi_coords - clean_coords[j])
+                        if d <= 1.25:
+                            to_remove.add(j)
+            
+            if to_remove:
+                clean_species = [sp for idx, sp in enumerate(clean_species) if idx not in to_remove]
+                clean_coords = [co for idx, co in enumerate(clean_coords) if idx not in to_remove]
+                
+        return clean_species, clean_coords
+
 class MOFFragmenter(BaseFragmenter):
     METALS = {"Mg", "Zn", "Cu", "Fe", "Co", "Ni", "Mn", "Zr", "Ti", "V", "Cr", "Al"}
     LARGE_NON_METALS = {"Br", "I", "S", "P", "Cl"}
 
     def is_valid_bond(self, s1_str, s2_str, dist):
         if s1_str in self.METALS or s2_str in self.METALS:
+            if "C" in (s1_str, s2_str) or "H" in (s1_str, s2_str):
+                return False
             return dist < 2.6
         if "H" in (s1_str, s2_str):
             return dist < 1.2
@@ -848,22 +1016,6 @@ class MOFFragmenter(BaseFragmenter):
                 d = round(float(np.linalg.norm(coords[i] - coords[j])), decimals)
                 distances.append((pair[0], pair[1], d))
         return counts, tuple(sorted(distances))
-
-    @staticmethod
-    def _chemical_identity_key(species, coords, decimals=1):
-        """Chemical duplicate key based on heavy-atom formula only.
-        Hydrogen atoms are excluded so that minor H-capping differences
-        do not make otherwise identical skeletons appear unique.
-        Pairwise distances are intentionally not used because small
-        lattice parameter shifts across CIF files cause systematic
-        distance deviations that defeat histogram binning."""
-        species = [str(sp) for sp in species]
-        # Filter to heavy atoms only
-        heavy_species = [sp for sp in species if sp != "H"]
-        if not heavy_species:
-            return (("H", len(species)),)
-        counts = tuple(sorted((sp, heavy_species.count(sp)) for sp in set(heavy_species)))
-        return counts
 
     @classmethod
     def _molecule_unique_key(cls, mol, decimals=3):
@@ -1232,57 +1384,24 @@ class MOFFragmenter(BaseFragmenter):
         name = self._safe_name(stem).upper()
         return name.startswith("CU-BTC") or name.startswith("DUT-49")
 
-    def _clean_linker_molecule(self, species, coords):
-        species = [str(s) for s in species]
-        coords = [np.array(c, dtype=float) for c in coords]
-        
-        org_idx = [i for i, s in enumerate(species) if s not in self.METALS]
-        if not org_idx:
-            return [], []
-            
-        org_species = [species[i] for i in org_idx]
-        org_coords = [coords[i] for i in org_idx]
-        
-        if len(org_species) <= 1:
-            return org_species, org_coords
-            
-        graph = [[] for _ in range(len(org_species))]
-        for i in range(len(org_species)):
-            for j in range(i + 1, len(org_species)):
-                d = float(np.linalg.norm(org_coords[i] - org_coords[j]))
-                if self.is_valid_bond(org_species[i], org_species[j], d):
-                    graph[i].append((j, org_coords[j] - org_coords[i]))
-                    graph[j].append((i, org_coords[i] - org_coords[j]))
-                    
-        visited = set()
-        components = []
-        for i in range(len(org_species)):
-            if i in visited:
-                continue
-            comp_idx = []
-            comp_coords = {}
-            q = deque([i])
-            visited.add(i)
-            comp_coords[i] = org_coords[i]
-            
-            while q:
-                u = q.popleft()
-                comp_idx.append(u)
-                for v, shift in graph[u]:
-                    if v not in visited:
-                        visited.add(v)
-                        comp_coords[v] = comp_coords[u] + shift
-                        q.append(v)
-            components.append((comp_idx, comp_coords))
-            
-        largest_comp_idx, largest_comp_coords = max(components, key=lambda x: len(x[0]))
-        
-        clean_species = [org_species[i] for i in sorted(largest_comp_idx)]
-        clean_coords = [largest_comp_coords[i] for i in sorted(largest_comp_idx)]
-        
-        return clean_species, clean_coords
-
     def _export_moffragmentor_library(self, result, stem):
+        # Always populate self.extracted_linkers
+        linkers_coll = getattr(result, "linkers", [])
+        sbus = getattr(linkers_coll, "sbus", list(linkers_coll) if linkers_coll is not None else [])
+        for sbu in sbus:
+            mol = getattr(sbu, "molecule", None)
+            if mol is not None:
+                sp = [str(x) for x in mol.species]
+                co = [c for c in mol.cart_coords]
+                orig_indices = getattr(sbu, "indices", None)
+                sp, co = self._clean_linker_molecule(sp, co, orig_indices=orig_indices)
+                if sp:
+                    if not hasattr(self, "extracted_linkers"):
+                        self.extracted_linkers = []
+                    key = self._chemical_identity_key(sp, co)
+                    if not any(self._chemical_identity_key(x[0], x[1]) == key for x in self.extracted_linkers):
+                        self.extracted_linkers.append((sp, co))
+
         node_dir = Path("mof_nodes_lib")
         linker_dir = Path("mof_linkers_lib")
         node_dir.mkdir(exist_ok=True)
@@ -1314,7 +1433,8 @@ class MOFFragmenter(BaseFragmenter):
                 co = [c for c in mol.cart_coords]
                 
                 if kind == "linker":
-                    sp, co = self._clean_linker_molecule(sp, co)
+                    orig_indices = getattr(sbu, "indices", None)
+                    sp, co = self._clean_linker_molecule(sp, co, orig_indices=orig_indices)
                     if not sp:
                         continue
                         
@@ -1330,7 +1450,16 @@ class MOFFragmenter(BaseFragmenter):
                 Molecule(sp, co).to(filename=str(out), fmt="xyz")
                 out_idx += 1
 
-    def _export_mof_component_library(self, species, coords, stem, kind):
+    def _export_mof_component_library(self, species, coords, stem, kind, orig_indices=None):
+        if kind == "linker":
+            sp_clean, co_clean = self._clean_linker_molecule(species, coords, orig_indices=orig_indices)
+            if sp_clean:
+                if not hasattr(self, "extracted_linkers"):
+                    self.extracted_linkers = []
+                key = self._chemical_identity_key(sp_clean, co_clean)
+                if not any(self._chemical_identity_key(x[0], x[1]) == key for x in self.extracted_linkers):
+                    self.extracted_linkers.append((sp_clean, co_clean))
+
         out_dir = Path("mof_nodes_lib") if kind == "node" else Path("mof_linkers_lib")
         out_dir.mkdir(exist_ok=True)
         file_stem = self._safe_name(stem)
@@ -1348,7 +1477,7 @@ class MOFFragmenter(BaseFragmenter):
                 existing_keys.add(key)
 
         if kind == "linker":
-            species, coords = self._clean_linker_molecule(species, coords)
+            species, coords = self._clean_linker_molecule(species, coords, orig_indices=orig_indices)
             if not species:
                 return False
 
@@ -1413,26 +1542,26 @@ class MOFFragmenter(BaseFragmenter):
 
         linker_comp = set()
         linker_coords = {}
-        vis = set(expanded_node)
         seeds = []
         for u in expanded_node:
             for v, shift in graph[u]:
-                if v not in expanded_node and symbols[v] != "H":
+                if v not in expanded_node and symbols[v] != "H" and symbols[v] not in self.METALS:
                     seeds.append((v, node_coords[u] + shift))
 
+        global_vis = set()
         for st, st_coord in seeds:
-            if st in vis:
+            if st in global_vis:
                 continue
             comp = {st}
             comp_coords = {st: st_coord}
             qq = deque([st])
-            vis.add(st)
+            global_vis.add(st)
             while qq:
                 u = qq.popleft()
                 for v, shift in graph[u]:
-                    if v in vis or v in expanded_node or symbols[v] in self.METALS:
+                    if v in global_vis or symbols[v] in self.METALS:
                         continue
-                    vis.add(v)
+                    global_vis.add(v)
                     comp.add(v)
                     comp_coords[v] = comp_coords[u] + shift
                     qq.append(v)
@@ -1450,7 +1579,7 @@ class MOFFragmenter(BaseFragmenter):
             lk = sorted(linker_comp)
             lsp = [symbols[i] for i in lk]
             lco = [np.array(linker_coords[i], dtype=float) for i in lk]
-            linker_written = self._export_mof_component_library(lsp, lco, stem, "linker")
+            linker_written = self._export_mof_component_library(lsp, lco, stem, "linker", orig_indices=lk)
 
         if node_written or linker_written:
             print("  -> Helper fragments available in mof_nodes_lib/ and mof_linkers_lib/ (fallback export).")
@@ -1729,12 +1858,20 @@ class MOFFragmenter(BaseFragmenter):
         return FragmentResult(species=species, coords=coords)
 
     def extract(self, mof_path, center_idx=-1, nmetals=3, output_path="fragment.xyz", minimize=False):
+        self.extracted_linkers = []
         print(f"Loading '{mof_path}'...")
+        try:
+            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
+        except Exception:
+            struct = None
+        self.structure = struct
+
         combined = self._try_moffragmentor_node_linker_fragment(mof_path, output_path, minimize=minimize)
         if combined is not None:
             return combined
         self._fallback_export_mof_node_linker(mof_path)
-        struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
+        if struct is None:
+            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
         structure_stem = Path(mof_path).stem
         if nmetals < 1:
             raise ValueError(f"--nmetals must be >= 1 (got {nmetals}).")
@@ -2154,23 +2291,13 @@ class MOFFragmenter(BaseFragmenter):
                     continue
 
                 keep_linker = False
-                touched_coords = [supercell[m].coords for m in touching_metals]
-                max_dist = 0
-                for i in range(len(touched_coords)):
-                    for j in range(i + 1, len(touched_coords)):
-                        d = np.linalg.norm(touched_coords[i] - touched_coords[j])
-                        if d > max_dist:
-                            max_dist = d
-                if max_dist > 4.5:
-                    keep_linker = True
-
                 linker_evaluations.append((comp, bridge_atoms, keep_linker))
 
-            kept_any_full_linker = any(keep for _, _, keep in linker_evaluations)
-            if not kept_any_full_linker and linker_evaluations:
+            if linker_evaluations:
+                # Sort in descending order of size to find the largest linker
                 linker_evaluations.sort(key=lambda x: len(x[0]), reverse=True)
-                best_comp, best_ba, _ = linker_evaluations[0]
-                linker_evaluations[0] = (best_comp, best_ba, True)
+                # Keep exactly the largest linker full
+                linker_evaluations[0] = (linker_evaluations[0][0], linker_evaluations[0][1], True)
 
             for comp, bridge_atoms, keep_linker in linker_evaluations:
                 if not keep_linker:
@@ -2462,6 +2589,7 @@ class COFFragmenter(BaseFragmenter):
         if layer_mode not in allowed:
             raise ValueError(f"layer_mode must be one of {sorted(allowed)}")
         self.layer_mode = layer_mode
+        self.partner_vec = None
 
     def _rad(self, sym):
         return self.COV_RAD.get(sym, 0.77)
@@ -2472,57 +2600,6 @@ class COFFragmenter(BaseFragmenter):
         cutoff = 1.25 * (self._rad(s1) + self._rad(s2))
         cutoff = min(2.2, max(1.1, cutoff))
         return dist <= cutoff
-
-    def _cap_open_oxygens(self, species, coords, capped_h_flags):
-        heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
-        for i in list(heavy_idx):
-            if i >= len(species) or species[i] not in {"O", "N", "C"}:
-                continue
-            sp = species[i]
-            pos = np.array(coords[i], dtype=float)
-            h_cut = 1.25 if sp in {"N", "O"} else 1.20
-            has_h = any(
-                spj == "H" and np.linalg.norm(pos - np.array(coords[j], dtype=float)) <= h_cut
-                for j, spj in enumerate(species)
-            )
-            if has_h:
-                continue
-            if sp == "O" and self.oxygen_already_protonated(i, species, coords):
-                continue
-
-            heavy_neighbors = []
-            for j, spj in enumerate(species):
-                if i == j or spj == "H":
-                    continue
-                d = np.linalg.norm(pos - np.array(coords[j], dtype=float))
-                if self.is_valid_bond(sp, spj, d):
-                    heavy_neighbors.append(j)
-
-            if sp == "O":
-                if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "B", "Si", "P", "S", "N"}:
-                    continue
-                base = pos - np.array(coords[heavy_neighbors[0]], dtype=float)
-            elif sp == "N":
-                if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "N"}:
-                    continue
-                base = pos - np.array(coords[heavy_neighbors[0]], dtype=float)
-            else:
-                # Phenyl/aromatic edge C: two retained heavy neighbors but no H.
-                # Avoid carbonyl-like C by requiring C/N neighbors only.
-                if len(heavy_neighbors) != 2:
-                    continue
-                if not all(species[j] in {"C", "N"} for j in heavy_neighbors):
-                    continue
-                base = np.zeros(3)
-                for nb in heavy_neighbors:
-                    base -= np.array(coords[nb], dtype=float) - pos
-                if np.linalg.norm(base) < 1e-12:
-                    base = pos - np.mean([np.array(coords[nb], dtype=float) for nb in heavy_neighbors], axis=0)
-
-            before = len(species)
-            self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
-            if len(species) == before and np.linalg.norm(base) > 1e-12:
-                self.place_capping_h(i, -base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
     def _prune_duplicate_cof_helper_files(self, out_dir, decimals=1):
         seen = {}
@@ -2542,6 +2619,23 @@ class COFFragmenter(BaseFragmenter):
         return removed
 
     def _export_coffragmentor_library(self, result, stem):
+        # Always populate self.extracted_linkers
+        linkers_coll = getattr(result, "linkers", [])
+        sbus = list(linkers_coll) if linkers_coll is not None else []
+        for sbu in sbus:
+            mol = getattr(sbu, "molecule", None)
+            if mol is not None:
+                sp = [str(x) for x in mol.species]
+                co = [np.array(c, dtype=float) for c in mol.cart_coords]
+                orig_indices = getattr(sbu, "indices", None)
+                sp, co = self._clean_linker_molecule(sp, co, orig_indices=orig_indices)
+                if sp:
+                    if not hasattr(self, "extracted_linkers"):
+                        self.extracted_linkers = []
+                    key = self._chemical_identity_key(sp, co)
+                    if not any(self._chemical_identity_key(x[0], x[1]) == key for x in self.extracted_linkers):
+                        self.extracted_linkers.append((sp, co))
+
         node_dir = Path("cof_nodes_lib")
         linker_dir = Path("cof_linkers_lib")
         node_dir.mkdir(exist_ok=True)
@@ -2569,7 +2663,16 @@ class COFFragmenter(BaseFragmenter):
                 mol = getattr(sbu, "molecule", None)
                 if mol is None:
                     continue
-                key = MOFFragmenter._molecule_unique_key(mol, decimals=1)
+                
+                sp = [str(x) for x in mol.species]
+                co = [np.array(c, dtype=float) for c in mol.cart_coords]
+                orig_indices = getattr(sbu, "indices", None)
+                if out_dir == linker_dir:
+                    sp, co = self._clean_linker_molecule(sp, co, orig_indices=orig_indices)
+                    if not sp:
+                        continue
+
+                key = self._chemical_identity_key(sp, co)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -2577,10 +2680,19 @@ class COFFragmenter(BaseFragmenter):
                 while out.exists():
                     out_idx += 1
                     out = out_dir / f"{file_stem}_{out_idx:02d}.xyz"
-                mol.to(filename=str(out), fmt="xyz")
+                Molecule(sp, co).to(filename=str(out), fmt="xyz")
                 out_idx += 1
 
-    def _export_cof_component_library(self, species, coords, stem, kind):
+    def _export_cof_component_library(self, species, coords, stem, kind, orig_indices=None):
+        if kind == "linker":
+            sp_clean, co_clean = self._clean_linker_molecule(species, coords, orig_indices=orig_indices)
+            if sp_clean:
+                if not hasattr(self, "extracted_linkers"):
+                    self.extracted_linkers = []
+                key = self._chemical_identity_key(sp_clean, co_clean)
+                if not any(self._chemical_identity_key(x[0], x[1]) == key for x in self.extracted_linkers):
+                    self.extracted_linkers.append((sp_clean, co_clean))
+
         out_dir = Path("cof_nodes_lib") if kind == "node" else Path("cof_linkers_lib")
         out_dir.mkdir(exist_ok=True)
         file_stem = MOFFragmenter._safe_name(stem)
@@ -2597,6 +2709,11 @@ class COFFragmenter(BaseFragmenter):
                 key = None
             if key is not None:
                 existing_keys.add(key)
+
+        if kind == "linker":
+            species, coords = self._clean_linker_molecule(species, coords, orig_indices=orig_indices)
+            if not species:
+                return False
 
         key = MOFFragmenter._species_coords_unique_key(species, coords, decimals=1)
         if key in existing_keys:
@@ -2626,7 +2743,7 @@ class COFFragmenter(BaseFragmenter):
                 comp = sorted(comps[lk])
                 lsp = [sc_sym[i] for i in comp]
                 lco = [np.array(unwrapped[i], dtype=float) for i in comp]
-                if self._export_cof_component_library(lsp, lco, stem, "linker"):
+                if self._export_cof_component_library(lsp, lco, stem, "linker", orig_indices=comp):
                     linker_written = True
                     break
 
@@ -2816,6 +2933,7 @@ class COFFragmenter(BaseFragmenter):
                 dfrac = f_best - f_cent
                 dfrac -= np.round(dfrac)
                 partner_vec = np.array(supercell.lattice.get_cartesian_coords(dfrac), dtype=float)
+                self.partner_vec = partner_vec
 
         # For normal dimer in graph fallback, build one complete monomer
         # (center node + all attached linkers), then place second monomer by
@@ -2926,7 +3044,7 @@ class COFFragmenter(BaseFragmenter):
         lk_atoms = sorted(comps[lk])
         lk_sp = [sc_sym[i] for i in lk_atoms]
         lk_co = [np.array(unwrapped[i], dtype=float) for i in lk_atoms]
-        self._export_cof_component_library(lk_sp, lk_co, stem, "linker")
+        self._export_cof_component_library(lk_sp, lk_co, stem, "linker", orig_indices=lk_atoms)
 
         ordered = sorted(keep_atoms)
         local = {gi: li for li, gi in enumerate(ordered)}
@@ -3205,6 +3323,7 @@ class COFFragmenter(BaseFragmenter):
         stack_len = float(abc[stack_axis])
         if layer_mode != "monomer" and 2.5 <= stack_len <= 5.0 and len(species) > 0:
             layer_vec = np.array(struct.lattice.matrix[stack_axis], dtype=float)
+            self.partner_vec = layer_vec
             base_species = list(species)
             base_coords = [np.array(c, dtype=float) for c in coords]
             base_flags = list(capped_h_flags)
@@ -3222,6 +3341,7 @@ class COFFragmenter(BaseFragmenter):
         return FragmentResult(species=species, coords=coords)
 
     def extract(self, cif_path, output_path="cof_fragment.xyz", center_idx=-1, minimize=False):
+        self.extracted_linkers = []
         print(f"Loading '{cif_path}'...")
         try:
             struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
@@ -3233,6 +3353,7 @@ class COFFragmenter(BaseFragmenter):
             if not structs:
                 raise
             struct = structs[0]
+        self.structure = struct
         combined = self._try_coffragmentor_node_linker_fragment(cif_path, output_path, minimize=minimize)
         if combined is not None:
             return combined
@@ -3513,6 +3634,7 @@ class COFFragmenter(BaseFragmenter):
                                 lat = np.array(supercell.lattice.matrix, dtype=float)
                                 stack_vec = min(lat, key=lambda v: float(np.linalg.norm(v)))
 
+                            self.partner_vec = stack_vec
                             base_species = list(species)
                             base_coords = [np.array(c, dtype=float) for c in coords]
                             species = base_species + base_species
@@ -4691,6 +4813,7 @@ class COFFragmenter(BaseFragmenter):
         if single_block_keep_heavy and getattr(self, "layer_mode", "auto") == "dimer":
             layer_vec = locals().get("single_block_layer_vec")
             if layer_vec is not None:
+                self.partner_vec = np.array(layer_vec, dtype=float)
                 base_species = list(species)
                 base_coords = [np.array(c, dtype=float) for c in coords]
                 base_flags = list(capped_h_flags)
@@ -5472,6 +5595,22 @@ def _process_cof_file(args_tuple):
                 if res_min:
                     min_atoms = len(res_min.species)
                     min_formula = _get_formula(res_min.species)
+            only_linker_res = []
+            if hasattr(frag, "extracted_linkers") and frag.extracted_linkers:
+                for idx, (lsp, lco) in enumerate(frag.extracted_linkers):
+                    if getattr(frag, "partner_vec", None) is not None:
+                        lsp_final = lsp + lsp
+                        lco_final = list(lco) + [c + frag.partner_vec for c in lco]
+                    else:
+                        lsp_final = list(lsp)
+                        lco_final = [np.array(c) for c in lco]
+                    lbl = f"{base}FragCofOnlyLinker_{idx}" if len(frag.extracted_linkers) > 1 else f"{base}FragCofOnlyLinker"
+                    try:
+                        qm_linker = frag._make_qm_ready_linker(lsp_final, lco_final, label=lbl)
+                        only_linker_res.append(qm_linker)
+                    except Exception as e:
+                        print(f"[{base}] Failed to generate QM-ready OnlyLinker fragment: {e}")
+                
         return {
             "cif": os.path.basename(cif_path),
             "norm_atoms": norm_atoms,
@@ -5480,6 +5619,7 @@ def _process_cof_file(args_tuple):
             "min_formula": min_formula,
             "norm_res": res,
             "min_res": res_min,
+            "only_linker_res": only_linker_res
         }
     except TimeoutError as e:
         print(f"[{base}] TimeoutError: {e}")
@@ -5496,6 +5636,7 @@ def _process_cof_file(args_tuple):
             "norm_atoms": "TIMEOUT", "norm_formula": "TIMEOUT",
             "min_atoms": "TIMEOUT", "min_formula": "TIMEOUT",
             "norm_res": None, "min_res": None,
+            "only_linker_res": []
         }
     except Exception as e:
         print(f"[{base}] Error: {e}")
@@ -5504,6 +5645,7 @@ def _process_cof_file(args_tuple):
             "norm_atoms": "ERROR", "norm_formula": "ERROR",
             "min_atoms": "ERROR", "min_formula": "ERROR",
             "norm_res": None, "min_res": None,
+            "only_linker_res": []
         }
 
 
@@ -5586,6 +5728,15 @@ def _process_mof_file(args_tuple):
                 if res_min:
                     min_atoms = len(res_min.species)
                     min_formula = _get_formula(res_min.species)
+            only_linker_res = []
+            if hasattr(frag, "extracted_linkers") and frag.extracted_linkers:
+                for idx, (lsp, lco) in enumerate(frag.extracted_linkers):
+                    lbl = f"{base}FragMofOnlyLinker_{idx}" if len(frag.extracted_linkers) > 1 else f"{base}FragMofOnlyLinker"
+                    try:
+                        qm_linker = frag._make_qm_ready_linker(lsp, lco, label=lbl)
+                        only_linker_res.append(qm_linker)
+                    except Exception as e:
+                        print(f"[{base}] Failed to generate QM-ready OnlyLinker fragment: {e}")
                 
         return {
             "cif": os.path.basename(cif_path),
@@ -5594,7 +5745,8 @@ def _process_mof_file(args_tuple):
             "min_atoms": min_atoms,
             "min_formula": min_formula,
             "norm_res": res,
-            "min_res": res_min
+            "min_res": res_min,
+            "only_linker_res": only_linker_res
         }
     except TimeoutError as e:
         print(f"[{base}] TimeoutError: {e}")
@@ -5613,7 +5765,8 @@ def _process_mof_file(args_tuple):
             "min_atoms": "TIMEOUT",
             "min_formula": "TIMEOUT",
             "norm_res": None,
-            "min_res": None
+            "min_res": None,
+            "only_linker_res": []
         }
     except Exception as e:
         print(f"[{base}] Error: {e}")
@@ -5624,7 +5777,8 @@ def _process_mof_file(args_tuple):
             "min_atoms": "ERROR",
             "min_formula": "ERROR",
             "norm_res": None,
-            "min_res": None
+            "min_res": None,
+            "only_linker_res": []
         }
 
 
@@ -5767,6 +5921,19 @@ def main():
                     frag_name = f"{clean_base}FragMof{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
 
+            if r.get("only_linker_res"):
+                for idx, res_obj in enumerate(r["only_linker_res"]):
+                    ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    if ckey in seen_keys:
+                        continue
+                    seen_keys.add(ckey)
+                    base_name = r["cif"]
+                    if base_name.endswith(".cif"): base_name = base_name[:-4]
+                    clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
+                    suffix = f"_{idx}" if len(r["only_linker_res"]) > 1 else ""
+                    frag_name = f"{clean_base}FragMofOnlyLinker{suffix}"
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
             
             if is_dir:
@@ -5882,6 +6049,19 @@ def main():
                     if base_name.endswith(".cif"): base_name = base_name[:-4]
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
                     frag_name = f"{clean_base}FragCof{suffix}"
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+
+            if r.get("only_linker_res"):
+                for idx, res_obj in enumerate(r["only_linker_res"]):
+                    ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    if ckey in seen_keys:
+                        continue
+                    seen_keys.add(ckey)
+                    base_name = r["cif"]
+                    if base_name.endswith(".cif"): base_name = base_name[:-4]
+                    clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
+                    suffix = f"_{idx}" if len(r["only_linker_res"]) > 1 else ""
+                    frag_name = f"{clean_base}FragCofOnlyLinker{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"

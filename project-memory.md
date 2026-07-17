@@ -121,6 +121,10 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # Example for Mg (cutoff 6.0 Å):
 /Users/omert/miniconda3/bin/python runUniFrag/analyze_soap.py --metal Mg --r_cut 6.0 --brain_dir /Users/omert/.gemini/antigravity/brain/<conversation-id>
 
+# Eliminate fragments larger than a specified atom count threshold (e.g. 200 atoms)
+# Example for Mg:
+/Users/omert/miniconda3/bin/python runUniFrag/filter_large_fragments.py --metal Mg --max_atoms 200 --brain_dir /Users/omert/.gemini/antigravity/brain/<conversation-id>
+
 # Extract parent Zn MOFs with Zn CN=0, 1, or 3 to a separate CSV file
 CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/python runUniFrag/extract_low_coordination_mofs.py
 
@@ -226,11 +230,18 @@ For each item:
 - Consequences: Helper libraries keep one representative for chemically identical COF building blocks across stems; intentionally similar conformers may be merged.
 - Alternatives considered: `0.01 A` duplicate matching; rejected because chemically identical helper blocks remained duplicated.
 
-### Decision YYYY-MM-DD: Title
-- Context:
-- Decision:
+### Decision 2026-07-17: Exporting QM-Ready "OnlyLinker" Fragments to ExtXYZ Collections with Bilayer Stacking and Boundary Hydrogen Stripping
+- Context: While raw linkers are exported as reference templates to the helper libraries (`mof_linkers_lib/` and `cof_linkers_lib/`), they lack capping at boundary cut sites. The user requested generating a fully capped, QM-ready version of each unique linker and saving it as an extra fragment in the main `fragments_collection.extxyz` file, labeled `OnlyLinker`. Furthermore, helper libraries should remain strictly uncapped (stripping crystallographic N-H/O-H boundary hydrogens to keep reference templates raw), and if the output fragment cluster is bi-layer, the OnlyLinker fragment should automatically be bi-layer as well.
+- Decision: Implemented a robust extraction and processing pipeline:
+  1. Captured raw unique linkers during MOF/COF component exports into `self.extracted_linkers`.
+  2. Moved `_clean_linker_molecule` to `BaseFragmenter` and added class attribute `METALS = set()`. Set `self.structure = struct` early in both extraction pathways to expose the periodic structure context.
+  3. Inside `_clean_linker_molecule`, identified boundary atoms by comparing their original periodic heavy degree to their extracted linker heavy degree. Any Hydrogen atoms directly bonded to these boundary atoms (like the crystallographic enamine N-H hydrogens in `COF-TpAzo`) are stripped when exporting to helper libraries (`mof_linkers_lib/` / `cof_linkers_lib/`).
+  4. Tracked the interlayer translation vector `self.partner_vec` in the `COFFragmenter` instance. In `_process_cof_file`, if `partner_vec` is set, the unique linker coordinates are duplicated and translated by `partner_vec` to construct a matching stack-aligned bi-layer.
+  5. Prepared QM-ready linkers using `_make_qm_ready_linker`, which applies boundary H-capping (`_cap_open_oxygens`), force-field capping H geometry optimization, and odd-electron multiplicity correction (`fix_odd_electron_multiplicity`). Flushed these to the main collection.
 - Consequences:
-- Alternatives considered:
+  1. Main collections now contain both coordination environment clusters (`*FragCof`, `*FragCofMin`) and the isolated, QM-ready capped linkers (`*FragCofOnlyLinker`).
+  2. Reference templates in the helper libraries are kept uncapped (e.g., `cof_linkers_lib/COF-TpAzo_00.xyz` is `H8 C12 N4`), while the corresponding QM-ready fragment in the ExtXYZ collection is capped to `H20 C24 N8` (bilayer) or `H10 C12 N4` (monolayer).
+- Alternatives considered: Capping the helper template files directly; rejected because helper libraries are intentionally kept as raw periodic templates, whereas `fragments_collection.extxyz` is the designated repository for all QM-ready fragments.
 
 ### Decision 2026-05-08: Restore ZnPc/metallo-PC COF Path J before generic COF paths
 - Context: ZnPc-DPB was using generic COF Path B instead of the accepted direct coffragmentor Path J, causing minimized dimer imbalance.
@@ -378,4 +389,11 @@ Use this section only if you want this template to include a concrete reference 
   3. **Multi-Cutoff Output**: Generates reports (`zn_cr_cifs_noduplicated/zn_soap_analysis_{r_cut:.1f}.md`) and side-by-side PCA/UMAP plots (`zn_cr_cifs_noduplicated/zn_soap_distribution_{r_cut:.1f}.png`) dynamically suffixed by cutoff.
 - Consequences: Continuous structural coverage and fingerprint deviations are formally calculated, showing expected chemical trends (tighter cutoffs have lower RMSD and higher similarity; e.g., 3.0 Å has median similarity of 0.9999 and median RMSD of 0.0018, whereas 6.0 Å has median similarity of 0.9957 and median RMSD of 0.0452). Caching ensures four cutoffs execute in under 2 minutes.
 
-
+### Decision 2026-07-09: Swapping CrystalNN with JmolNN for Guest Removal and Refining Fallback Linker Extraction
+- Context: In guest cleaning and pre-processing, `CrystalNN` was causing severe framework truncation by failing to identify organic-organic covalent bonds (e.g. C-C, C-N, C-O) in molecular linkers, leading to framework fragmentation and silent deletion of linker cores. Furthermore, fallback linker extraction was outputting truncated linkers due to metal seeds stealing atoms and coordination shell atoms being skipped.
+- Decision:
+  1. Prioritize `JmolNN` (covalent radii-based coordination model) over `CrystalNN` as the default framework component solver in `preprocess_dataset.py` and `remove_guests.py`. Trigger the `CrystalNN` fallback block only on runtime exceptions, rather than when zero guest atoms are isolated.
+  2. Refine `_fallback_export_mof_node_linker` in `fragmentation_oop.py` to exclude metals from being selected as organic linker seeds.
+  3. Initialize `global_vis` as an empty set (instead of `expanded_node`) and remove `v in expanded_node` from the BFS skip condition to allow the coordinates of coordinating carboxylate and N-oxide oxygens to be completely collected.
+- Consequences: Truncated organic linkers are fully resolved to their complete chemical compositions (e.g., dipyridine N,N'-dioxide is restored from 6 atoms to the complete 22-atom `C10 H8 N2 O2` molecule; terephthalate is restored to 16-atom `C8 H4 O4`; and dobpdc is restored to 26-atom `C14 H6 O6`).
+- Alternatives considered: Manually capping and reconstructing missing atoms with geometry optimization; rejected because restoring correct extraction connectivity from the intact crystal is much more robust and preserves original bond lengths/angles.

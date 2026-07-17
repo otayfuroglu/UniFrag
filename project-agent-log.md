@@ -2,6 +2,154 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-07-17 - UniFrag: Added QM-Ready "OnlyLinker" Fragment Export & Boundary Hydrogen Stripping
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Moved `_clean_linker_molecule` to `BaseFragmenter` with `METALS = set()` default class attribute. Implemented boundary hydrogen stripping inside `_clean_linker_molecule` by identifying boundary atoms where periodic heavy degree > linker heavy degree and deleting any bonded Hydrogen atoms. Ensured periodic structure is loaded early via `self.structure = struct`. Passed `orig_indices` in all node/linker component export paths. Added instance attribute `self.partner_vec` tracking bilayer shift vector in `COFFragmenter` and replicated bilayer stacking for `OnlyLinker` fragments in `_process_cof_file`.
+  - `project-decisions.md` [MODIFY] — Updated decision entry.
+- **Summary:**
+  - Keeps helper library files (e.g. in `cof_linkers_lib/` or `mof_linkers_lib/`) completely uncapped by stripping crystallographic N-H/O-H boundary hydrogens, while preparing fully H-capped, force-field optimized, and spin-corrected QM-ready versions (labeled `OnlyLinker`) for the main ExtXYZ collection. If the output cluster is bi-layer, the QM-ready linker is automatically generated as stack-aligned bi-layer as well.
+- **Validation:**
+  - Verified on `test_cofs_for_linker/COF-TpAzo.cif`:
+    - Raw template in `cof_linkers_lib/COF-TpAzo_00.xyz` is now correctly stripped to `H8 C12 N4` (uncapped, 24 atoms).
+    - QM-ready fragment `COF-TpAzoFragCofOnlyLinker` in `test_cofs_for_linker/fragments_collection.extxyz` is correctly bi-layer H-capped to `H20 C24 N8` (52 atoms, bilayer).
+  - Verified on `test_for_node/Mg2_dobpdc_CoRE_ASR.cif`:
+    - Generates `Mg2dobpdcCoREASRFragMofOnlyLinker` with formula `H12 C14 O6` (32 atoms, neutral dicarboxylic dihydroxybiphenyl acid).
+  - Verified on `mofs_from_raspa/MgMOF-74.cif`:
+    - Generates `MgMOF-74FragMofOnlyLinker` with formula `H8 C8 O6` (22 atoms, neutral dobdc diacid).
+  - Ran the regression test suite `run_cof_family.sh` on the COF 1xx series; all tests successfully passed.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-17 - UniFrag: Cleaved Imine C=N Bonds Directly to Protect Terminal Functional Atoms in COFs
+- **Changed files:**
+  - `coffragmentor.py` [MODIFY] — Refined `COF.fragment()` C-N bond cleavage heuristic to target C-N bonds where Carbon has heavy-atom degree exactly 2 (representing the imine `C=N` double bond), rather than degree >= 3.
+  - `project-decisions.md` [MODIFY] — Updated decision entry.
+- **Summary:**
+  - Cleaved the imine `C=N` double bond directly instead of cutting aromatic C-N single bonds. This ensures that the terminal amine/imine Nitrogen atoms stay with the amine-derived linkers and terminal formyl Carbon/Oxygen atoms stay with the aldehyde-derived nodes.
+- **Validation:**
+  - Verified on `test_cofs_for_linker/COF-TpAzo.cif`:
+    - The extracted Azo linker is successfully generated with its complete formula **`H10 C12 N4`** (26 atoms), containing both the central azo and terminal amine Nitrogen atoms.
+    - The extracted Tp node is generated with its complete formula **`H3 C9 O3`** (15 atoms), containing the formyl Carbons capped with Hydrogen.
+  - Ran the regression test suite `run_cof_family.sh` on the COF 1xx series; all tests successfully passed.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-09 - UniFrag: Restricted Minimized MOF Fragments to Exactly One Full Linker
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Restructured SBU minimization logic in `_get_fragment` to keep exactly one largest linker full and minimize all others.
+  - `project-decisions.md` [MODIFY] — Added decision entry.
+- **Summary:**
+  - Restricted minimized fragments to contain exactly one full coordinating linker to guarantee minimal, low-cost cluster models for QM calculations, while truncating all other coordinating linkers.
+- **Validation:**
+  - Verified on `test_for_node/Mg2_dobpdc_CoRE_ASR.cif`: the minimized fragment size is successfully capped at 104 atoms (containing exactly 1 full 26-atom dobpdc linker and 5 truncated linkers), while the normal fragment size is 183 atoms.
+  - Re-ran the fragmentation and post-processing size-filtering pipelines on the entire Mg dataset; confirmed all 101 fragments processed successfully, retaining 89 and eliminating 12 large normal fragments.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-09 - UniFrag: Excluded Metal-Carbon and Metal-Hydrogen Bonds in MOF Node Extraction
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Refined `MOFFragmenter.is_valid_bond` to explicitly return `False` for bonds between metals and Carbon/Hydrogen.
+  - `project-decisions.md` [MODIFY] — Added decision entry.
+- **Summary:**
+  - Prevented carboxylate carbons and capping hydrogens from being incorrectly included inside extracted SBU nodes by blocking metal-carbon and metal-hydrogen bond recognition in `is_valid_bond`.
+- **Validation:**
+  - Ran fragmentation on `test_for_node/Mg2_dobpdc_CoRE_ASR.cif` and confirmed the extracted SBU node is successfully cleaned from `Mg1 C3 O5` to inorganic `Mg1 O5` (and the dobpdc linker remains intact at `H6 C14 O6`).
+  - Ran the refined pipeline on the entire Mg dataset and checked SOAP similarities. Excluding the carbon coordinate pollution increased the environment similarity match at a 6.0 Å cutoff significantly from **84.94% to 87.48%** (and from 98.55% to 99.25% at 3.0 Å).
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-09 - UniFrag: Swapped CrystalNN with JmolNN for Guest Removal and Refined Fallback Linker Extraction
+- **Changed files:**
+  - `runUniFrag/preprocess_dataset.py` [MODIFY] — Swapped `CrystalNN` with `JmolNN` as the primary connected component solver, and corrected the exception fallback criteria.
+  - `runUniFrag/remove_guests.py` [MODIFY] — Swapped `CrystalNN` with `JmolNN` as the primary connected component solver, and corrected the exception fallback criteria.
+  - `fragmentation_oop.py` [MODIFY] — Refined `_fallback_export_mof_node_linker` to exclude metal seeds and initialize `global_vis` as an empty set.
+  - `project-memory.md` [MODIFY] — Added decision entry.
+  - `project-decisions.md` [MODIFY] — Added decision entry.
+- **Summary:**
+  - Swapped `CrystalNN` with `JmolNN` as the default framework component solver during guest cleaning, preventing the framework from being fractured into pieces and silently deleted.
+  - Excluded metal atoms from being selected as organic linker seeds.
+  - Removed `v in expanded_node` from the BFS skip condition and initialized `global_vis` as empty to completely collect coordinating carboxylate and N-oxide oxygens.
+- **Validation:**
+  - Ran pre-processing on raw `EZEQEH`, `EZEQIL`, and `EZEQOR` parent structures and confirmed they are preserved intact (e.g. `Mg4 H32 C52 N4 O20` for `EZEQEH`).
+  - Ran fragmentation on the preprocessed parent structures and `Mg2_dobpdc_CoRE_ASR.cif`, verifying that all linkers are extracted completely without missing atoms (dipyridine N,N'-dioxide is complete `C10 H8 N2 O2`; terephthalate is complete `C8 H4 O4`; and dobpdc is complete `C14 H6 O6`).
+  - Placed all refined XYZ files in `test_for_linker/cifs/` for downstream testing.
+  - Re-preprocessed and re-fragmented the entire Mg collection in `runUniFrag/mg_cr_cifs_noduplicated/`. Comparison against backed up collections showed:
+    - 0 changes in metal-centered coordination fragments (89/89 are identical).
+    - Systemic, dramatic improvements in the extracted linkers library: library size decreased from 46 to 42 unique linkers due to correct duplicate detection; large linkers were fully restored (+42 atoms for `DAJWET`); and missing coordinating atoms (+1 Oxygen/Nitrogen) were restored for dozens of linkers.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-09 - CSD & CoRE Database: Extract and Purify Mg2(dobpdc) CIF Structure (RAVVUH)
+- **Changed files:**
+  - `Mg2_dobpdc.cif` [NEW] — Guest-cleaned CIF structure of Mg2(dobpdc) in the workspace root.
+  - `Mg2_dobpdc_raw.cif` [NEW] — Original/unpurified CSD structure of Mg2(dobpdc) with guest molecules.
+  - `Mg2_dobpdc_CoRE_ASR.cif` [NEW] — Computation-Ready (CoRE) ASR structure of Mg2(dobpdc) with DDEC6 charges.
+  - `Mg2_dobpdc_CoRE_FSR.cif` [NEW] — Computation-Ready (CoRE) FSR structure of Mg2(dobpdc) with DDEC6 charges.
+- **Summary:**
+  - Used the CSD Python API `TextNumericSearch` to locate the CIF file for Mg2(dobpdc) (4,4'-dioxidobiphenyl-3,3'-dicarboxylate linker), identifying entry `RAVVUH` (common name: `IRMOF-74-II`).
+  - Ran Phase 3 of `preprocess_dataset.py` (guest stripping via connected component analysis with JmolNN) to clean guest molecules from the structure.
+  - Stripped 54 guest atoms (water molecules) from the pore space, reducing the formula from `Mg18 H54 C126 O144` (unpurified) to `Mg18 H54 C126 O90` (purified), while leaving the coordinated framework water molecules intact.
+  - Identified and extracted the CoRE database counterparts (ASR and FSR subsets containing DDEC6 charges calculated by PACMAN) present under CSD-modified files.
+- **Validation:**
+  - Verified structure cell parameters and space group (`R-3`) match Deng et al. (Science 2012).
+  - Verified guest stripping results using Pymatgen/CCDC connected component analysis, confirming all unbound water molecules are removed and only framework-coordinated waters remain.
+  - Confirmed the CoRE ASR (`Mg6 H18 C42 O18`) has all solvents stripped (exposing open Mg sites), while the CoRE FSR (`Mg6 H18 C42 O30`) preserves coordinates for the metal-coordinated water molecules.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-06 - Manuscript: Drafted Mg-MOF Extraction and Validation Results Section
+- **Changed files:**
+  - `results_mg_mofs.md` [NEW] — Artifact file containing the complete results and discussion section draft for the manuscript on Mg-based MOFs.
+- **Summary:**
+  - Drafted a detailed, publication-ready results section describing the pipeline for Mg-based MOF extraction, pre-processing, guest removal, dual-fragmentation (Normal vs. Minimized), size filtering, and multi-cutoff SOAP validation (3.0, 4.0, 5.0, and 6.0 Å).
+  - Summarized execution statistics (5,226 scanned structures, 77 Mg-containing structures, 14 guest-stripped structures, 89 retained frames, 12 eliminated large normal frames, and 1 timeout).
+  - Tabulated chemical formulas before and after guest removal and listed pruned large Normal fragments.
+  - Summarized SOAP similarity and RMSD metrics across all four cutoffs for 551 Mg centers, detailing the physical causes of the observed trends (primary coordination preservation vs. outer shell capping changes).
+- **Validation:**
+  - Drafted and verified all values and metrics against the local report files (`preprocess_report.md`, `elimination_report.md`, and `mg_soap_analysis_*.md`).
+- **Follow-up risks:**
+  - None.
+
+## 2026-06-25 - UniFrag: Multi-Cutoff SOAP Analysis (3.0, 4.0, 5.0, 6.0 Å) on Filtered Mg Dataset
+- **Changed files:**
+  - None.
+- **Summary:**
+  - Executed a multi-cutoff SOAP coordination environment analysis loop (`3.0`, `4.0`, `5.0`, and `6.0` Å) on the filtered Mg CR dataset.
+  - Tracked change trends across different radii: tighter cutoffs show near-perfect coordination shell replication (98.55% highly represented and median similarity of 0.9997 at 3.0 Å), while wider cutoffs incorporate boundary environment effects (84.21% highly represented and median similarity of 0.9927 at 6.0 Å).
+- **Validation:**
+  - Executed `/Users/omert/miniconda3/bin/python runUniFrag/analyze_soap.py --metal Mg --r_cut 3.0 4.0 5.0 6.0 --brain_dir /Users/omert/.gemini/antigravity/brain/5cc8c9bc-d53e-489b-a932-9474aaa71491`.
+  - Confirmed successful generation of reports (`mg_soap_analysis_{r_cut}.md`) and side-by-side plots (`mg_soap_distribution_{r_cut}.png`) for all four cutoffs in both destination and brain directories.
+- **Follow-up risks:**
+  - None.
+
+## 2026-06-25 - UniFrag: Update SOAP Analysis on Filtered Mg Dataset
+- **Changed files:**
+  - None.
+- **Summary:**
+  - Re-ran the generalized SOAP analysis script on the filtered Mg CR dataset (now containing 89 frames after eliminating fragments > 200 atoms).
+  - Calculated 551 parent descriptors and 154 fragment descriptors.
+  - Verified that local coordination coverage was preserved perfectly: the highly represented (>=0.98 similarity) count remained exactly 84.21% (464/551 centers) because the corresponding minimized versions (<=200 atoms) of the eliminated large normal fragments were retained in the library.
+- **Validation:**
+  - Executed `/Users/omert/miniconda3/bin/python runUniFrag/analyze_soap.py --metal Mg --r_cut 6.0 --brain_dir /Users/omert/.gemini/antigravity/brain/5cc8c9bc-d53e-489b-a932-9474aaa71491`.
+  - Confirmed successful regeneration of report `mg_soap_analysis_6.0.md` and combined figure `mg_soap_distribution_6.0.png` in both destination and brain directories.
+- **Follow-up risks:**
+  - None.
+
+## 2026-06-25 - UniFrag: Implement Post-processing Script to Eliminate Large Fragments (>200 atoms)
+- **Changed files:**
+  - `runUniFrag/filter_large_fragments.py` [NEW] — Post-processing filtering script that reads the fragmentation CSV summary and parses the ExtXYZ collection to filter out and segregate large fragments (exceeding a user-specified threshold, default 200).
+  - `project-memory.md` [MODIFY] — Documented run command examples for the filtering script.
+- **Summary:**
+  - Implemented `filter_large_fragments.py` supporting safety fallbacks for non-numeric/`TIMEOUT` entries in the CSV summary.
+  - Automatically backs up original `.extxyz` and `.csv` files before filtering.
+  - Moves excluded frames to a separate `eliminated_fragments.extxyz` file, updates the main `fragments_collection.extxyz` with retained frames, and appends `normal_eliminated` and `min_eliminated` flags to the CSV summary for downstream traceability.
+  - Generated a detailed `elimination_report.md` specifying each eliminated structure, its parent REFCODE, atom count, formula, and reason for elimination.
+- **Validation:**
+  - Ran the script on the Mg CR dataset: `/Users/omert/miniconda3/bin/python runUniFrag/filter_large_fragments.py --metal Mg --max_atoms 200 --brain_dir /Users/omert/.gemini/antigravity/brain/5cc8c9bc-d53e-489b-a932-9474aaa71491`.
+  - Scanned 101 frames; successfully retained 89 frames and eliminated 12 large frames (e.g., normal fragment of `DAJWET` at 556 atoms). Verified the report and the collection copy were successfully saved in the active conversation's brain folder.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-06-25 - UniFrag: Implement Generalized Post-processing SOAP Fingerprint Analysis Script
 - **Changed files:**
   - `runUniFrag/analyze_soap.py` [NEW] — General post-processing coordination environment analysis script supporting customizable target metals, input directories, ExtXYZ paths, and output destinations.

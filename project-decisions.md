@@ -2,6 +2,50 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
+## Decision 2026-07-17: Exporting QM-Ready "OnlyLinker" Fragments to ExtXYZ Collections
+- Context: While raw linkers are exported as reference templates to the helper libraries (`mof_linkers_lib/` and `cof_linkers_lib/`), they lack capping at boundary cut sites. The user requested generating a fully capped, QM-ready version of each unique linker and saving it as an extra fragment in the main `fragments_collection.extxyz` file, labeled `"<COF/MOF_Name>FragCofOnlyLinker"` or `"<COF/MOF_Name>FragMofOnlyLinker"`. Furthermore, helper libraries should remain strictly uncapped (stripping any crystallographic N-H/O-H boundary hydrogens to keep the core template raw).
+- Decision: Implemented a robust extraction and processing pipeline:
+  1. Captured raw unique linkers during MOF/COF component exports into an instance list `self.extracted_linkers`.
+  2. Moved `_clean_linker_molecule` to `BaseFragmenter` and added class attribute `METALS = set()`. Set `self.structure = struct` early in both extraction pathways to expose the periodic structure context.
+  3. Inside `_clean_linker_molecule`, identified boundary atoms by comparing their original periodic heavy degree to their extracted linker heavy degree. Any Hydrogen atoms directly bonded to these boundary atoms (like the crystallographic enamine N-H hydrogens in `COF-TpAzo`) are stripped when exporting to helper libraries (`mof_linkers_lib/` / `cof_linkers_lib/`).
+  4. Prepared QM-ready linkers using `_make_qm_ready_linker`, which applies boundary H-capping (`_cap_open_oxygens`), force-field capping H geometry optimization, and odd-electron multiplicity correction (`fix_odd_electron_multiplicity`). Flushed these to the main collection.
+- Consequences:
+  1. Main collections now contain both coordination environment clusters (`*FragCof`, `*FragCofMin`) and the isolated, QM-ready capped linkers (`*FragCofOnlyLinker`).
+  2. For `COF-TpAzo`, the raw helper template in `cof_linkers_lib/COF-TpAzo_00.xyz` is now correctly stripped to `H8 C12 N4` (uncapped), while the QM-ready fragment in the ExtXYZ collection is capped to `H10 C12 N4` (QM-ready).
+- Alternatives considered: Capping the helper template files directly; rejected because helper libraries are intentionally kept as raw periodic templates, whereas `fragments_collection.extxyz` is the designated repository for all QM-ready fragments.
+
+## Decision 2026-07-17: Protecting Terminal Functional Group Atoms in COF Linkers by Cleaving Imine C=N Bonds Directly
+- Context: In `COF-TpAzo` (and other imine/hydrazone/azine COFs), cutting the aromatic C-N single bonds stripped the terminal Nitrogen atoms from the amine-derived linkers, leaving the linkers with terminal Carbon atoms (non-physical for diamine building blocks like azodianiline).
+- Decision: Refined the C-N cleavage heuristic in `COF.fragment()` inside `coffragmentor.py` to target C-N bonds where the Carbon has a heavy-atom degree of exactly 2 (which represents the imine `C=N` double bond itself), rather than cutting the aromatic C-N single bonds where Carbon has a heavy-atom degree >= 3.
+- Consequences:
+  1. Linkers derived from amine building blocks (like `4,4'-azodianiline`) retain their terminal Nitrogen atoms, resulting in complete, correct formulas such as `H10 C12 N4` (complete diamine).
+  2. Nodes derived from aldehyde building blocks (like `1,3,5-triformylphloroglucinol`) retain their formyl Carbon atoms, resulting in complete, correct formulas such as `H3 C9 O3` (aldehyde/ketone).
+  3. This ensures that the terminal functional group atoms (N or O) are correctly partitioned and stay with their corresponding original chemical building blocks.
+- Alternatives considered: Keeping the aromatic single bond cut and manually reconstructing the terminal functional atoms; rejected because cutting the imine double bond directly is topologically clean, chemically correct, and avoids any reconstruction overhead.
+
+## Decision 2026-07-09: Restricting Minimized MOF Fragments to Exactly One Full Linker
+- Context: Minimized fragments (`*Min`) should represent minimal cluster models of the coordination environment for low-cost QM calculations. Previously, the SBU minimization kept all coordinating linkers full if their bridge metals were separated by > 4.5 Å, which kept multiple linkers full and generated excessively large minimized fragments (e.g. still containing 5 or 6 complete linkers).
+- Decision: Restructured `MOFFragmenter._get_fragment` to sort the coordinating components (linkers) by size and set `keep_linker = True` for **exactly one** largest linker, while setting `keep_linker = False` for all other linkers.
+- Consequences: Minimized fragments now contain exactly one full linker, and all other coordinating linkers are minimized (truncated to their first coordination sphere / phenyl ring, and capped with hydrogens). This guarantees minimal, chemically complete coordination environment clusters (e.g., `Mg2_dobpdc` minimized fragment size is successfully capped at 104 atoms while the normal fragment size is 183 atoms).
+- Alternatives considered: Keeping all linkers minimized (truncated); rejected because keeping at least one full linker is critical to study the full organic linker environment and boundaries.
+
+## Decision 2026-07-09: Excluding Metal-Carbon and Metal-Hydrogen Bonds in MOF Node and Linker Extraction
+- Context: In fallback MOF SBU node extraction, carboxylate carbons and capping hydrogens were being incorrectly included as part of the metal SBU nodes (e.g. `Mg1 C3 O5` instead of `Mg1 O5`). This happened because `is_valid_bond` returned `True` for any bond involving a metal under 2.6 Å, which mistakenly matched metal-to-carboxylate-carbon distances (typically 2.50-2.55 Å).
+- Decision: Refined `MOFFragmenter.is_valid_bond` to explicitly return `False` if either atom is a metal (`self.METALS`) and the other is Carbon (`C`) or Hydrogen (`H`).
+- Consequences:
+  1. Extracted SBU nodes are now chemically clean inorganic nodes without any carbon/hydrogen inclusions (e.g., the fallback node for `Mg2_dobpdc_CoRE_ASR` is successfully cleaned from `Mg1 C3 O5` to `Mg1 O5`).
+  2. The SOAP local environment similarities for the Mg dataset at a 6.0 Å cutoff increased significantly from **84.94% to 87.48%** (and from 98.55% to 99.25% at 3.0 Å) due to cleaner node environment representations matching parent crystals perfectly.
+- Alternatives considered: Decreasing the metal coordination cutoff radius below 2.5 Å; rejected because some legitimate metal-oxygen coordinate bonds (e.g. in hydrated metal clusters) exceed 2.5 Å, and filtering by element type (C/H) is much safer and chemically correct.
+
+## Decision 2026-07-09: Swapping CrystalNN with JmolNN for Guest Removal and Refining Fallback Linker Extraction
+- Context: In guest cleaning and pre-processing, `CrystalNN` was causing severe framework truncation by failing to identify organic-organic covalent bonds (e.g. C-C, C-N, C-O) in molecular linkers, leading to framework fragmentation and silent deletion of linker cores. Furthermore, fallback linker extraction was outputting truncated linkers due to metal seeds stealing atoms and coordination shell atoms being skipped.
+- Decision:
+  1. Prioritize `JmolNN` (covalent radii-based coordination model) over `CrystalNN` as the default framework component solver in `preprocess_dataset.py` and `remove_guests.py`. Trigger the `CrystalNN` fallback block only on runtime exceptions, rather than when zero guest atoms are isolated.
+  2. Refine `_fallback_export_mof_node_linker` in `fragmentation_oop.py` to exclude metals from being selected as organic linker seeds.
+  3. Initialize `global_vis` as an empty set (instead of `expanded_node`) and remove `v in expanded_node` from the BFS skip condition to allow the coordinates of coordinating carboxylate and N-oxide oxygens to be completely collected.
+- Consequences: Truncated organic linkers are fully resolved to their complete chemical compositions (e.g., dipyridine N,N'-dioxide is restored from 6 atoms to the complete 22-atom `C10 H8 N2 O2` molecule; terephthalate is restored to 16-atom `C8 H4 O4`; and dobpdc is restored to 26-atom `C14 H6 O6`).
+- Alternatives considered: Manually capping and reconstructing missing atoms with geometry optimization; rejected because restoring correct extraction connectivity from the intact crystal is much more robust and preserves original bond lengths/angles.
+
 ## Decision 2026-06-24: Continuous Local SOAP Fingerprint Representation with Multi-Cutoff Support, Pre-Loading Caching, and RMSD Analysis
 - Context: Analyzing fragment representation using discrete coordination number categories (e.g. `CN=4 [O4]`) fails to capture continuous structural distortions, exact local symmetry, or variations in coordination shells (such as the presence of capping hydrogens vs parent coordinates). Furthermore, analyzing multiple cutoffs sequentially is slow if crystal files are parsed repeatedly from disk.
 - Decision: Implemented a local SOAP (Smooth Overlap of Atomic Positions) fingerprint analysis script `runUniFrag/analyze_zn_soap.py` using `dscribe` supporting a list of user-configurable cutoffs (`--r_cut`, default `[6.0]`).
