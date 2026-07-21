@@ -983,6 +983,24 @@ class MOFFragmenter(BaseFragmenter):
     METALS = {"Mg", "Zn", "Cu", "Fe", "Co", "Ni", "Mn", "Zr", "Ti", "V", "Cr", "Al"}
     LARGE_NON_METALS = {"Br", "I", "S", "P", "Cl"}
 
+    def _load_clean_structure(self, mof_path):
+        try:
+            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
+            to_keep = []
+            for i in range(len(struct)):
+                dup = False
+                for kept in to_keep:
+                    d = struct.get_distance(i, kept)
+                    if d < 0.8:
+                        dup = True
+                        break
+                if not dup:
+                    to_keep.append(i)
+            struct = Structure.from_sites([struct[idx] for idx in to_keep])
+            return struct
+        except Exception:
+            return None
+
     def is_valid_bond(self, s1_str, s2_str, dist):
         if s1_str in self.METALS or s2_str in self.METALS:
             if "C" in (s1_str, s2_str) or "H" in (s1_str, s2_str):
@@ -1126,34 +1144,34 @@ class MOFFragmenter(BaseFragmenter):
                 first_layer.add(nb)
         keep_atoms.update(first_layer)
 
-        q = deque([(fl, [fl]) for fl in first_layer])
-        seen = set(first_layer)
-        path_to_ring = []
-        ring_target = None
-
-        while q:
-            curr, path = q.popleft()
-            if curr in ring_nodes:
-                path_to_ring = path
-                ring_target = curr
-                break
-            for nb in hadj.get(curr, []):
-                if nb not in seen:
-                    seen.add(nb)
-                    q.append((nb, path + [nb]))
-
-        if ring_target is not None:
-            keep_atoms.update(path_to_ring)
-            comp = {ring_target}
-            cq = deque([ring_target])
-            while cq:
-                c = cq.popleft()
-                for nb in hadj.get(c, []):
-                    if nb not in comp:
-                        if (min(c,nb), max(c,nb)) in ring_edges:
-                            comp.add(nb)
-                            cq.append(nb)
-            keep_atoms.update(comp)
+        for fl in first_layer:
+            q = deque([(fl, [fl])])
+            seen = {fl}
+            path_to_ring = []
+            ring_target = None
+            while q:
+                curr, path = q.popleft()
+                if curr in ring_nodes:
+                    path_to_ring = path
+                    ring_target = curr
+                    break
+                for nb in hadj.get(curr, []):
+                    if nb not in seen:
+                        seen.add(nb)
+                        q.append((nb, path + [nb]))
+            
+            if ring_target is not None:
+                keep_atoms.update(path_to_ring)
+                comp = {ring_target}
+                cq = deque([ring_target])
+                while cq:
+                    c = cq.popleft()
+                    for nb in hadj.get(c, []):
+                        if nb not in comp:
+                            if (min(c,nb), max(c,nb)) in ring_edges:
+                                comp.add(nb)
+                                cq.append(nb)
+                keep_atoms.update(comp)
 
         # Carboxylate/phosphonate/sulfonate preservation:
         # Do a single-pass expansion to retain O/S/P/N atoms that are directly bonded
@@ -1422,18 +1440,79 @@ class MOFFragmenter(BaseFragmenter):
                     existing_keys.add(key)
 
             sbus = getattr(collection, "sbus", list(collection) if collection is not None else [])
+            candidates = []
+            if kind == "node":
+                _merge_cutoff = 3.5
+                struct = result.structure
+                _lat = struct.lattice.matrix
+                
+                node_list = []
+                for sbu in sbus:
+                    mol = getattr(sbu, "molecule", None)
+                    if mol is not None:
+                        node_list.append({
+                            'species': [str(x) for x in mol.species],
+                            'coords': [np.array(c, dtype=float) for c in mol.cart_coords]
+                        })
+                
+                visited_indices = set()
+                for i, n1 in enumerate(node_list):
+                    if i in visited_indices:
+                        continue
+                    group_indices = {i}
+                    group_sp = list(n1['species'])
+                    group_co = list(n1['coords'])
+                    
+                    q_g = deque([i])
+                    while q_g:
+                        curr_idx = q_g.popleft()
+                        curr_node = node_list[curr_idx]
+                        curr_metals = [curr_node['coords'][k] for k in range(len(curr_node['species'])) if curr_node['species'][k] in self.METALS]
+                        
+                        for j, n2 in enumerate(node_list):
+                            if j in visited_indices or j in group_indices:
+                                continue
+                            n2_sp = n2['species']
+                            n2_co = n2['coords']
+                            
+                            should_merge = False
+                            best_shift = np.zeros(3)
+                            best_d = float("inf")
+                            for ia in (-1, 0, 1):
+                                for ib in (-1, 0, 1):
+                                    for ic in (-1, 0, 1):
+                                        shift = ia * _lat[0] + ib * _lat[1] + ic * _lat[2]
+                                        for om_pos in [n2_co[k] + shift for k in range(len(n2_sp)) if n2_sp[k] in self.METALS]:
+                                            for nm_pos in curr_metals:
+                                                d = float(np.linalg.norm(om_pos - nm_pos))
+                                                if 0.1 < d < _merge_cutoff and d < best_d:
+                                                    should_merge = True
+                                                    best_shift = shift
+                                                    best_d = d
+                            if should_merge:
+                                for k in range(len(n2_sp)):
+                                    group_sp.append(n2_sp[k])
+                                    group_co.append(n2_co[k] + best_shift)
+                                group_indices.add(j)
+                                q_g.append(j)
+                    visited_indices.update(group_indices)
+                    final_sp = []
+                    final_co = []
+                    self._append_merged_atoms(final_sp, final_co, group_sp, group_co)
+                    candidates.append((final_sp, final_co, None))
+            else:
+                for sbu in sbus:
+                    mol = getattr(sbu, "molecule", None)
+                    if mol is not None:
+                        sp = [str(x) for x in mol.species]
+                        co = [c for c in mol.cart_coords]
+                        orig_indices = getattr(sbu, "indices", None)
+                        candidates.append((sp, co, orig_indices))
+
             seen = set(existing_keys)
             out_idx = 0
-            for sbu in sbus:
-                mol = getattr(sbu, "molecule", None)
-                if mol is None:
-                    continue
-                    
-                sp = [str(x) for x in mol.species]
-                co = [c for c in mol.cart_coords]
-                
+            for sp, co, orig_indices in candidates:
                 if kind == "linker":
-                    orig_indices = getattr(sbu, "indices", None)
                     sp, co = self._clean_linker_molecule(sp, co, orig_indices=orig_indices)
                     if not sp:
                         continue
@@ -1495,9 +1574,8 @@ class MOFFragmenter(BaseFragmenter):
         return True
 
     def _fallback_export_mof_node_linker(self, mof_path):
-        try:
-            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
-        except Exception:
+        struct = self._load_clean_structure(mof_path)
+        if struct is None:
             return False
 
         symbols = [str(site.species_string) for site in struct]
@@ -1511,7 +1589,16 @@ class MOFFragmenter(BaseFragmenter):
                 if j <= i:
                     continue
                 d = float(np.linalg.norm(ci - n.coords))
-                if self.is_valid_bond(si, symbols[j], d):
+                
+                is_bonded = False
+                if si in self.METALS and symbols[j] in self.METALS:
+                    if d < 3.6:
+                        is_bonded = True
+                else:
+                    if self.is_valid_bond(si, symbols[j], d):
+                        is_bonded = True
+                        
+                if is_bonded:
                     graph[i].append((j, n.coords - ci))
                     graph[j].append((i, ci - n.coords))
 
@@ -1539,6 +1626,27 @@ class MOFFragmenter(BaseFragmenter):
                 if symbols[v] not in self.METALS and v not in expanded_node:
                     expanded_node.add(v)
                     node_coords[v] = node_coords[u] + shift
+
+        # Find all bridging non-metal atoms (like C in carboxylates)
+        # that are bonded to at least two distinct atoms in expanded_node (which are non-metals).
+        bridging_atoms = set()
+        for u in range(len(struct)):
+            if symbols[u] in self.METALS or u in expanded_node:
+                continue
+            
+            count = 0
+            best_shift = None
+            for v, shift in graph[u]:
+                if v in expanded_node and symbols[v] not in self.METALS:
+                    count += 1
+                    if best_shift is None:
+                        best_shift = node_coords[v] - shift
+            
+            if count >= 2:
+                bridging_atoms.add(u)
+                node_coords[u] = best_shift
+                
+        expanded_node.update(bridging_atoms)
 
         linker_comp = set()
         linker_coords = {}
@@ -1570,8 +1678,64 @@ class MOFFragmenter(BaseFragmenter):
                 linker_coords = comp_coords
 
         stem = Path(mof_path).stem
-        node_sp = [symbols[i] for i in sorted(expanded_node)]
-        node_co = [np.array(node_coords[i], dtype=float) for i in sorted(expanded_node)]
+        # Assemble SBU nodes using coordinate-based neighbor addition
+        node_sp = []
+        node_co = []
+        node_indices = []
+        for u in node:
+            node_sp.append(symbols[u])
+            node_co.append(np.array(node_coords[u], dtype=float))
+            node_indices.append(u)
+
+        add_sp = []
+        add_co = []
+        add_indices = []
+        for u in node:
+            for v, shift in graph[u]:
+                if symbols[v] not in self.METALS:
+                    pos = node_coords[u] + shift
+                    add_sp.append(symbols[v])
+                    add_co.append(pos)
+                    add_indices.append(v)
+        
+        for s, c, idx in zip(add_sp, add_co, add_indices):
+            dup = False
+            for ex_s, ex_c in zip(node_sp, node_co):
+                if ex_s == s and np.linalg.norm(ex_c - c) < 0.8:
+                    dup = True
+                    break
+            if not dup:
+                node_sp.append(s)
+                node_co.append(c)
+                node_indices.append(idx)
+
+        # Find all bridging non-metal atoms (like C in carboxylates)
+        # by tracing outward from coordinating atoms (O/N) in the SBU
+        bridging_sp = []
+        bridging_co = []
+        for idx_sbu, sp in enumerate(node_sp):
+            if sp not in {"O", "N"}:
+                continue
+            v = node_indices[idx_sbu]
+            for w, shift in graph[v]:
+                if symbols[w] in self.METALS or symbols[w] in {"O", "N", "H"}:
+                    continue
+                
+                pos_w = node_co[idx_sbu] + shift
+                
+                # Count how many coordinating atoms in the SBU this pos_w is bonded to
+                bond_count = 0
+                for idx_sbu2, sp2 in enumerate(node_sp):
+                    if sp2 in {"O", "N"}:
+                        d = np.linalg.norm(node_co[idx_sbu2] - pos_w)
+                        if self.is_valid_bond(symbols[w], sp2, d):
+                            bond_count += 1
+                
+                if bond_count >= 2:
+                    bridging_sp.append(symbols[w])
+                    bridging_co.append(pos_w)
+
+        self._append_merged_atoms(node_sp, node_co, bridging_sp, bridging_co, tol=0.8)
         node_written = self._export_mof_component_library(node_sp, node_co, stem, "node")
 
         linker_written = False
@@ -1593,7 +1757,7 @@ class MOFFragmenter(BaseFragmenter):
             print(f"  moffragmentor unavailable: {exc}")
             return None
         try:
-            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
+            struct = self._load_clean_structure(mof_path)
             result = MOF.from_cif(mof_path).fragment()
         except Exception as exc:
             print(f"  moffragmentor node+linker failed: {exc}")
@@ -1860,10 +2024,7 @@ class MOFFragmenter(BaseFragmenter):
     def extract(self, mof_path, center_idx=-1, nmetals=3, output_path="fragment.xyz", minimize=False):
         self.extracted_linkers = []
         print(f"Loading '{mof_path}'...")
-        try:
-            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
-        except Exception:
-            struct = None
+        struct = self._load_clean_structure(mof_path)
         self.structure = struct
 
         combined = self._try_moffragmentor_node_linker_fragment(mof_path, output_path, minimize=minimize)
@@ -1871,7 +2032,7 @@ class MOFFragmenter(BaseFragmenter):
             return combined
         self._fallback_export_mof_node_linker(mof_path)
         if struct is None:
-            struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
+            struct = self._load_clean_structure(mof_path)
         structure_stem = Path(mof_path).stem
         if nmetals < 1:
             raise ValueError(f"--nmetals must be >= 1 (got {nmetals}).")
@@ -2421,10 +2582,7 @@ class MOFFragmenter(BaseFragmenter):
                 d = np.linalg.norm(n.coords - cur_site.coords)
                 if not self.is_valid_bond(cur_site.species_string, n.species_string, d):
                     continue
-                nb_frac = np.array(supercell[nb].frac_coords)
-                dfrac = nb_frac - cur_frac
-                dfrac -= np.round(dfrac)
-                rebuilt_unwrapped[nb] = cur_pos + supercell.lattice.get_cartesian_coords(dfrac)
+                rebuilt_unwrapped[nb] = cur_pos + (n.coords - cur_site.coords)
                 q.append(nb)
         for idx in final_indices:
             if idx not in rebuilt_unwrapped:

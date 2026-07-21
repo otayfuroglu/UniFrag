@@ -6,16 +6,16 @@ SOAP compares environments within a continuous **5.0 Å cutoff**, capturing deta
 
 ## Executive Summary
 
-* **Average SOAP Cosine Similarity**: `0.9940`
-* **Median SOAP Cosine Similarity**: `0.9956`
-* **Average SOAP Fingerprint RMSD**: `0.0593`
-* **Median SOAP Fingerprint RMSD**: `0.0565`
+* **Average SOAP Cosine Similarity**: `0.9928`
+* **Median SOAP Cosine Similarity**: `0.9955`
+* **Average SOAP Fingerprint RMSD**: `0.0633`
+* **Median SOAP Fingerprint RMSD**: `0.0603`
 * **Total Mg Centers Analyzed**: `535`
 
 | Similarity Range | Category | Count | Percentage | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| **$\ge 0.98$** | Highly Represented | 489 | **91.40%** | Local environment is almost perfectly preserved in the fragment library. |
-| **$[0.90, 0.98)$** | Moderately Represented | 46 | **8.60%** | Local environment is structurally similar, with minor variations (e.g. capped bonds, minor coordinates shift). |
+| **$\ge 0.98$** | Highly Represented | 479 | **89.53%** | Local environment is almost perfectly preserved in the fragment library. |
+| **$[0.90, 0.98)$** | Moderately Represented | 56 | **10.47%** | Local environment is structurally similar, with minor variations (e.g. capped bonds, minor coordinates shift). |
 | **$< 0.90$** | Poorly Represented / Missing | 0 | **0.00%** | Environment has significant structural/coordination divergence in the fragment library. |
 
 ## PCA and UMAP Environment Distribution Map
@@ -30,31 +30,31 @@ These Mg centers in parent crystals have the lowest similarity scores to any fra
 
 | Rank | Parent REFCODE | Mg Index | Max Cosine Similarity | Fingerprint RMSD | Best Matching Fragment |
 | :---: | :---: | :---: | :---: | :---: | :--- |
-| 1 | `LIQHAX` | 0 | `0.9731` | `0.1038` | `LIQHAXFragMof` |
-| 2 | `LIQHAX` | 2 | `0.9731` | `0.1038` | `LIQHAXFragMof` |
-| 3 | `AVIPAX` | 2 | `0.9734` | `0.1116` | `AVIPAXFragMofMin` |
-| 4 | `AVIPAX` | 1 | `0.9734` | `0.1116` | `AVIPAXFragMofMin` |
-| 5 | `AVIPAX` | 0 | `0.9734` | `0.1116` | `AVIPAXFragMofMin` |
-| 6 | `AVIPAX` | 3 | `0.9734` | `0.1116` | `AVIPAXFragMofMin` |
-| 7 | `BAKYOE` | 7 | `0.9764` | `0.1327` | `EZEQUXFragMof` |
-| 8 | `BAKYOE` | 4 | `0.9764` | `0.1327` | `EZEQUXFragMof` |
-| 9 | `BAKYOE` | 5 | `0.9764` | `0.1327` | `EZEQUXFragMof` |
-| 10 | `BAKYOE` | 6 | `0.9764` | `0.1327` | `EZEQUXFragMof` |
-| 11 | `HIBGEF` | 3 | `0.9769` | `0.2436` | `DAFYANFragMof` |
-| 12 | `HIBGEF` | 0 | `0.9769` | `0.2436` | `DAFYANFragMof` |
-| 13 | `HIBGEF` | 1 | `0.9769` | `0.2436` | `DAFYANFragMof` |
-| 14 | `HIBGEF` | 2 | `0.9769` | `0.2436` | `DAFYANFragMof` |
-| 15 | `XEHSOT` | 0 | `0.9771` | `0.2430` | `DAFYANFragMof` |
-| 16 | `XEHSOT` | 2 | `0.9771` | `0.2430` | `DAFYANFragMof` |
-| 17 | `XEHSOT` | 1 | `0.9771` | `0.2430` | `DAFYANFragMof` |
-| 18 | `XEHSOT` | 3 | `0.9771` | `0.2430` | `DAFYANFragMof` |
-| 19 | `XEHSIN` | 2 | `0.9774` | `0.2438` | `DAFYANFragMof` |
-| 20 | `XEHSIN` | 3 | `0.9774` | `0.2438` | `DAFYANFragMof` |
-| 21 | `XEHSIN` | 0 | `0.9774` | `0.2438` | `DAFYANFragMof` |
-| 22 | `XEHSIN` | 1 | `0.9774` | `0.2438` | `DAFYANFragMof` |
-| 23 | `XEHSAF` | 1 | `0.9775` | `0.2383` | `DAFYANFragMof` |
-| 24 | `XEHSAF` | 2 | `0.9775` | `0.2383` | `DAFYANFragMof` |
-| 25 | `XEHSAF` | 3 | `0.9775` | `0.2383` | `DAFYANFragMof` |
+| 1 | `WEHNAA` | 1 | `0.9584` | `0.1520` | `WEHNAAFragMofMin` |
+| 2 | `WEHNAA` | 0 | `0.9584` | `0.1520` | `WEHNAAFragMofMin` |
+| 3 | `LIQHAX` | 0 | `0.9675` | `0.1259` | `NUDMUWFragMof` |
+| 4 | `LIQHAX` | 2 | `0.9675` | `0.1259` | `NUDMUWFragMof` |
+| 5 | `BAKYOE` | 4 | `0.9696` | `0.1704` | `DAFYANFragMof` |
+| 6 | `BAKYOE` | 5 | `0.9696` | `0.1704` | `DAFYANFragMof` |
+| 7 | `BAKYOE` | 7 | `0.9696` | `0.1704` | `DAFYANFragMof` |
+| 8 | `BAKYOE` | 6 | `0.9696` | `0.1704` | `DAFYANFragMof` |
+| 9 | `LIQHAX` | 1 | `0.9722` | `0.1205` | `NUDMUWFragMof` |
+| 10 | `LIQHAX` | 3 | `0.9722` | `0.1205` | `NUDMUWFragMof` |
+| 11 | `AVIPAX` | 1 | `0.9734` | `0.1115` | `AVIPAXFragMofMin` |
+| 12 | `AVIPAX` | 0 | `0.9734` | `0.1115` | `AVIPAXFragMofMin` |
+| 13 | `AVIPAX` | 2 | `0.9734` | `0.1115` | `AVIPAXFragMofMin` |
+| 14 | `AVIPAX` | 3 | `0.9734` | `0.1115` | `AVIPAXFragMofMin` |
+| 15 | `HIBGEF` | 3 | `0.9769` | `0.2436` | `DAFYANFragMof` |
+| 16 | `HIBGEF` | 0 | `0.9769` | `0.2436` | `DAFYANFragMof` |
+| 17 | `HIBGEF` | 1 | `0.9769` | `0.2436` | `DAFYANFragMof` |
+| 18 | `HIBGEF` | 2 | `0.9769` | `0.2436` | `DAFYANFragMof` |
+| 19 | `XEHSOT` | 0 | `0.9771` | `0.2430` | `DAFYANFragMof` |
+| 20 | `XEHSOT` | 2 | `0.9771` | `0.2430` | `DAFYANFragMof` |
+| 21 | `XEHSOT` | 1 | `0.9771` | `0.2430` | `DAFYANFragMof` |
+| 22 | `XEHSOT` | 3 | `0.9771` | `0.2430` | `DAFYANFragMof` |
+| 23 | `XEHSIN` | 2 | `0.9774` | `0.2438` | `DAFYANFragMof` |
+| 24 | `XEHSIN` | 3 | `0.9774` | `0.2438` | `DAFYANFragMof` |
+| 25 | `XEHSIN` | 0 | `0.9774` | `0.2438` | `DAFYANFragMof` |
 
 ## Discussion & Chemical Analysis
 

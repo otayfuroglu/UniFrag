@@ -2,6 +2,89 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-07-21 - UniFrag: Resolve Multiple Phenyl Ring Trimming Bug in Minimized Fragments
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Updated `_get_first_ring_keep_heavy` to find the nearest ring for each entry point in `first_layer` instead of breaking at the first ring target found.
+- **Summary:**
+  - Resolved a bug where ligands containing multiple phenyl rings or coordinating groups (such as in `DIWNAA.cif`) had all rings except the first one trimmed away during minimization, leaving carbons in other rings undercoordinated and capped with invalid hydrogens (e.g. `C[15]` in `DIWNAAFragMofMin` capped with two hydrogens).
+  - The single-target BFS in `_get_first_ring_keep_heavy` was replaced with a loop that finds and keeps the nearest ring for each entry point in `first_layer`.
+  - Re-ran the batch fragmentation, large fragment filtering, and SOAP similarity analysis on the entire Mg dataset. All minimized fragments are now structurally complete (e.g. `DIWNAAFragMofMin` formula updated from `C28 H22 Mg1 O11` to `C33 H24 Mg1 O11` with the second phenyl ring fully preserved).
+- **Validation:**
+  - Verified `fragments_collection.extxyz` using `verify_no_close_pairs.py` and `check_broken_phenyl.py`. Confirmed exactly **zero** close pairs (< 0.8 Å) in the entire dataset, and the undercoordination warnings for `DIWNAA` are completely resolved.
+  - Ran the fast test suite (`./run_fast_test.sh`); 8/8 tests passed successfully.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-21 - UniFrag: Resolve Close Hydrogen Capping and Missing Carbons in Mg-MOFs
+- **Changed files:**
+  - None.
+- **Summary:**
+  - Investigated and resolved the issue where some Mg-based MOFs in the `fragments_collection.extxyz` collection contained extremely short C-H bonds (~0.4 Å) or missing carbons on phenyl rings.
+  - Traced the root cause of the close pairs to a post-processing filter script (`filter_large_fragments.py`) bug, which skipped backing up when the backup file (`_original.extxyz` / `_original.csv`) already existed on disk. Consequently, it read from the stale backup file of a previous session, filtered it, and overwrote the fresh new collection, thereby resurrecting old disordered coordinates.
+  - Deleted the stale backup files, re-ran the parallel batch fragmentation on all 75 Mg-based MOFs in the folder `runUniFrag/mg_cr_cifs_noduplicated/cifs/`, successfully regenerating the 113-atom filtered collection.
+  - Re-ran the multi-cutoff SOAP coordination environment analysis loop (3.0, 4.0, 5.0, and 6.0 Å), regenerating all UMAP/PCA plots and markdown reports.
+  - Verified that all highlighted "missing carbons" were in fact heterocyclic/aliphatic linkers (such as pyridine in `AVIPAX`, thiophene in `PUZJOL`, or adipic acid in `IFASOZ`) which are structurally correct and fully intact.
+- **Validation:**
+  - Scanned the entire finalized `fragments_collection.extxyz` collection file for close pairs (atom-atom distance < 0.8 Å) using a dedicated verification script, confirming exactly **zero** close pairs across all 113 frames.
+  - Ran `./run_fast_test.sh` and confirmed all 8/8 regression tests passed successfully.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-21 - UniFrag: Clean Crystal Structure Disorder and Fix Supercell-Wrapping Coordinate Bug
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Added `_load_clean_structure` helper to filter out disordered/overlapping sites within 0.8 Å (periodic distance) right after loading structure files. Replaced raw `Structure.from_file` calls in extraction methods with `self._load_clean_structure`. Removed buggy fractional coordinate supercell-wrapping code (`dfrac -= np.round(dfrac)`) from molecular rebuilding logic, replacing it with direct relative Cartesian offsets from neighbor lists.
+- **Summary:**
+  - Resolved issues where minimized fragments for MOFs with disordered/multi-orientation linker components (such as `IRMOF-10.cif`) had overlapping atoms (separated by < 0.05 Å) and distorted capping geometries. The CIF files themselves contained disordered orientations modeling mutually perpendicular positions. Implementing a 0.8 Å periodic distance filter on initial structure loading cleans all disorder overlaps. Eliminating the supercell-level fractional coordinate wrapping logic prevents the fragment builder from wrapping atoms across supercell boundaries and creating coordinate collisions.
+- **Validation:**
+  - Validated on `test_mofs_for_node/IRMOF-10.cif`: The minimized fragment `IRMOF-10FragMofMin` is now correctly extracted with 102 atoms (no disordered duplicates), containing 5 cleanly capped benzoic acid minimized linkers and 1 full biphenyl linker. Minimum atom-atom distance in the fragment is completely clean with 0 close pairs (< 0.8 Å).
+  - Ran the fast regression test suite (`./run_fast_test.sh`); all 8 tests passed successfully.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-20 - UniFrag: Resolve Duplicate Carbons in Fallback Node Export
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Refined `_fallback_export_mof_node_linker` to trace bridging carbons directly from coordinating O/N atoms and merge duplicate/too-close coordinates using a 0.8 Å tolerance.
+- **Summary:**
+  - Solved the issue of duplicate carbon atoms (separated by ~0.6 Å) in exported SBU nodes. The duplicate carbons occurred because the metal-carbon distance of 2.55 Å was classified as coordinating and added in the first shell, while also being captured in the bridging check under a different coordinate shift. Using a 0.8 Å merge tolerance safely clusters these overlaps.
+- **Validation:**
+  - Validated on `runUniFrag/test_for_paper/mof74_2/cifs/Mg2_dobpdc_CoRE_ASR.cif`: Helper SBU node `mof_nodes_lib/Mg2_dobpdc_CoRE_ASR_00.xyz` is now correctly generated as `Mg3 C2 O11` (16 atoms) with a minimum atom-atom distance of 1.26 Å (zero close pairs).
+  - Ran the fast regression test suite (`./run_fast_test.sh`); all 8 tests passed successfully with 0 failures.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-20 - UniFrag: Complete SBU Edge Metal Coordination in Fallback Node Export
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Modified `_fallback_export_mof_node_linker` to use coordinate-centric neighbor addition and bridging carbon extraction.
+- **Summary:**
+  - Solved the issue where edge metal atoms in periodic SBU nodes were missing coordinating oxygens (due to index-centric representation mapping only a single periodic boundary shift). The updated SBU node builder explicitly places all coordinating non-metal neighbors around each metal in the SBU at their correct Cartesian positions, then merges duplicates.
+- **Validation:**
+  - Validated on `runUniFrag/test_for_paper/mof74_2/cifs/Mg2_dobpdc_CoRE_ASR.cif`: Node helper `mof_nodes_lib/Mg2_dobpdc_CoRE_ASR_00.xyz` is now correctly generated as the complete `Mg3 C12 O11` cluster (26 atoms) where all 3 Mg atoms have exactly 5 coordinated oxygens.
+  - Ran the fast regression test suite (`./run_fast_test.sh`); all 8 tests passed successfully with 0 failures.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-20 - UniFrag: Include Bridging Carboxylate Carbons in Fallback Node Export
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Modified `_fallback_export_mof_node_linker` to identify and include non-metal atoms (like carboxylate carbons) that link at least two coordinating non-metal atoms (like edge oxygens) already in the SBU.
+- **Summary:**
+  - Expanded SBU node fallback exports to include the bridging carboxylate carbon atoms that link coordinated oxygen pairs. The algorithm identifies any non-metal atom bonded to at least two distinct coordinated SBU atoms and includes them periodic-image safely in the node.
+- **Validation:**
+  - Validated on `test_mofs_for_node/IRMOF-10.cif`: Node helper `mof_nodes_lib/IRMOF-10_00.xyz` is now correctly generated as the complete `Zn4 C6 O13` cluster (23 atoms).
+  - Ran the fast regression test suite (`./run_fast_test.sh`); all 8 tests passed successfully with 0 failures.
+- **Follow-up risks:**
+  - None.
+
+## 2026-07-20 - UniFrag: Refine SBU Node Extraction and Library Export
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Modified `_fallback_export_mof_node_linker` to allow metal-metal connections under 3.6 Å during SBU adjacency graph construction. Updated `_export_moffragmentor_library` to merge neighboring moffragmentor nodes within 3.5 Å (with periodic images) before writing them to the helper node library.
+- **Summary:**
+  - Solved the issue where discrete polynuclear SBUs like the `Zn4O` core of `IRMOF-10` were exported to `mof_nodes_lib/` as mononuclear `Zn1 O4` (ZO4) fragments. SBU adjacency graph building now connects metal-metal pairs within 3.6 Å, allowing the SBU BFS traversal to find all metals in the cluster. Moffragmentor library export now groups and merges raw node components under 3.5 Å to prevent mononuclear node splitting.
+- **Validation:**
+  - Validated on `test_mofs_for_node/IRMOF-10.cif`: Node helper `mof_nodes_lib/IRMOF-10_00.xyz` is now correctly generated as the complete `Zn4 O13` cluster.
+  - Ran the fast regression test suite (`./run_fast_test.sh`); all 8 tests passed successfully with 0 failures.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-07-17 - UniFrag: Added QM-Ready "OnlyLinker" Fragment Export & Boundary Hydrogen Stripping
 - **Changed files:**
   - `fragmentation_oop.py` [MODIFY] — Moved `_clean_linker_molecule` to `BaseFragmenter` with `METALS = set()` default class attribute. Implemented boundary hydrogen stripping inside `_clean_linker_molecule` by identifying boundary atoms where periodic heavy degree > linker heavy degree and deleting any bonded Hydrogen atoms. Ensured periodic structure is loaded early via `self.structure = struct`. Passed `orig_indices` in all node/linker component export paths. Added instance attribute `self.partner_vec` tracking bilayer shift vector in `COFFragmenter` and replicated bilayer stacking for `OnlyLinker` fragments in `_process_cof_file`.
