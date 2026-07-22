@@ -6,16 +6,16 @@ SOAP compares environments within a continuous **6.0 Å cutoff**, capturing deta
 
 ## Executive Summary
 
-* **Average SOAP Cosine Similarity**: `0.9888`
-* **Median SOAP Cosine Similarity**: `0.9925`
-* **Average SOAP Fingerprint RMSD**: `0.1048`
-* **Median SOAP Fingerprint RMSD**: `0.0954`
+* **Average SOAP Cosine Similarity**: `0.9893`
+* **Median SOAP Cosine Similarity**: `0.9938`
+* **Average SOAP Fingerprint RMSD**: `0.1026`
+* **Median SOAP Fingerprint RMSD**: `0.0930`
 * **Total Mg Centers Analyzed**: `535`
 
 | Similarity Range | Category | Count | Percentage | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| **$\ge 0.98$** | Highly Represented | 446 | **83.36%** | Local environment is almost perfectly preserved in the fragment library. |
-| **$[0.90, 0.98)$** | Moderately Represented | 89 | **16.64%** | Local environment is structurally similar, with minor variations (e.g. capped bonds, minor coordinates shift). |
+| **$\ge 0.98$** | Highly Represented | 442 | **82.62%** | Local environment is almost perfectly preserved in the fragment library. |
+| **$[0.90, 0.98)$** | Moderately Represented | 93 | **17.38%** | Local environment is structurally similar, with minor variations (e.g. capped bonds, minor coordinates shift). |
 | **$< 0.90$** | Poorly Represented / Missing | 0 | **0.00%** | Environment has significant structural/coordination divergence in the fragment library. |
 
 ## PCA and UMAP Environment Distribution Map
@@ -36,25 +36,25 @@ These Mg centers in parent crystals have the lowest similarity scores to any fra
 | 4 | `BAKYOE` | 6 | `0.9583` | `0.2313` | `BAKYOEFragMof` |
 | 5 | `BAKYOE` | 7 | `0.9583` | `0.2313` | `BAKYOEFragMof` |
 | 6 | `BAKYOE` | 5 | `0.9583` | `0.2313` | `BAKYOEFragMof` |
-| 7 | `LIQHAX` | 0 | `0.9610` | `0.1606` | `NUDMUWFragMofMin` |
-| 8 | `LIQHAX` | 2 | `0.9610` | `0.1606` | `NUDMUWFragMofMin` |
-| 9 | `LIQHAX` | 1 | `0.9616` | `0.1586` | `NUDMUWFragMof` |
-| 10 | `LIQHAX` | 3 | `0.9616` | `0.1586` | `NUDMUWFragMof` |
-| 11 | `NUDNEH` | 1 | `0.9636` | `0.1737` | `EQERAUFragMofMin` |
-| 12 | `NUDNEH` | 2 | `0.9636` | `0.1737` | `EQERAUFragMofMin` |
-| 13 | `NUDNEH` | 3 | `0.9636` | `0.1737` | `EQERAUFragMofMin` |
-| 14 | `NUDNEH` | 0 | `0.9636` | `0.1737` | `EQERAUFragMofMin` |
-| 15 | `NUDMOQ` | 3 | `0.9637` | `0.1724` | `EQERAUFragMofMin` |
-| 16 | `NUDMOQ` | 1 | `0.9637` | `0.1724` | `EQERAUFragMofMin` |
-| 17 | `NUDMOQ` | 2 | `0.9637` | `0.1724` | `EQERAUFragMofMin` |
-| 18 | `NUDMOQ` | 0 | `0.9637` | `0.1724` | `EQERAUFragMofMin` |
-| 19 | `NUDMUW` | 3 | `0.9638` | `0.1677` | `QIWPETFragMof` |
-| 20 | `NUDMUW` | 2 | `0.9638` | `0.1677` | `QIWPETFragMof` |
-| 21 | `NUDMUW` | 5 | `0.9638` | `0.1677` | `QIWPETFragMof` |
-| 22 | `NUDMUW` | 4 | `0.9638` | `0.1677` | `QIWPETFragMof` |
-| 23 | `NUDLIJ` | 1 | `0.9641` | `0.1741` | `EQERAUFragMofMin` |
-| 24 | `NUDLIJ` | 0 | `0.9641` | `0.1741` | `EQERAUFragMofMin` |
-| 25 | `NUDLIJ` | 2 | `0.9641` | `0.1741` | `EQERAUFragMofMin` |
+| 7 | `LIQHAX` | 0 | `0.9609` | `0.1598` | `NUDMUWFragMof` |
+| 8 | `LIQHAX` | 2 | `0.9609` | `0.1598` | `NUDMUWFragMof` |
+| 9 | `LIQHAX` | 1 | `0.9628` | `0.1495` | `NUDMUWFragMofMin` |
+| 10 | `LIQHAX` | 3 | `0.9628` | `0.1495` | `NUDMUWFragMofMin` |
+| 11 | `QIWPET` | 4 | `0.9669` | `0.3082` | `EQERAUFragMofMin` |
+| 12 | `NUDLIJ` | 9 | `0.9675` | `0.1639` | `NUDMUWFragMofMin` |
+| 13 | `NUDLIJ` | 8 | `0.9675` | `0.1639` | `NUDMUWFragMofMin` |
+| 14 | `NUDLIJ` | 10 | `0.9675` | `0.1639` | `NUDMUWFragMofMin` |
+| 15 | `NUDLIJ` | 11 | `0.9675` | `0.1639` | `NUDMUWFragMofMin` |
+| 16 | `NUDLIJ` | 3 | `0.9684` | `0.1648` | `NUDMUWFragMofMin` |
+| 17 | `NUDLIJ` | 2 | `0.9684` | `0.1648` | `NUDMUWFragMofMin` |
+| 18 | `NUDLIJ` | 0 | `0.9684` | `0.1648` | `NUDMUWFragMofMin` |
+| 19 | `NUDLIJ` | 1 | `0.9684` | `0.1648` | `NUDMUWFragMofMin` |
+| 20 | `WAMRIN` | 1 | `0.9688` | `0.2386` | `UDURUKFragMofMin` |
+| 21 | `WAMRIN` | 2 | `0.9688` | `0.2386` | `UDURUKFragMofMin` |
+| 22 | `WAMRIN` | 0 | `0.9688` | `0.2386` | `UDURUKFragMofMin` |
+| 23 | `WAMRIN` | 3 | `0.9688` | `0.2386` | `UDURUKFragMofMin` |
+| 24 | `NUDMUW` | 4 | `0.9709` | `0.1590` | `NUDMUWFragMofMin` |
+| 25 | `NUDMUW` | 5 | `0.9709` | `0.1590` | `NUDMUWFragMofMin` |
 
 ## Discussion & Chemical Analysis
 

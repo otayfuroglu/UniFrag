@@ -2550,7 +2550,7 @@ class MOFFragmenter(BaseFragmenter):
                         if self.is_valid_bond("C", n.species_string, mic_d):
                             nb_pos = unwrapped_coords[idx] + mic_v
                             removed_coords.append(nb_pos)
-                if removed_coords:
+                if removed_coords and idx not in {ba for ba, _ in bridge_atoms_to_cap}:
                     bridge_atoms_to_cap.append((idx, removed_coords))
 
         heavy_indices = [idx for idx in final_indices if supercell[idx].species_string != "H"]
@@ -2671,7 +2671,12 @@ class MOFFragmenter(BaseFragmenter):
 
         bridge_cap_map = {}
         for ba_idx, removed_coords in bridge_atoms_to_cap:
-            bridge_cap_map.setdefault(ba_idx, []).extend(removed_coords)
+            if ba_idx not in bridge_cap_map:
+                bridge_cap_map[ba_idx] = []
+            for rc in removed_coords:
+                rc_arr = np.array(rc)
+                if not any(np.linalg.norm(rc_arr - np.array(existing)) < 0.3 for existing in bridge_cap_map[ba_idx]):
+                    bridge_cap_map[ba_idx].append(rc_arr)
 
         for ba_idx, removed_coords in bridge_cap_map.items():
             ba_site = supercell[ba_idx]
@@ -2719,42 +2724,7 @@ class MOFFragmenter(BaseFragmenter):
                         continue
                     self.place_capping_h(parent_local_idx, avg_vec, bl, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
-        capped_carbons = set()
-        while True:
-            added_in_pass = False
-            for i, sp in enumerate(species):
-                if sp != "C" or i in capped_carbons:
-                    continue
-                cpos = np.array(coords[i])
-                c_nbs = []
-                o_nbs = []
-                h_nbs = 0
-                for j, (sp2, p2) in enumerate(zip(species, coords)):
-                    if i == j: continue
-                    d = np.linalg.norm(cpos - np.array(p2))
-                    if sp2 == "C" and d < 1.8: c_nbs.append(np.array(p2))
-                    elif sp2 in ("O", "N", "S", "P") and d < 1.8: o_nbs.append(np.array(p2))
-                    elif sp2 == "H" and d < 1.2: h_nbs += 1
-                
-                total_val = len(c_nbs) + len(o_nbs) + h_nbs
-                if len(c_nbs) >= 2 and total_val < 3:
-                    v1 = c_nbs[0] - cpos
-                    v2 = c_nbs[1] - cpos
-                    v1_n = np.linalg.norm(v1)
-                    v2_n = np.linalg.norm(v2)
-                    if v1_n > 0 and v2_n > 0:
-                        v1 = v1 / v1_n
-                        v2 = v2 / v2_n
-                        base_vec = -(v1 + v2)
-                        if np.linalg.norm(base_vec) < 1e-3:
-                            base_vec = np.cross(v1, [0, 0, 1])
-                        bl = self.cap_bond_length("C")
-                        self.place_capping_h(i, base_vec, bl, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
-                        capped_carbons.add(i)
-                        added_in_pass = True
-                        break
-            if not added_in_pass:
-                break
+
 
         if not minimize:
             heavy_idx = [i for i, s in enumerate(species) if s != "H"]

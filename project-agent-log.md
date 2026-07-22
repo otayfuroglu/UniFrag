@@ -2,7 +2,27 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
-## 2026-07-22 - UniFrag: Resolve Missing H on Phenyl Rings & MIC Unwrapping Issue
+## 2026-07-22 - UniFrag: Single-H Capping & Deduplication in `bridge_atoms_to_cap`
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Removed the redundant `while True` auto-capping loop from `_extract_sbu_cluster`, added 0.3 Å coordinate deduplication in `bridge_cap_map`, and checked `idx not in {ba for ba, _ in bridge_atoms_to_cap}` to prevent duplicate capping entries in Minimize mode.
+  - `test_mofs_for_node/fragmentation_summary.csv` [MODIFY] — Summary for node test MOFs.
+  - `test_mofs_for_node/fragments_collection.extxyz` [MODIFY] — ExtXYZ collection for node test MOFs (`IRMOF-10` and `Mg2_dobpdc_CoRE_ASR`).
+- **Summary:**
+  - Diagnosed and fixed double-capping (2 Hydrogens placed on phenyl carbons) in Minimize mode:
+    1. Duplicate entries in `bridge_atoms_to_cap` caused `place_capping_h` to run twice per cut carbon. Added duplicate prevention check (`idx not in {ba for ba, _ in bridge_atoms_to_cap}`) and vector deduplication in `bridge_cap_map`.
+    2. Removed the extra `while True` loop that forced a 2nd capping H onto already-capped sp2 carbons.
+  - Re-tested `IRMOF-10.cif` in `test_mofs_for_node/`:
+    - `IRMOF-10FragMof`: `173` atoms (`C84 H60 O25 Zn4`), **`Zn4O` central node**, **0 double-capped carbons**, **0 undercoordinated carbons**.
+    - `IRMOF-10FragMofMin`: `102` atoms (`C49 H34 O15 Zn4`), **`Zn4O` central node**, **0 double-capped carbons**, **0 undercoordinated carbons**.
+  - Re-ran batch fragmentation, large fragment filtering, and multi-cutoff SOAP analysis for all 75 Mg MOFs.
+- **Validation:**
+  - Audited all 113 retained frames across the Mg dataset: **0 double-capped phenyl ring carbons** across all aromatic MOFs.
+  - Multi-cutoff SOAP similarity: $r_{\text{cut}} = 3.0\text{ \AA}$ (99.25% Highly Rep.), $r_{\text{cut}} = 4.0\text{ \AA}$ (98.50% Highly Rep.), $r_{\text{cut}} = 5.0\text{ \AA}$ (89.16% Highly Rep.).
+  - Fast test suite (`./run_fast_test.sh`): **8/8 passed**.
+- **Follow-up risks:**
+  - None.
+
+
 - **Changed files:**
   - `fragmentation_oop.py` [MODIFY] — Added `_unwrap_hydrogens` during CIF loading, implemented `_get_mic_vector` for exact bond vector unwrapping in `_extract_sbu_cluster`, updated `min_o_contact=1.1` in `place_capping_h`, removed BFS over-expansion into partial linkers on edge metals in Path B, and added an automatic single-pass capping loop for undercoordinated ring carbons (`len(c_nbs) >= 2 and total_val < 3`).
   - `runUniFrag/mg_cr_cifs_noduplicated/fragmentation_summary.csv` [MODIFY] — Re-generated summary CSV for all 75 Mg MOFs.

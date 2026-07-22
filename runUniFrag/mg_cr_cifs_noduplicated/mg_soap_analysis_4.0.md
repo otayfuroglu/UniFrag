@@ -6,10 +6,10 @@ SOAP compares environments within a continuous **4.0 Å cutoff**, capturing deta
 
 ## Executive Summary
 
-* **Average SOAP Cosine Similarity**: `0.9965`
-* **Median SOAP Cosine Similarity**: `0.9977`
-* **Average SOAP Fingerprint RMSD**: `0.0302`
-* **Median SOAP Fingerprint RMSD**: `0.0302`
+* **Average SOAP Cosine Similarity**: `0.9969`
+* **Median SOAP Cosine Similarity**: `0.9986`
+* **Average SOAP Fingerprint RMSD**: `0.0281`
+* **Median SOAP Fingerprint RMSD**: `0.0274`
 * **Total Mg Centers Analyzed**: `535`
 
 | Similarity Range | Category | Count | Percentage | Description |
@@ -30,31 +30,31 @@ These Mg centers in parent crystals have the lowest similarity scores to any fra
 
 | Rank | Parent REFCODE | Mg Index | Max Cosine Similarity | Fingerprint RMSD | Best Matching Fragment |
 | :---: | :---: | :---: | :---: | :---: | :--- |
-| 1 | `AVIPAX` | 1 | `0.9679` | `0.0973` | `AVIPAXFragMofMin` |
-| 2 | `AVIPAX` | 0 | `0.9679` | `0.0973` | `AVIPAXFragMofMin` |
-| 3 | `AVIPAX` | 3 | `0.9679` | `0.0973` | `AVIPAXFragMofMin` |
-| 4 | `AVIPAX` | 2 | `0.9679` | `0.0973` | `AVIPAXFragMofMin` |
-| 5 | `LIQHAX` | 0 | `0.9728` | `0.0986` | `NUDMUWFragMofMin` |
-| 6 | `LIQHAX` | 2 | `0.9728` | `0.0986` | `NUDMUWFragMofMin` |
-| 7 | `LIQHAX` | 3 | `0.9787` | `0.0917` | `NUDMUWFragMofMin` |
-| 8 | `LIQHAX` | 1 | `0.9787` | `0.0917` | `NUDMUWFragMofMin` |
+| 1 | `AVIPAX` | 0 | `0.9678` | `0.0973` | `AVIPAXFragMofMin` |
+| 2 | `AVIPAX` | 2 | `0.9678` | `0.0973` | `AVIPAXFragMofMin` |
+| 3 | `AVIPAX` | 1 | `0.9678` | `0.0973` | `AVIPAXFragMofMin` |
+| 4 | `AVIPAX` | 3 | `0.9678` | `0.0973` | `AVIPAXFragMofMin` |
+| 5 | `LIQHAX` | 0 | `0.9727` | `0.0985` | `NUDMUWFragMof` |
+| 6 | `LIQHAX` | 2 | `0.9727` | `0.0985` | `NUDMUWFragMof` |
+| 7 | `LIQHAX` | 3 | `0.9786` | `0.0917` | `NUDMUWFragMof` |
+| 8 | `LIQHAX` | 1 | `0.9786` | `0.0917` | `NUDMUWFragMof` |
 | 9 | `BAKYOE` | 1 | `0.9878` | `0.0725` | `DUWRAQFragMof` |
 | 10 | `BAKYOE` | 0 | `0.9878` | `0.0725` | `DUWRAQFragMof` |
 | 11 | `BAKYOE` | 3 | `0.9878` | `0.0725` | `DUWRAQFragMof` |
 | 12 | `BAKYOE` | 2 | `0.9878` | `0.0725` | `DUWRAQFragMof` |
-| 13 | `QIWPET` | 4 | `0.9882` | `0.0765` | `NUDMUWFragMof` |
-| 14 | `KAPRIG` | 0 | `0.9898` | `0.0569` | `EQERAUFragMofMin` |
-| 15 | `KAPRIG` | 1 | `0.9898` | `0.0569` | `EQERAUFragMofMin` |
-| 16 | `HIBGEF` | 3 | `0.9905` | `0.0837` | `AVIPAXFragMofMin` |
-| 17 | `HIBGEF` | 0 | `0.9905` | `0.0837` | `AVIPAXFragMofMin` |
-| 18 | `HIBGEF` | 2 | `0.9905` | `0.0837` | `AVIPAXFragMofMin` |
-| 19 | `HIBGEF` | 1 | `0.9905` | `0.0837` | `AVIPAXFragMofMin` |
-| 20 | `MOPQIT` | 4 | `0.9905` | `0.0752` | `AVIPAXFragMofMin` |
-| 21 | `MOPQIT` | 5 | `0.9905` | `0.0752` | `AVIPAXFragMofMin` |
-| 22 | `MOPQIT` | 6 | `0.9905` | `0.0752` | `AVIPAXFragMofMin` |
-| 23 | `MOPQIT` | 7 | `0.9905` | `0.0752` | `AVIPAXFragMofMin` |
-| 24 | `XEHSAF` | 2 | `0.9906` | `0.0817` | `AVIPAXFragMofMin` |
-| 25 | `XEHSAF` | 0 | `0.9906` | `0.0817` | `AVIPAXFragMofMin` |
+| 13 | `KAPRIG` | 0 | `0.9889` | `0.0591` | `QIWPETFragMof` |
+| 14 | `KAPRIG` | 1 | `0.9889` | `0.0591` | `QIWPETFragMof` |
+| 15 | `HIBGEF` | 0 | `0.9905` | `0.0838` | `AVIPAXFragMofMin` |
+| 16 | `HIBGEF` | 2 | `0.9905` | `0.0838` | `AVIPAXFragMofMin` |
+| 17 | `HIBGEF` | 3 | `0.9905` | `0.0838` | `AVIPAXFragMofMin` |
+| 18 | `HIBGEF` | 1 | `0.9905` | `0.0838` | `AVIPAXFragMofMin` |
+| 19 | `MOPQIT` | 5 | `0.9905` | `0.0753` | `AVIPAXFragMofMin` |
+| 20 | `MOPQIT` | 4 | `0.9905` | `0.0753` | `AVIPAXFragMofMin` |
+| 21 | `MOPQIT` | 6 | `0.9905` | `0.0753` | `AVIPAXFragMofMin` |
+| 22 | `MOPQIT` | 7 | `0.9905` | `0.0753` | `AVIPAXFragMofMin` |
+| 23 | `XEHSAF` | 2 | `0.9906` | `0.0818` | `AVIPAXFragMofMin` |
+| 24 | `XEHSAF` | 1 | `0.9906` | `0.0818` | `AVIPAXFragMofMin` |
+| 25 | `XEHSAF` | 0 | `0.9906` | `0.0818` | `AVIPAXFragMofMin` |
 
 ## Discussion & Chemical Analysis
 
