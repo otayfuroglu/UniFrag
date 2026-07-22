@@ -42,8 +42,8 @@ These Mg centers in parent crystals have the lowest similarity scores to any fra
 | 10 | `BAKYOE` | 1 | `0.9956` | `0.0288` | `DUWRAQFragMof` |
 | 11 | `BAKYOE` | 2 | `0.9956` | `0.0288` | `DUWRAQFragMof` |
 | 12 | `BAKYOE` | 3 | `0.9956` | `0.0288` | `DUWRAQFragMof` |
-| 13 | `KAPRIG` | 1 | `0.9963` | `0.0242` | `EQERAUFragMofMin` |
-| 14 | `KAPRIG` | 0 | `0.9963` | `0.0242` | `EQERAUFragMofMin` |
+| 13 | `KAPRIG` | 1 | `0.9964` | `0.0228` | `EQERAUFragMofMin` |
+| 14 | `KAPRIG` | 0 | `0.9964` | `0.0228` | `EQERAUFragMofMin` |
 | 15 | `TAGVAB` | 13 | `0.9977` | `0.0161` | `TAGVABFragMof` |
 | 16 | `TAGVAB` | 15 | `0.9977` | `0.0161` | `TAGVABFragMof` |
 | 17 | `TAGVAB` | 14 | `0.9977` | `0.0161` | `TAGVABFragMof` |

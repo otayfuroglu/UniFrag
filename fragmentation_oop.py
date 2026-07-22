@@ -2724,6 +2724,41 @@ class MOFFragmenter(BaseFragmenter):
                         continue
                     self.place_capping_h(parent_local_idx, avg_vec, bl, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
+        # Ensure undercoordinated aromatic ring carbons (e.g. from CIF files like LOTTEW.cif
+        # where crystallographic Hydrogens were omitted) receive exactly 1 C-H capping Hydrogen.
+        for i, sp in enumerate(species):
+            if sp != "C":
+                continue
+            cpos = np.array(coords[i])
+            c_nbs = []
+            o_nbs = []
+            h_nbs = 0
+            for j, (sp2, p2) in enumerate(zip(species, coords)):
+                if i == j:
+                    continue
+                d = np.linalg.norm(cpos - np.array(p2))
+                if sp2 == "C" and d < 1.8:
+                    c_nbs.append(np.array(p2))
+                elif sp2 in ("O", "N", "S", "P", "F", "Cl", "Br", "I") and d < 1.8:
+                    o_nbs.append(np.array(p2))
+                elif sp2 == "H" and d < 1.2:
+                    h_nbs += 1
+
+            total_val = len(c_nbs) + len(o_nbs) + h_nbs
+            if len(c_nbs) == 2 and total_val == 2:
+                v1 = c_nbs[0] - cpos
+                v2 = c_nbs[1] - cpos
+                v1_n = np.linalg.norm(v1)
+                v2_n = np.linalg.norm(v2)
+                if v1_n > 0 and v2_n > 0:
+                    v1 = v1 / v1_n
+                    v2 = v2 / v2_n
+                    base_vec = -(v1 + v2)
+                    if np.linalg.norm(base_vec) < 1e-3:
+                        base_vec = np.cross(v1, [0, 0, 1])
+                    bl = self.cap_bond_length("C")
+                    self.place_capping_h(i, base_vec, bl, species, coords, min_hh=1.5, min_o_contact=1.1, capped_h_flags=capped_h_flags)
+
 
 
         if not minimize:

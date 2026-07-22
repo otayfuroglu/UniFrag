@@ -40,7 +40,7 @@ These Mg centers in parent crystals have the lowest similarity scores to any fra
 | 8 | `LIQHAX` | 2 | `0.9609` | `0.1598` | `NUDMUWFragMof` |
 | 9 | `LIQHAX` | 1 | `0.9628` | `0.1495` | `NUDMUWFragMofMin` |
 | 10 | `LIQHAX` | 3 | `0.9628` | `0.1495` | `NUDMUWFragMofMin` |
-| 11 | `QIWPET` | 4 | `0.9669` | `0.3082` | `EQERAUFragMofMin` |
+| 11 | `QIWPET` | 4 | `0.9668` | `0.3082` | `EQERAUFragMofMin` |
 | 12 | `NUDLIJ` | 9 | `0.9675` | `0.1639` | `NUDMUWFragMofMin` |
 | 13 | `NUDLIJ` | 8 | `0.9675` | `0.1639` | `NUDMUWFragMofMin` |
 | 14 | `NUDLIJ` | 10 | `0.9675` | `0.1639` | `NUDMUWFragMofMin` |

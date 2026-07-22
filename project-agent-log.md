@@ -2,7 +2,28 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
-## 2026-07-22 - UniFrag: Single-H Capping & Deduplication in `bridge_atoms_to_cap`
+## 2026-07-22 - UniFrag: Restored Single-H Capping for Raw CIF Missing Hydrogens (`LOTTEW.cif`)
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Added a single-H completion pass in `_extract_sbu_cluster` specifically targeting undercoordinated aromatic ring carbons (`len(c_nbs) == 2 and total_val == 2`).
+  - `test_for_phenyle_h_cap/fragmentation_summary.csv` [MODIFY] — Summary for `LOTTEW.cif` test.
+  - `test_for_phenyle_h_cap/fragments_collection.extxyz` [MODIFY] — ExtXYZ collection for `LOTTEW.cif`.
+- **Summary:**
+  - Diagnosed why `LOTTEW.cif` had missing Hydrogens on phenyl rings:
+    1. `LOTTEW.cif` is a crystallographic file in CSD where the original X-ray refinement omitted Hydrogen atoms on 15 aromatic ring carbons.
+    2. Added a safe, single-H capping pass that detects sp2 ring carbons with `len(c_nbs) == 2` and `total_val == 2` (0 existing H and 0 heteroatoms), placing **exactly 1 C-H capping Hydrogen** along the outward bisector vector `base_vec = -(v1 + v2)`.
+  - Re-tested `LOTTEW.cif` in `test_for_phenyle_h_cap/`:
+    - `LOTTEW_frag_min.xyz`: `113` atoms (`C52 Mg3 O16 H42`).
+    - **Single H ring carbons**: 36/36 (100% of all aromatic carbons have exactly 1 H).
+    - **Double H ring carbons**: 0.
+    - **Undercoordinated ring carbons**: 0.
+  - Re-ran batch fragmentation, fragment size filtering, and multi-cutoff SOAP analysis for all 75 Mg MOFs.
+- **Validation:**
+  - `LOTTEW` in `mg_cr_cifs_noduplicated` updated to `C52 Mg3 O16 H42` with 0 undercoordinated carbons and 0 double-capped carbons.
+  - Fast test suite (`./run_fast_test.sh`): **8/8 passed**.
+- **Follow-up risks:**
+  - None.
+
+
 - **Changed files:**
   - `fragmentation_oop.py` [MODIFY] — Removed the redundant `while True` auto-capping loop from `_extract_sbu_cluster`, added 0.3 Å coordinate deduplication in `bridge_cap_map`, and checked `idx not in {ba for ba, _ in bridge_atoms_to_cap}` to prevent duplicate capping entries in Minimize mode.
   - `test_mofs_for_node/fragmentation_summary.csv` [MODIFY] — Summary for node test MOFs.

@@ -8,7 +8,7 @@ SOAP compares environments within a continuous **4.0 Å cutoff**, capturing deta
 
 * **Average SOAP Cosine Similarity**: `0.9969`
 * **Median SOAP Cosine Similarity**: `0.9986`
-* **Average SOAP Fingerprint RMSD**: `0.0281`
+* **Average SOAP Fingerprint RMSD**: `0.0282`
 * **Median SOAP Fingerprint RMSD**: `0.0274`
 * **Total Mg Centers Analyzed**: `535`
 
@@ -42,8 +42,8 @@ These Mg centers in parent crystals have the lowest similarity scores to any fra
 | 10 | `BAKYOE` | 0 | `0.9878` | `0.0725` | `DUWRAQFragMof` |
 | 11 | `BAKYOE` | 3 | `0.9878` | `0.0725` | `DUWRAQFragMof` |
 | 12 | `BAKYOE` | 2 | `0.9878` | `0.0725` | `DUWRAQFragMof` |
-| 13 | `KAPRIG` | 0 | `0.9889` | `0.0591` | `QIWPETFragMof` |
-| 14 | `KAPRIG` | 1 | `0.9889` | `0.0591` | `QIWPETFragMof` |
+| 13 | `KAPRIG` | 0 | `0.9898` | `0.0569` | `EQERAUFragMofMin` |
+| 14 | `KAPRIG` | 1 | `0.9898` | `0.0569` | `EQERAUFragMofMin` |
 | 15 | `HIBGEF` | 0 | `0.9905` | `0.0838` | `AVIPAXFragMofMin` |
 | 16 | `HIBGEF` | 2 | `0.9905` | `0.0838` | `AVIPAXFragMofMin` |
 | 17 | `HIBGEF` | 3 | `0.9905` | `0.0838` | `AVIPAXFragMofMin` |
