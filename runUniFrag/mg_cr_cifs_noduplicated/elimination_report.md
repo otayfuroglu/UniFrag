@@ -22,8 +22,8 @@ This report documents the post-processing step to filter out large molecular fra
 | Rank | Fragment Label | Parent REFCODE | Type | Atom Count | Formula | Elimination Reason |
 | :---: | :--- | :---: | :---: | :---: | :--- | :--- |
 | 1 | `DAJWETFragMof` | `DAJWET` | Normal | **556** | `C288 H192 Mg3 N24 O49` | CSV normal_atoms count (556) > 200 |
-| 2 | `ORUKETFragMof` | `ORUKET` | Normal | **381** | `C168 H116 Mg N12 O72 P12` | CSV normal_atoms count (381) > 200 |
-| 3 | `EQERAUFragMof` | `EQERAU` | Normal | **378** | `C168 H140 Mg4 O58 P8` | CSV normal_atoms count (378) > 200 |
+| 2 | `EQERAUFragMof` | `EQERAU` | Normal | **394** | `C168 H156 Mg4 O58 P8` | CSV normal_atoms count (394) > 200 |
+| 3 | `ORUKETFragMof` | `ORUKET` | Normal | **381** | `C168 H116 Mg N12 O72 P12` | CSV normal_atoms count (381) > 200 |
 | 4 | `WEHNAAFragMof` | `WEHNAA` | Normal | **355** | `C72 H174 Mg N12 O72 P24` | CSV normal_atoms count (355) > 200 |
 | 5 | `OBIBAFFragMof` | `OBIBAF` | Normal | **324** | `C140 H136 Mg4 O44` | CSV normal_atoms count (324) > 200 |
 | 6 | `KAPRIGFragMof` | `KAPRIG` | Normal | **323** | `C176 H112 Mg O34` | CSV normal_atoms count (323) > 200 |
@@ -42,7 +42,7 @@ This report documents the post-processing step to filter out large molecular fra
 | 19 | `OBIBAFFragMofOnlyLinker` | `OBIBAF` | Normal | **74** | `C33 H32 O9` | CSV normal_atoms count (324) > 200 |
 | 20 | `WEHNAAFragMofOnlyLinker` | `WEHNAA` | Normal | **66** | `C12 H36 N2 O12 P4` | CSV normal_atoms count (355) > 200 |
 | 21 | `DIHHIPFragMofOnlyLinker` | `DIHHIP` | Normal | **48** | `C22 H18 O8` | CSV normal_atoms count (276) > 200 |
-| 22 | `EQERAUFragMofOnlyLinker` | `EQERAU` | Normal | **48** | `C21 H19 O7 P` | CSV normal_atoms count (378) > 200 |
+| 22 | `EQERAUFragMofOnlyLinker` | `EQERAU` | Normal | **48** | `C21 H19 O7 P` | CSV normal_atoms count (394) > 200 |
 | 23 | `RAVWAOFragMofOnlyLinker` | `RAVWAO` | Normal | **48** | `C22 H20 O6` | CSV normal_atoms count (279) > 200 |
 | 24 | `EBIMOTFragMofOnlyLinker` | `EBIMOT` | Normal | **41** | `C17 H16 O8` | CSV normal_atoms count (315) > 200 |
 | 25 | `VALXOYFragMofOnlyLinker` | `VALXOY` | Normal | **40** | `C16 H14 N2 O8` | CSV normal_atoms count (232) > 200 |

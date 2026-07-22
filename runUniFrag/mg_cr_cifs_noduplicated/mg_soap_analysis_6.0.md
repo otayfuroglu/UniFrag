@@ -6,16 +6,16 @@ SOAP compares environments within a continuous **6.0 Å cutoff**, capturing deta
 
 ## Executive Summary
 
-* **Average SOAP Cosine Similarity**: `0.9892`
-* **Median SOAP Cosine Similarity**: `0.9929`
-* **Average SOAP Fingerprint RMSD**: `0.1037`
-* **Median SOAP Fingerprint RMSD**: `0.0969`
+* **Average SOAP Cosine Similarity**: `0.9888`
+* **Median SOAP Cosine Similarity**: `0.9925`
+* **Average SOAP Fingerprint RMSD**: `0.1048`
+* **Median SOAP Fingerprint RMSD**: `0.0954`
 * **Total Mg Centers Analyzed**: `535`
 
 | Similarity Range | Category | Count | Percentage | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| **$\ge 0.98$** | Highly Represented | 434 | **81.12%** | Local environment is almost perfectly preserved in the fragment library. |
-| **$[0.90, 0.98)$** | Moderately Represented | 101 | **18.88%** | Local environment is structurally similar, with minor variations (e.g. capped bonds, minor coordinates shift). |
+| **$\ge 0.98$** | Highly Represented | 446 | **83.36%** | Local environment is almost perfectly preserved in the fragment library. |
+| **$[0.90, 0.98)$** | Moderately Represented | 89 | **16.64%** | Local environment is structurally similar, with minor variations (e.g. capped bonds, minor coordinates shift). |
 | **$< 0.90$** | Poorly Represented / Missing | 0 | **0.00%** | Environment has significant structural/coordination divergence in the fragment library. |
 
 ## PCA and UMAP Environment Distribution Map
@@ -32,29 +32,29 @@ These Mg centers in parent crystals have the lowest similarity scores to any fra
 | :---: | :---: | :---: | :---: | :---: | :--- |
 | 1 | `WEHNAA` | 0 | `0.9335` | `0.3633` | `DUWRAQFragMofMin` |
 | 2 | `WEHNAA` | 1 | `0.9335` | `0.3633` | `DUWRAQFragMofMin` |
-| 3 | `BAKYOE` | 4 | `0.9529` | `0.2277` | `HIBGEFFragMof` |
-| 4 | `BAKYOE` | 6 | `0.9529` | `0.2277` | `HIBGEFFragMof` |
-| 5 | `BAKYOE` | 5 | `0.9529` | `0.2277` | `HIBGEFFragMof` |
-| 6 | `BAKYOE` | 7 | `0.9529` | `0.2277` | `HIBGEFFragMof` |
-| 7 | `LIQHAX` | 1 | `0.9627` | `0.1494` | `NUDMUWFragMofMin` |
-| 8 | `LIQHAX` | 3 | `0.9627` | `0.1494` | `NUDMUWFragMofMin` |
-| 9 | `LIQHAX` | 0 | `0.9635` | `0.1761` | `LIQHAXFragMofMin` |
-| 10 | `LIQHAX` | 2 | `0.9635` | `0.1761` | `LIQHAXFragMofMin` |
-| 11 | `QIWPET` | 4 | `0.9663` | `0.3083` | `EQERAUFragMofMin` |
-| 12 | `NUDLIJ` | 8 | `0.9677` | `0.1637` | `NUDMUWFragMofMin` |
-| 13 | `NUDLIJ` | 11 | `0.9677` | `0.1637` | `NUDMUWFragMofMin` |
-| 14 | `NUDLIJ` | 9 | `0.9677` | `0.1637` | `NUDMUWFragMofMin` |
-| 15 | `NUDLIJ` | 10 | `0.9677` | `0.1637` | `NUDMUWFragMofMin` |
-| 16 | `WAMRIN` | 0 | `0.9684` | `0.2477` | `UDURUKFragMofMin` |
-| 17 | `WAMRIN` | 1 | `0.9684` | `0.2477` | `UDURUKFragMofMin` |
-| 18 | `WAMRIN` | 2 | `0.9684` | `0.2477` | `UDURUKFragMofMin` |
-| 19 | `WAMRIN` | 3 | `0.9684` | `0.2477` | `UDURUKFragMofMin` |
-| 20 | `NUDLIJ` | 1 | `0.9687` | `0.1645` | `NUDMUWFragMofMin` |
-| 21 | `NUDLIJ` | 2 | `0.9687` | `0.1645` | `NUDMUWFragMofMin` |
-| 22 | `NUDLIJ` | 3 | `0.9687` | `0.1645` | `NUDMUWFragMofMin` |
-| 23 | `NUDLIJ` | 0 | `0.9687` | `0.1645` | `NUDMUWFragMofMin` |
-| 24 | `NUDMOQ` | 0 | `0.9711` | `0.1567` | `NUDMUWFragMofMin` |
-| 25 | `NUDMOQ` | 2 | `0.9711` | `0.1567` | `NUDMUWFragMofMin` |
+| 3 | `BAKYOE` | 4 | `0.9583` | `0.2313` | `BAKYOEFragMof` |
+| 4 | `BAKYOE` | 6 | `0.9583` | `0.2313` | `BAKYOEFragMof` |
+| 5 | `BAKYOE` | 7 | `0.9583` | `0.2313` | `BAKYOEFragMof` |
+| 6 | `BAKYOE` | 5 | `0.9583` | `0.2313` | `BAKYOEFragMof` |
+| 7 | `LIQHAX` | 0 | `0.9610` | `0.1606` | `NUDMUWFragMofMin` |
+| 8 | `LIQHAX` | 2 | `0.9610` | `0.1606` | `NUDMUWFragMofMin` |
+| 9 | `LIQHAX` | 1 | `0.9616` | `0.1586` | `NUDMUWFragMof` |
+| 10 | `LIQHAX` | 3 | `0.9616` | `0.1586` | `NUDMUWFragMof` |
+| 11 | `NUDNEH` | 1 | `0.9636` | `0.1737` | `EQERAUFragMofMin` |
+| 12 | `NUDNEH` | 2 | `0.9636` | `0.1737` | `EQERAUFragMofMin` |
+| 13 | `NUDNEH` | 3 | `0.9636` | `0.1737` | `EQERAUFragMofMin` |
+| 14 | `NUDNEH` | 0 | `0.9636` | `0.1737` | `EQERAUFragMofMin` |
+| 15 | `NUDMOQ` | 3 | `0.9637` | `0.1724` | `EQERAUFragMofMin` |
+| 16 | `NUDMOQ` | 1 | `0.9637` | `0.1724` | `EQERAUFragMofMin` |
+| 17 | `NUDMOQ` | 2 | `0.9637` | `0.1724` | `EQERAUFragMofMin` |
+| 18 | `NUDMOQ` | 0 | `0.9637` | `0.1724` | `EQERAUFragMofMin` |
+| 19 | `NUDMUW` | 3 | `0.9638` | `0.1677` | `QIWPETFragMof` |
+| 20 | `NUDMUW` | 2 | `0.9638` | `0.1677` | `QIWPETFragMof` |
+| 21 | `NUDMUW` | 5 | `0.9638` | `0.1677` | `QIWPETFragMof` |
+| 22 | `NUDMUW` | 4 | `0.9638` | `0.1677` | `QIWPETFragMof` |
+| 23 | `NUDLIJ` | 1 | `0.9641` | `0.1741` | `EQERAUFragMofMin` |
+| 24 | `NUDLIJ` | 0 | `0.9641` | `0.1741` | `EQERAUFragMofMin` |
+| 25 | `NUDLIJ` | 2 | `0.9641` | `0.1741` | `EQERAUFragMofMin` |
 
 ## Discussion & Chemical Analysis
 

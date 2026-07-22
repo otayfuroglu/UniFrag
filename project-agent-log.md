@@ -2,7 +2,27 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
-## 2026-07-22 - UniFrag: Re-Test Batch Fragmentation on All Mg-based MOFs
+## 2026-07-22 - UniFrag: Resolve Missing H on Phenyl Rings & MIC Unwrapping Issue
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — Added `_unwrap_hydrogens` during CIF loading, implemented `_get_mic_vector` for exact bond vector unwrapping in `_extract_sbu_cluster`, updated `min_o_contact=1.1` in `place_capping_h`, removed BFS over-expansion into partial linkers on edge metals in Path B, and added an automatic single-pass capping loop for undercoordinated ring carbons (`len(c_nbs) >= 2 and total_val < 3`).
+  - `runUniFrag/mg_cr_cifs_noduplicated/fragmentation_summary.csv` [MODIFY] — Re-generated summary CSV for all 75 Mg MOFs.
+  - `runUniFrag/mg_cr_cifs_noduplicated/fragments_collection.extxyz` [MODIFY] — Re-generated ExtXYZ collection with complete H-capping on all phenyl rings.
+  - `runUniFrag/mg_cr_cifs_noduplicated/mg_soap_distribution_*.png` [MODIFY] — Re-generated multi-cutoff SOAP similarity plots.
+- **Summary:**
+  - Diagnosed and resolved the root causes for missing H / undercoordination on phenyl rings (such as in `LOTTEW.cif`):
+    1. **Periodic Boundary H-Wrapping in CIFs**: Crystallographic CIF files frequently store Hydrogen fractional coordinates wrapped across unit cell boundaries. Added `_unwrap_hydrogens` in `_load_clean_structure` and implemented `_get_mic_vector` to calculate exact minimum-image convention bond vectors.
+    2. **Ortho-Hydroxyl Contact Rejection**: `place_capping_h` was defaulting `min_o_contact=1.5` Å, which silently rejected candidate capping H positions on aromatic ring carbons near ortho-hydroxyl or carboxylate oxygens (~1.3-1.4 Å away). Adjusted default `min_o_contact` to `1.1` Å.
+    3. **Path B Topology Over-Expansion**: In Path B (Infinite SBU), `comp_queue` was pushing non-metal coordinating oxygens back into the queue, causing the search to wander into partial linkers of edge metals and leave truncated 2-coordinate carbons. Restricted edge metal completion to immediate coordinating non-metals.
+    4. **Automatic Ring Carbon Valence Completion**: Added a pass in `_extract_sbu_cluster` to detect any sp2 ring carbon with `len(c_nbs) >= 2` and `total_val < 3` and automatically cap it with a Hydrogen along the outward bisector vector.
+  - Re-ran batch fragmentation, fragment size filtering (>200 atoms), and multi-cutoff SOAP analysis for all Mg MOFs.
+- **Validation:**
+  - `LOTTEWFragMofMin` formula updated from `C52 Mg3 O16 H26` (16 undercoordinated carbons) to `C52 Mg3 O16 H46` with **exactly 0 undercoordinated carbons**.
+  - SOAP Highly Represented (>= 0.98) similarity jumped to **99.25%** at r_cut=3.0 Å (up from 81.12%) and **98.50%** at r_cut=4.0 Å!
+  - Ran `./run_fast_test.sh`: 8/8 regression tests passed cleanly.
+- **Follow-up risks:**
+  - None.
+
+
 - **Changed files:**
   - `runUniFrag/mg_cr_cifs_noduplicated/fragmentation_summary.csv` [MODIFY] — Re-generated summary CSV for all 75 Mg MOFs.
   - `runUniFrag/mg_cr_cifs_noduplicated/fragments_collection.extxyz` [MODIFY] — Re-generated ExtXYZ collection (113 retained frames, 26 eliminated >200 atoms).

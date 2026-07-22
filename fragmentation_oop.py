@@ -210,7 +210,7 @@ class BaseFragmenter:
                     min_heavy = d
         return min_h, min_heavy
 
-    def place_capping_h(self, parent_idx, base_vec, bl, species, coords, min_hh=1.5, min_heavy=0.9, min_o_contact=1.5, capped_h_flags=None):
+    def place_capping_h(self, parent_idx, base_vec, bl, species, coords, min_hh=1.5, min_heavy=0.9, min_o_contact=1.1, capped_h_flags=None):
         parent_pos = np.array(coords[parent_idx])
         vnorm = np.linalg.norm(base_vec)
         if vnorm < 1e-12:
@@ -253,6 +253,12 @@ class BaseFragmenter:
                 if capped_h_flags is not None:
                     capped_h_flags.append(True)
                 return
+
+    @staticmethod
+    def _get_mic_vector(supercell, site_a_coords, site_b_coords):
+        frac_delta = supercell.lattice.get_fractional_coords(site_b_coords) - supercell.lattice.get_fractional_coords(site_a_coords)
+        frac_delta = frac_delta - np.round(frac_delta)
+        return supercell.lattice.get_cartesian_coords(frac_delta)
 
     @staticmethod
     def oxygen_already_protonated(parent_idx, species, coords, oh_cutoff=1.5):
@@ -983,6 +989,34 @@ class MOFFragmenter(BaseFragmenter):
     METALS = {"Mg", "Zn", "Cu", "Fe", "Co", "Ni", "Mn", "Zr", "Ti", "V", "Cr", "Al"}
     LARGE_NON_METALS = {"Br", "I", "S", "P", "Cl"}
 
+    def _unwrap_hydrogens(self, struct):
+        try:
+            lattice = struct.lattice
+            heavy_indices = [i for i, s in enumerate(struct) if s.species_string != "H"]
+            h_indices = [i for i, s in enumerate(struct) if s.species_string == "H"]
+            if not heavy_indices or not h_indices:
+                return struct
+            for hi in h_indices:
+                h_site = struct[hi]
+                best_d = float("inf")
+                best_heavy = None
+                for i in heavy_indices:
+                    d = struct.get_distance(hi, i)
+                    if d < best_d:
+                        best_d = d
+                        best_heavy = i
+                if best_heavy is not None and best_d < 1.35:
+                    heavy_site = struct[best_heavy]
+                    cart_d = np.linalg.norm(h_site.coords - heavy_site.coords)
+                    if cart_d > 1.35:
+                        frac_diff = h_site.frac_coords - heavy_site.frac_coords
+                        shift = np.round(frac_diff)
+                        new_frac = h_site.frac_coords - shift
+                        struct.replace(hi, h_site.species, new_frac, coords_are_cartesian=False)
+            return struct
+        except Exception:
+            return struct
+
     def _load_clean_structure(self, mof_path):
         try:
             struct = Structure.from_file(mof_path, occupancy_tolerance=100.0)
@@ -997,6 +1031,7 @@ class MOFFragmenter(BaseFragmenter):
                 if not dup:
                     to_keep.append(i)
             struct = Structure.from_sites([struct[idx] for idx in to_keep])
+            struct = self._unwrap_hydrogens(struct)
             return struct
         except Exception:
             return None
@@ -1181,12 +1216,14 @@ class MOFFragmenter(BaseFragmenter):
             _carbon_like = {"C", "Si", "B"}
             _hetero = {"O", "S", "P", "N"}
             extra = set()
-            for u in keep_atoms:
-                if species_map.get(u) not in _carbon_like:
-                    continue
+            for u in list(keep_atoms):
                 for nb in hadj.get(u, []):
-                    if nb not in keep_atoms and species_map.get(nb) in _hetero:
-                        extra.add(nb)
+                    if nb not in keep_atoms:
+                        sp_nb = species_map.get(nb)
+                        if sp_nb in _hetero and species_map.get(u) in _carbon_like:
+                            extra.add(nb)
+                        elif sp_nb == "H":
+                            extra.add(nb)
             keep_atoms.update(extra)
 
         return keep_atoms
@@ -2351,18 +2388,18 @@ class MOFFragmenter(BaseFragmenter):
 
                 if n.species_string in metals:
                     if n_idx not in core_metals:
-                        unwrapped_nb_pos = unwrapped_coords[curr_idx] + (n.coords - curr_site.coords)
+                        unwrapped_nb_pos = unwrapped_coords[curr_idx] + self._get_mic_vector(supercell, curr_site.coords, n.coords)
                         broken_bonds.append((curr_idx, unwrapped_nb_pos))
                     elif n_idx not in visited:
                         final_indices.add(n_idx)
                         visited.add(n_idx)
                         queue.append(n_idx)
-                        unwrapped_coords[n_idx] = unwrapped_coords[curr_idx] + (n.coords - curr_site.coords)
+                        unwrapped_coords[n_idx] = unwrapped_coords[curr_idx] + self._get_mic_vector(supercell, curr_site.coords, n.coords)
                 elif n_idx not in visited:
                     final_indices.add(n_idx)
                     visited.add(n_idx)
                     queue.append(n_idx)
-                    unwrapped_coords[n_idx] = unwrapped_coords[curr_idx] + (n.coords - curr_site.coords)
+                    unwrapped_coords[n_idx] = unwrapped_coords[curr_idx] + self._get_mic_vector(supercell, curr_site.coords, n.coords)
 
         if is_infinite_sbu and nmetals > 1:
             print("Completing coordination for edge metals...")
@@ -2384,13 +2421,12 @@ class MOFFragmenter(BaseFragmenter):
 
                     if n.species_string in metals:
                         if n_idx not in core_metals:
-                            unwrapped_nb_pos = unwrapped_coords[idx] + (n.coords - site.coords)
+                            unwrapped_nb_pos = unwrapped_coords[idx] + self._get_mic_vector(supercell, site.coords, n.coords)
                             broken_bonds.append((idx, unwrapped_nb_pos))
                     elif n_idx not in visited:
                         final_indices.add(n_idx)
                         visited.add(n_idx)
-                        comp_queue.append(n_idx)
-                        unwrapped_coords[n_idx] = unwrapped_coords[idx] + (n.coords - site.coords)
+                        unwrapped_coords[n_idx] = unwrapped_coords[idx] + self._get_mic_vector(supercell, site.coords, n.coords)
 
         print("Pruning partial linkers...")
         organic_indices = {idx for idx in final_indices if supercell[idx].species_string not in metals}
@@ -2502,6 +2538,20 @@ class MOFFragmenter(BaseFragmenter):
         if partial_to_remove:
             final_indices -= partial_to_remove
             broken_bonds = [(l, n) for l, n in broken_bonds if l not in partial_to_remove]
+
+        for idx in list(final_indices):
+            site_sp = supercell[idx].species_string
+            if site_sp == "C":
+                removed_coords = []
+                for n in sc_all_neighbors[idx]:
+                    if n.index not in final_indices:
+                        mic_v = self._get_mic_vector(supercell, supercell[idx].coords, n.coords)
+                        mic_d = np.linalg.norm(mic_v)
+                        if self.is_valid_bond("C", n.species_string, mic_d):
+                            nb_pos = unwrapped_coords[idx] + mic_v
+                            removed_coords.append(nb_pos)
+                if removed_coords:
+                    bridge_atoms_to_cap.append((idx, removed_coords))
 
         heavy_indices = [idx for idx in final_indices if supercell[idx].species_string != "H"]
         if heavy_indices:
@@ -2668,6 +2718,43 @@ class MOFFragmenter(BaseFragmenter):
                     if species[parent_local_idx] == "O" and self.oxygen_already_protonated(parent_local_idx, species, coords):
                         continue
                     self.place_capping_h(parent_local_idx, avg_vec, bl, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+
+        capped_carbons = set()
+        while True:
+            added_in_pass = False
+            for i, sp in enumerate(species):
+                if sp != "C" or i in capped_carbons:
+                    continue
+                cpos = np.array(coords[i])
+                c_nbs = []
+                o_nbs = []
+                h_nbs = 0
+                for j, (sp2, p2) in enumerate(zip(species, coords)):
+                    if i == j: continue
+                    d = np.linalg.norm(cpos - np.array(p2))
+                    if sp2 == "C" and d < 1.8: c_nbs.append(np.array(p2))
+                    elif sp2 in ("O", "N", "S", "P") and d < 1.8: o_nbs.append(np.array(p2))
+                    elif sp2 == "H" and d < 1.2: h_nbs += 1
+                
+                total_val = len(c_nbs) + len(o_nbs) + h_nbs
+                if len(c_nbs) >= 2 and total_val < 3:
+                    v1 = c_nbs[0] - cpos
+                    v2 = c_nbs[1] - cpos
+                    v1_n = np.linalg.norm(v1)
+                    v2_n = np.linalg.norm(v2)
+                    if v1_n > 0 and v2_n > 0:
+                        v1 = v1 / v1_n
+                        v2 = v2 / v2_n
+                        base_vec = -(v1 + v2)
+                        if np.linalg.norm(base_vec) < 1e-3:
+                            base_vec = np.cross(v1, [0, 0, 1])
+                        bl = self.cap_bond_length("C")
+                        self.place_capping_h(i, base_vec, bl, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+                        capped_carbons.add(i)
+                        added_in_pass = True
+                        break
+            if not added_in_pass:
+                break
 
         if not minimize:
             heavy_idx = [i for i, s in enumerate(species) if s != "H"]
