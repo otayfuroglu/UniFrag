@@ -2,6 +2,21 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-07-22 - UniFrag: Re-Test Batch Fragmentation on All Mg-based MOFs
+- **Changed files:**
+  - `runUniFrag/mg_cr_cifs_noduplicated/fragmentation_summary.csv` [MODIFY] — Re-generated summary CSV for all 75 Mg MOFs.
+  - `runUniFrag/mg_cr_cifs_noduplicated/fragments_collection.extxyz` [MODIFY] — Re-generated ExtXYZ collection (113 retained frames, 26 eliminated >200 atoms).
+  - `runUniFrag/mg_cr_cifs_noduplicated/mg_soap_distribution_*.png` [MODIFY] — Re-generated multi-cutoff SOAP similarity plots.
+- **Summary:**
+  - Re-ran batch fragmentation on all 75 Mg-based MOFs in `runUniFrag/mg_cr_cifs_noduplicated` using 6 parallel processes.
+  - Applied large-fragment filtering (`filter_large_fragments.py`) to eliminate fragments with >200 atoms (113 frames retained).
+  - Re-calculated SOAP descriptors and similarity metrics across 3.0, 4.0, 5.0, and 6.0 Å cutoffs.
+- **Validation:**
+  - Confirmed 0 close pairs (< 0.8 Å) across the entire ExtXYZ collection via `verify_no_close_pairs.py`.
+  - Ran fast regression test suite (`./run_fast_test.sh`); 8/8 tests passed successfully.
+- **Follow-up risks:**
+  - None.
+
 ## 2026-07-21 - UniFrag: Resolve Multiple Phenyl Ring Trimming Bug in Minimized Fragments
 - **Changed files:**
   - `fragmentation_oop.py` [MODIFY] — Updated `_get_first_ring_keep_heavy` to find the nearest ring for each entry point in `first_layer` instead of breaking at the first ring target found.
