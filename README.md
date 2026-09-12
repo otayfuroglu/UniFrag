@@ -2,7 +2,9 @@
 
 UniFrag is a Python framework designed to cleanly and robustly extract chemically-meaningful cluster models from Metal-Organic Frameworks (MOFs), Covalent Organic Frameworks (COFs), and Biological Macromolecules (PDBs). It is specifically optimized for creating stable models for Density Functional Theory (DFT) and QM calculations.
 
-MOF2frag is a Python script designed to cleanly and robustly extract chemically-meaningful symmetric cluster models from Metal-Organic Framework (MOF) `.cif` files. It is specifically optimized for creating stable models for Density Functional Theory (DFT) calculations by using an intelligently-anchored Graph Breadth-First-Search.
+<p align="center">
+  <img src="assets/unifrag_workflow.png" alt="UniFrag Workflow Overview" width="100%">
+</p>
 
 ## Features
 - **Symmetric Cluster Extraction**: Targets a core metal cluster (e.g., an Mg3 or Ni3 node) and strictly completes all organic ligands bonded to those core metals. Disconnected or grazing organic linkers are gracefully ignored to prevent floating geometries.

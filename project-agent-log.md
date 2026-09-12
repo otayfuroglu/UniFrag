@@ -2,6 +2,15 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-09-12 - UniFrag: Added Workflow Overview Figure to README.md
+- **Changed files:**
+  - `assets/unifrag_workflow.png` [NEW] — Added the UniFrag workflow architecture and overview diagram.
+  - `README.md` [MODIFY] — Embedded the workflow figure centered under the header and project description.
+- **Summary:**
+  - Saved the user-provided high-level workflow diagram to `assets/unifrag_workflow.png` and embedded it into `README.md`.
+- **Validation:**
+  - Verified Markdown image rendering and path.
+
 ## 2026-07-22 - UniFrag: COF Minimization Mode Keeps 1 Full Linker + First-Ring Attached Linkers (`COF_TpAzo`)
 - **Changed files:**
   - `fragmentation_oop.py` [MODIFY] — Updated `_try_coffragmentor_node_linker_fragment` when `minimize=True` to keep **1 full attached linker** (first/primary arm) and trim all remaining attached linkers around the node to their **first connected ring**.
