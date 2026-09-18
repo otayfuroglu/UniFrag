@@ -37,7 +37,7 @@ python fragmenter.py example/MgMOF74_clean_fromCORE.cif --radius 4.0 --output Mg
 ```
 This produces an `.xyz` trajectory containing 3 Mg atoms, 32 C atoms, 24 O atoms, and 23 capping/native Hydrogens!
 
-## Biological Macromolecules (BioMolFragmenter)
+## Biological Macromolecules (MacromolFragmenter)
 
 UniFrag now supports the fragmentation of single-chain biological macromolecules (proteins) using a sequence-based sliding window approach. This is ideal for extracting contiguous peptide segments for QM calculations.
 

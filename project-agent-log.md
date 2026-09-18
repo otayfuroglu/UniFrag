@@ -2,6 +2,96 @@
 
 Chronological handoff log for agents working on UniFrag. Add newest entries at the top. Each entry should include changed files, validation, decisions, and follow-up risks.
 
+## 2026-09-17 - UniFrag: 1,4-Dioxin COF Linkage Cleavage + Explicit Linkage Tagging (fixes `1097.cif`)
+- **Symptom (user-reported, visual):** `1097.cif`'s normal fragment had a node with missing parts and linkers not fully plugged in around it, and no minimized fragment was produced at all.
+- **Diagnosis:** Same failure mode as `1031` — Path J could not decompose the structure, so extraction fell through to the generic `bo_node_species = {"B","O"}` heuristic, which treated an isolated ether oxygen as a whole node (`COF Path A (Single node). Node component size: 1`), giving a 53-atom `C29 H16 O8` fragment. `1097` is a **dioxin-linked COF** (`H18 C54 O12`, no boron, a=b=24.69 c=3.50): 6 six-membered `{C4,O2}` rings are 1,4-dioxin linkages, all O are ether `C-O-C`. Removing every O splits the framework into 2 triphenylene blocks (`C18H6`, touching 6 O -> 3-connected NODE) and 3 benzene blocks (`C6H2`, touching 4 O -> 2-connected LINKER); i.e. HHTP-derived chemistry. The minimize fallback could not help either, since `single_linker=True` requires the coffragmentor node+linker route.
+- **Changed files:**
+  - `coffragmentor.py` [MODIFY]
+    - Added 1,4-dioxin cleavage in `COF.fragment()`. The ring `O1-C2-C3-O4-C5-C6` fuses two different aryl systems (`{C2,C3}` vs `{C5,C6}`, identified as connected components of the graph with all O removed); the two C-O bonds on ONE side are severed. Oxygens are kept with the **larger** aryl system, which is the polyol-derived block (hexahydroxytriphenylene in the canonical case). Guards require the two C-pairs to be genuinely different aryl systems, so an intra-ring O-C-C-O does not trigger it.
+    - Added a `linkage_of` tag map (keyed by `frozenset({u,v})`) populated at detection time, and `_count_linkages(cut_bonds, linkage_of)` now merges bonds sharing an endpoint **or** carrying the same tag.
+- **Why the tag map was required:** a dioxin severs `C2-O1` and `C3-O4`, which share **no endpoint at all**, so the previous endpoint-sharing rule counted the benzene linker's 4 severed bonds as 4 separate connections and classified it as a NODE (5 nodes / 0 linkers -> Path J aborts). Adjacency-based merging was rejected as ambiguous: adjacent attachment atoms mean "one linkage" for a dioxin but "two linkages" for an ortho-disubstituted aryl. Tagging at detection time is exact and costs nothing.
+- **Validation:**
+  - `1097.cif`: normal **53 -> 120 atoms** (`C29 H16 O8` -> `C72 H36 O12`); per layer exactly node (`C18 O6`) + 3 linkers (3 x `C6`). Minimized fragment now produced via the node+one-linker fallback: **88 atoms** `C48 H28 O12` (reduction 32). Helper libraries now correct: node 30 atoms `H6 C18 O6` (triphenylene + 6 O), linker 8 atoms `H2 C6` (benzene). All four fragments valence-complete and even-electron; all 12 dioxin oxygens reconnect into intact `C-O-C` junctions with 0 outward termini.
+  - Decomposition regression: `1031` (2 x `H12 C24 N3` + 3 x `H2 C6 N2 O2`) and `211` (2 x `H15 C24 N3` + 3 x `H6 C8 O2`) unchanged; dioxin rule fires 0 cuts on both.
+  - 20-structure HCNO batch: **only `1097` changed**, 19 others byte-identical. Minimized coverage now **20/20**. 66 fragments, 0 `[QM WARNING]`, 0 odd-electron, deficit set unchanged (the same 7 intentional parity trade-offs plus the open `1102` Path D carbon).
+  - `./run_fast_test.sh` 8/8 (MOF) and `--kind cof` 8/8.
+- **Scope:** 50 of the 884 HCNO structures carry a dioxin-like `O-C-C-O` motif (upper bound; the real rule additionally requires the six-ring closure and two distinct aryl systems).
+- **Follow-up risks:**
+  - The "keep O with the larger aryl system" tie-break is a heuristic. It is correct for HHTP-type COFs (polyol node bigger than the halogenated linker) but would place the oxygens on the wrong building block in a hypothetical COF where the polyol unit is the smaller of the two. It only affects which library file owns the O — the assembled fragment contains the same atoms either way, since junctions reconnect geometrically.
+  - The generic fallback `bo_node_species = {"B","O"}` heuristic remains chemically wrong for boron-free COFs and is still reachable by any O-containing COF that Path J cannot decompose. Note the entire HCNO-884 subset contains **no boron at all**, so that path is never legitimately applicable there.
+
+## 2026-09-17 - UniFrag: Raised Minimize Threshold to 20 Atoms and Added a Node+One-Linker Minimize Fallback for Large-Node COFs
+- **Problem:** The standard minimize strategy (keep one full linker, trim the rest to their first ring) cannot shrink COFs whose node dominates the fragment while the linkers are already small. `1031.cif` (node 39 atoms, linker 12) reduced by 0 atoms; 8 of 20 structures in the HCNO test batch produced no usable minimized fragment.
+- **Scope correction (same session, at user's request): the reduction threshold is COF-ONLY and MOFs are entirely unaffected.** It was briefly applied to `_process_mof_file` as well; that was reverted so `_process_mof_file` is byte-identical to its previously committed form (verified: `git diff` over that function is empty). The constant was renamed `MIN_ATOM_REDUCTION_FOR_MINIMIZE` -> `MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF`, and all four remaining uses are inside `_process_cof_file`. Reason: on the IRMOF series 12 of 19 structures clear a 20-atom bar by exactly one atom, so the rule is far too fragile to sit anywhere near the MOF path.
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY]
+    - Added `MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF = 20` (COF only; MOF minimize left unconditional as before).
+    - `COFFragmenter.extract()` and `_try_coffragmentor_node_linker_fragment()` gained a `single_linker` flag. With `minimize=True, single_linker=True`, linker images after the first are dropped entirely (`continue`) instead of being trimmed to their first ring; the node's now-open attachment points are closed by the existing post-merge `_cap_severed_double_bond_sites` / `_cap_open_oxygens` passes. `extract()` returns `None` for `single_linker=True` when the coffragmentor node+linker route is unavailable, so the caller does not mistake an identical fragment for an improvement.
+    - `_process_cof_file` now retries once with `single_linker=True` when the standard minimize falls short of the threshold, and keeps whichever candidate reduces more.
+- **Design note:** The trigger is *measured outcome*, not a COF-type classification. An up-front `node_atoms > linker_atoms` rule was evaluated against the batch and mis-handles 4 of 20 cases — it would needlessly switch `856` and `1110` (where trimming already works) and would miss `137`/`557` (node and linker both 12 atoms, yet trimming achieves nothing). See the 2026-09-17 decision entry.
+- **Validation:**
+  - COF batch (20 HCNO structures): minimized-fragment coverage **12/20 -> 19/20**. New minimized fragments for `1031` (168->120), `211` (192->128), `167` (174->126), `1156` (145->103), `1023` (126->90), `142` (124->82), `557` (124->72), `137` (114->66); `1110` improved 93 -> 67. All 64 fragments even-electron, 0 `[QM WARNING]`. Deficit set unchanged apart from `557FragCofMin` inheriting the same intentional parity trade-off its normal fragment already had.
+  - `1031FragCofMin` = 120 atoms `C60 H46 N10 O4` = exactly node (`C24 N3`) + one linker (`C6 N2 O2`) per layer, bilayer. Valence-complete, even-electron.
+  - Min fragments reporting 2 connected components are the bilayer (pi-stacked dimer) cases, which is by design — the layers are not covalently bonded.
+  - `./run_fast_test.sh` 8/8 (MOF) and `--kind cof` 8/8.
+  - MOF impact of the threshold change checked on the IRMOF series (18 structures): **no MOF minimized fragment was dropped**.
+- **Follow-up risks:**
+  - **Do not extend `MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF` to MOFs.** Full IRMOF batch (19 structures) reductions: 21 x12, 25, 71 x3, 111, 121 x2, 137 — bimodal, with 12 of 19 clearing a 20-atom bar by exactly ONE atom and nothing between 25 and 71. Applying any threshold in that range to MOFs would silently delete most IRMOF minimized fragments. The constant is `_COF`-suffixed for this reason.
+  - `1097.cif` lost its minimized fragment (reduction was exactly 15, now under threshold; it has no node/linker decomposition so the fallback cannot apply). Accepted as the intended effect of the stricter threshold.
+  - The `single_linker` fallback is implemented only for the coffragmentor node+linker route. COFs routed through the native fallback paths (A/B/C/D) get no retry, so a structure there whose trimming falls short will simply have no minimized fragment.
+
+## 2026-09-16 - UniFrag: Benzoxazole (Oxazole) COF Linkage Cleavage + Linkage-Based Node/Linker Classification (fixes `1031.cif`)
+- **Symptom (user-reported, visual):** `1031.cif` produced a malformed normal fragment — the node was missing atoms and only ONE linker was attached. Its helper libraries were nonsense: `cof_nodes_lib/1031_00.xyz` was a single `O` atom and `cof_linkers_lib/1031_00.xyz` was 108 atoms (`H30 C66 N12`, i.e. the whole unit-cell framework minus its oxygens).
+- **Diagnosis:** `1031` is a **benzoxazole-linked triazine COF** (per-cell: 2 triazine `C3N3` rings, 6 oxazole `C3NO` rings, 9 benzene rings; all 6 O are ether-type `C-O-C`, no boron anywhere). `coffragmentor.py` only knew two linkage chemistries — B-O and imine C=N — and the oxazole C-N bond is explicitly protected by the `in_small_ring` guard, so **zero** bonds were cut, Path J found no node/linker and returned `None`. Extraction then fell through to the generic fallback, where `bo_node_species = {"B", "O"}` treats EVERY oxygen as a node-forming atom. With no B-O connectivity, each isolated ether O became its own "node component of size 1" — hence `COF Path A (Single node). Node component size: 1`, a chemically meaningless single-atom node, and a lopsided one-arm fragment.
+- **Changed files:**
+  - `coffragmentor.py` [MODIFY] — Two changes:
+    1. Added benzoxazole/oxazole cleavage in `COF.fragment()`: a carbon bonded to exactly one O and one N where removing that carbon leaves a 3-edge O-x-y-N path (i.e. the two are closed into a five-membered ring through it) is the oxazole C2 / former aldehyde carbon; both its C-O and C-N bonds are severed. This separates the aldehyde-derived block from the aminophenol-derived block.
+    2. Added module-level `_count_linkages(cut_bonds)` and switched node/linker classification from `len(attachment_atoms) >= 3` to `_count_linkages(cut_bonds) >= 3`. One chemical linkage can sever more than one bond (a benzoxazole C2 loses both C-O and C-N), so severed bonds that share an attachment atom or share an external partner atom are grouped and counted once. For single-bond linkages (imine, boroxine) this is mathematically identical to the old count, so it is backward compatible.
+- **Why the classification change was also required:** with only the cleavage rule added, the aminophenol-derived linker benzene has 4 attachment atoms (2 O + 2 N) and was misclassified as a NODE, leaving 5 nodes / 0 linkers, so `_try_coffragmentor_node_linker_fragment` still bailed out (`if not nodes or not linkers: return None`). Counting linkages instead gives it 2 -> LINKER, and the triazine side 3 -> NODE.
+- **Validation:**
+  - `1031.cif` now routes through Path J and yields `1031FragCof` = **168 atoms `C84 H54 N18 O12`** (was 71 atoms `C35 H27 N7 O2`). Per layer that is exactly 1 triazine node (`C24 N3`) + all 3 benzoxazole linkers (3 x `C6 N2 O2`), bilayer-stacked.
+  - Helper libraries are now chemically correct: node = 39 atoms `H12 C24 N3` (triazine + 3 phenyl + 3 aldehyde C), linker = 12 atoms `H2 C6 N2 O2` (benzene + 2 O + 2 N). QM-ready exports `1031FragCofOnlyNode` (96 at) and `1031FragCofOnlyLinker` (36 at) are produced, both valence-complete and even-electron.
+  - Junction integrity confirmed: of the 12 O in the main fragment, 6 have intact `C-O-C` (oxazole rings geometrically reformed at the node-linker junctions) and 6 are outward termini correctly capped to `-OH`. No double-capped junctions.
+  - Prototyped on scratch copies BEFORE editing; verified the new cleavage rule cuts **0** extra bonds on imine COFs (`211.cif`, `COF-TpAzo.cif`) and that linkage-counting reproduces the old classification exactly for both.
+  - 20-structure HCNO batch re-run: **only `1031` changed**; all 19 others byte-identical in atom count and formula. 0 `[QM WARNING]`. Audit: 57 fragments, 0 odd-electron, same 7 pre-existing flagged items as before (6 intentional parity trade-offs + the open `1102` Path D carbon).
+  - `./run_fast_test.sh` (MOF) 8/8 and `--kind cof` 8/8.
+- **Scope:** a motif scan over the full HCNO-884 subset finds **127 structures (~14%)** containing an oxazole-like `C(-O)(-N)` carbon, so this affected far more than one structure. (That count is an upper bound — the cheap scan omits the five-ring closure test the real rule applies.)
+- **Follow-up risks:**
+  - The generic fallback's `bo_node_species = {"B", "O"}` heuristic is still chemically wrong for any COF where O is an ether/carbonyl rather than part of a B-O node: it will happily produce a single-atom "node". `1031` no longer reaches it (Path J now succeeds), but other non-boron O-containing COFs that Path J cannot decompose will still hit this. Consider gating that heuristic on boron actually being present/bonded to O.
+  - The oxazole rule is not extended to the isoelectronic benzothiazole (S) or benzimidazole (N-N) linkages; those COFs would still fail to decompose. Straightforward to add by the same pattern if needed.
+
+## 2026-09-16 - UniFrag: Fixed Under-Capped Imine Cut Sites in COF Node/Linker Building Blocks + Added OnlyNode QM Export (`CoRE-COF DT1242-v7.0` HCNO subset, validated on `211.cif`)
+- **Context:** Starting a new workstream to demonstrate UniFrag on the CoRE-COF database (`runUniFrag/CoRECOF/CoRE-COFs_DT1242-v7.0/`, 1242 structures). Built a 884-structure HCNO-only (C,H,N,O) subset (`runUniFrag/CoRECOF/CoRE-COF_HCNO884/`) as the primary demonstration set. A 20-structure random test batch surfaced valence-incomplete building blocks on visual inspection; `211.cif` was used as the deep-dive case.
+- **Changed files:**
+  - `fragmentation_oop.py` [MODIFY] — All changes scoped to `COFFragmenter` + `_process_cof_file` + the COF-only flush closure in `main()`. Zero changes to `MOFFragmenter`, `BaseFragmenter`, `_process_mof_file`, or any MOF flush path (verified via `git diff` hunk audit).
+    - Added `COFFragmenter._cap_severed_double_bond_sites`: detects C/N atoms with exactly 1 bonded HEAVY neighbor (the topological signature of an imine C=N cut, e.g. from `coffragmentor.py`'s `heavy_degree(c_idx)==2` cleavage rule) and caps them with `target_valence[sp] - (heavy_count + existing_H_count)` new hydrogens — a true valence deficit, not a fixed count, since the atom may already carry a native H (e.g. an aldimine `ArCH=N-` carbon keeps its own H after the `=N` side is cut) or none (e.g. a bare imine nitrogen `ArN=CH-`).
+    - Applied this capping to the isolated node molecule and each isolated linker image *before* they are merged into the combined fragment in `_try_coffragmentor_node_linker_fragment` (merging first, then capping, made real deficits unrecoverable — a nearby unrelated atom from a different merged image could appear close enough to mask the true degree).
+    - Added `COFFragmenter._make_cof_qm_ready`: a COF-only QM-ready capper (mirrors the shared `BaseFragmenter._make_qm_ready_linker`, left untouched) that runs `_cap_severed_double_bond_sites` then `_cap_open_oxygens`, then the existing shared `optimize_capped_h_geometry_only` / `fix_odd_electron_multiplicity` steps.
+    - Added `self.extracted_nodes` tracking (mirrors `self.extracted_linkers`) in `_export_coffragmentor_library` and `_export_cof_component_library`.
+    - `_process_cof_file` now also emits a QM-ready `OnlyNode` fragment per unique node (symmetric to the existing `OnlyLinker` export), and its `OnlyLinker` generation now calls `_make_cof_qm_ready` instead of the shared `_make_qm_ready_linker` (COF-only swap; MOF's `_process_mof_file` still calls the original shared method, unchanged).
+    - `main()`'s COF flush closure now writes `<stem>FragCofOnlyNode` frames to the ExtXYZ collection alongside `FragCofOnlyLinker`.
+- **Summary:**
+  - Root cause: for imine-linked COFs, `coffragmentor.py` cleaves the C=N double bond, leaving both the amine-derived node's nitrogen and the aldehyde-derived linker's carbon with only 1 heavy neighbor. `_cap_open_oxygens` (the only capping applied to COF Path J's assembled fragment) only handles single-neighbor O, single-neighbor N, and 2-heavy-neighbor "phenyl edge" C — it has no branch for a 1-heavy-neighbor carbon, so those sites were left completely uncapped in the standalone `OnlyLinker`/`OnlyNode`-style exports, or partially capped (short by exactly the severed bond's second valence unit) in the main assembled fragment when a native H happened to already be present.
+  - Verified on `211.cif` (imine COF, keto/amine node + dialdehyde-type linker): before the fix, `211FragCof`/`211FragCofMin` had 6/2 systematically under-coordinated carbons (valid bond order but missing one H), and the `OnlyLinker` helper export had 4 fully bare (zero-H) carbons. After the fix, all 4 exported fragments (`211FragCof` 216 atoms, `211FragCofMin` 204 atoms, `211FragCofOnlyLinker` 40 atoms, `211FragCofOnlyNode` [NEW] 96 atoms) have zero valence-deficient heavy atoms and even electron counts.
+- **Validation:**
+  - `./run_fast_test.sh` (MOF, default `--kind mof`): 8/8 passed.
+  - `./run_fast_test.sh --kind cof`: 8/8 passed.
+  - Manual geometric valence audit (covalent-radius bond graph via the project's own `COFFragmenter.is_valid_bond`) confirmed 0 remaining deficits across all 4 fragment types for `211.cif`.
+- **Follow-up (same day):** The initial fix above placed each newly-added capping H via the existing clash-avoidance cone search only, with no angle target. For sites needing 2 new H (e.g. converting a bare imine N into -NH2, or an aldimine =CH- carbon into -CH3), this left the *first* H nearly collinear with the anchor bond (H-N-C measured at 180 degrees) instead of a proper pyramidal/tetrahedral angle. Fixed by having `_cap_severed_double_bond_sites` track the newly-added H indices per atom and immediately call the existing (previously unused/legacy per the 2026-05-07 decision) `BaseFragmenter.refine_h_geometry_with_rdkit` on just those indices — a local UFF relaxation with every other atom fixed. Only ever invoked from this COF-only method, so the "legacy/unused" status for MOF is unchanged. Verified post-fix: `-NH2` sites now measure ~107-108 degrees (H-N-H and H-N-C), `-CH3`-like sites measure ~108-112 degrees — both close to ideal tetrahedral. Valence-deficit and even-electron checks re-confirmed at 0 deficits for all 4 fragment types; `./run_fast_test.sh` (MOF) and `--kind cof` both still 8/8.
+- **Second follow-up (same day, user caught via visual inspection):** The pre-merge capping (node and each linker image capped in isolation, before `append_merged`) was itself wrong. A node/linker cut atom that IS reconnected by the merge (e.g. the node's imine N and the attached linker's imine C, once placed at their correct relative crystallographic positions, sit ~1.3 A apart — a real restored C=N bond) must be left uncapped; capping both sides independently before merging produced two dead-end groups (a `-NH2` on the node, a `-CH3`-like stub on the linker) sitting next to each other instead of one real bond. This passed the earlier valence-deficit check (0 deficit on each side individually) despite being chemically wrong, which is why it wasn't caught until visual inspection. Fixed by removing both pre-merge calls (`_cap_severed_double_bond_sites(node_sp, ...)` and the per-linker-image call) from `_try_coffragmentor_node_linker_fragment`, relying solely on the existing post-merge call: after merging, a properly-reconnected junction naturally shows 2 heavy neighbors (skipped, correct) while a genuinely still-dangling atom (e.g. a linker's far end attaching to a second, non-included node copy) still shows exactly 1 heavy neighbor (correctly capped). Re-verified on `211.cif`: all 6 node nitrogens in `211FragCof` now show a real ~1.30 A bond to a linker carbon (0 dangling -NH2 at junctions); the linkers' genuinely-unconnected far ends are still correctly capped as -CH3-like termini with reasonable angles (~106-120 degrees). `211FragCof` atom count dropped from the (wrongly inflated) 216 to a correct 192; 0 valence deficits; `./run_fast_test.sh` (MOF) and `--kind cof` both still 8/8.
+- **Third follow-up (same day, ATTEMPTED AND REVERTED — do not retry this way):** An attempt was made to extend the node/linker helper-library + QM-ready `OnlyNode`/`OnlyLinker` export to COF Path A/B, by hooking `_export_cof_component_library` into the `if (not minimize) and (path_mode in {"A","B"}) and node_atoms:` block in `extract()` (using `core_nodes` as the node and each `touches_core` component of `comps` as a linker). This is WRONG and was reverted. Two independent reasons:
+  1. `core_nodes` there is only the B/O node-species seed and can collapse to a single atom, while `comps` are unbounded BFS components over every non-node atom in the whole supercell. For `1031.cif` this exported a 1-atom `O1` "node" and a 108-atom `H30 C66 N12` "linker" — i.e. the entire unit cell framework (`H30 C66 N12 O6`) minus its oxygens, as one "linker". For `411.cif` it exported a 250-atom "linker" (larger than the whole 83-atom fragment) plus a lone stray `H` that could not be parity-fixed (the run's only `[QM WARNING]`).
+  2. For single-block Path A topologies (`len(core_nodes) <= 2`), that `final` set is discarded outright further down and rebuilt by the `single_block_keep_heavy` / `_extract_neighbor_single_block` branch — so anything exported at that point does not even correspond to the fragment that is written out.
+  A correct implementation would have to hook into whichever branch actually produces the emitted fragment (for single-block Path A, the `single_block_keep_heavy` branch) and derive node/linker from a decomposition that is genuinely bounded to one repeat unit — not from the raw `core_nodes`/`comps` intermediate. Post-revert state re-verified: 58 fragments, 0 odd-electron, no degenerate (<=2 atom) helper-library files, `run_fast_test.sh` 8/8 for both `mof` and `cof`.
+- **Follow-up risks:**
+  - COF Path C (Tetra-C node) and Path D (Porphyrin core) produce NO `OnlyNode`/`OnlyLinker` QM-ready building blocks at all (they never call `_export_cof_component_library` / `_export_coffragmentor_library`). In the 20-structure HCNO test batch this affects `103.cif`, `760.cif`, `1102.cif`, `1120.cif`. Per user decision on 2026-09-16 this is accepted and intentionally out of scope — C/D are not required to produce QM-ready building blocks.
+  - `1102FragCof` (Path D) still has one genuinely under-coordinated carbon (1 heavy neighbor + 2 H, needs 1 more H); unresolved, and NOT explained by the intentional parity-fix mechanism. Its minimized counterpart is clean.
+  - The remaining flagged valence "deficits" on O/N sites (`411`, `557`, `637`, `851`) are NOT bugs: they are the documented `fix_odd_electron_multiplicity` behaviour deliberately removing one capping H from a low-priority site (alcohol/amine/carboxylate) to force an even electron count. Any future audit script should account for this before reporting them.
+  - The new capping rule (`exactly 1 heavy neighbor` → deficit-based H count) is applied inside `_try_coffragmentor_node_linker_fragment` (the primary Path J route) exclusively as a POST-merge step now (pre-merge capping was removed — see follow-up above), and is also present post-merge in the two native fallback COF paths inside `extract()` (Path A/B/D family). The fallback-path insertions are UNTESTED against a real fallback-routed bug case — only Path J was validated end-to-end on `211.cif`.
+  - The rule cannot distinguish bond order from geometry alone; a genuine nitrile group (`R-C#N`) would show the same "1 heavy neighbor" signature and could be incorrectly capped. Not observed in the HCNO-884 subset so far (`coffragmentor.py` only ever cleaves B-O and imine C-N bonds, so nitriles are never a cut product), but worth watching if nitrile-linked COFs are added later.
+  - The full 20-structure HCNO test batch (`runUniFrag/CoRECOF/test_hcno20*/`) has NOT yet been re-run with this fix, per explicit user instruction to fully resolve `211.cif` first. The 884-structure HCNO batch has also not been (re-)run with the fix.
+  - RDKit prints harmless `Molecule does not have explicit Hs` stderr warnings during this local refinement; cosmetic only, not investigated further.
+
 ## 2026-09-12 - UniFrag: Added Workflow Overview Figure to README.md
 - **Changed files:**
   - `assets/unifrag_workflow.png` [NEW] — Added the UniFrag workflow architecture and overview diagram.
@@ -1801,3 +1891,221 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 
 
 
+
+## [2026-09-17] COF stacked-dimer verification and planar amine capping fix
+- Files touched:
+  - `fragmentation_oop.py`
+  - `project-decisions.md`
+  - `project-agent-log.md`
+- Summary:
+  - Verified stacked-dimer construction on a 20-structure HCNO subset (`runUniFrag/CoRECOF/test_dimer20`). Dimer construction itself is correct: 8 structures dimerized, each verified as a pure translation of the monomer with `|T|` matching the parent CIF's shortest lattice vector exactly (3.40-3.57 A).
+  - Diagnosed sub-2.4 A interlayer contacts (worst 1.72 A) in 25 of 30 dimer frames. Heavy-atom frameworks are perfectly planar; the clash comes entirely from capping H on terminal nitrogen pyramidalized out of plane by the UFF refinement.
+  - Added `COFFragmenter._planarize_conjugated_amine_caps` and wired it into `_cap_severed_double_bond_sites` (see `project-decisions.md` 2026-09-17).
+- Validation (`test_dimer20` vs `test_dimer20_planar`, same 20 CIFs, 4 procs, exit 0):
+  - Out-of-plane displacement of terminal N-H: mean 0.76 A -> 0.09 A.
+  - Minimum interlayer contact across all dimers: 1.72 A -> 2.55 A; median 1.81 A -> 3.45 A.
+  - Frames with a sub-2.4 A interlayer contact: 25/30 -> 0/29.
+  - Every shared fragment label has **identical composition and identical heavy-atom coordinates** before and after; only hydrogen positions moved.
+- Follow-up risks / open items:
+  - `411.cif` (parent c = 3.70 A) and `760.cif` (c = 3.56 A) lie inside the 2.5-5.0 A stacking window but still produce monomers: both route through fallback paths (Path A single node, Path D porphyrin) rather than Path J, where the dimer rule lives. Not addressed.
+  - `_chemical_identity_key` uses the heavy-atom formula only, with no geometry. `557FragCofOnlyNode` and `637FragCofMin` are both `C18H24N6O6` but are different molecules; they collide on this key, so only one survives and which one depends on multiprocessing arrival order. Pre-existing, unrelated to this change.
+  - `1102FragCof` atom 72 remains an under-coordinated carbon (Path D).
+
+## [2026-09-17] COF layered-dimer rule extended to fallback paths (411, 760)
+- Files touched:
+  - `fragmentation_oop.py`
+  - `project-decisions.md`
+  - `project-agent-log.md`
+- Test folders: `runUniFrag/CoRECOF/test_dimer_411_760` (isolated), `runUniFrag/CoRECOF/test_dimer20_pathfix` (regression).
+- Summary:
+  - Traced the two missing dimers: `411.cif` routes to Path A (single node) and `760.cif` to Path D (porphyrin core); neither reaches Path J, where the layered-dimer rule lived. The Path A/B/C/D branch's own dimer code required an explicit `layer_mode == "dimer"` and never fired under the default `"auto"`.
+  - Extended the rule to that branch and gated it on fragment planarity (see `project-decisions.md` 2026-09-17).
+- Validation:
+  - `411`: now `-> COF layered dimer: second layer added along lattice axis 2 (|T| = 3.70 A)`, verified an exact translation (max atom mismatch 0.000 A) matching the parent c.
+  - `760`: now `-> COF layered dimer skipped: ... (flatness = 2.51 A, alignment = 1.00)`, correctly remaining a monomer.
+  - 20-structure regression (exit 0, no new warnings): dimer frames 29 -> 33; only `411FragCof`, `411FragCofMin`, `411FragCofOnlyNode` changed; all other labels kept composition and component count.
+- Follow-up risks / open items:
+  - `411FragCof` and `411FragCofOnlyNode` retain interlayer contacts of 1.84 A and 1.99 A. Cause is *not* the dimer construction: it is the `-CH3` cap that `_cap_severed_double_bond_sites` places on the severed imine carbon. The parent is perfectly flat with no out-of-plane hydrogen anywhere, so that carbon is sp2 with a single in-plane H in the real material; saturating it to a tetrahedral methyl necessarily puts an H ~0.93 A out of the layer. Unlike the amine case this cannot be fixed by projection - a planar `-CH3` would be chemically wrong. The faithful fix is to cap the aldimine terminus as `Ar-CH=NH` instead of `Ar-CH3`, which preserves sp2 and planarity but adds a heavy atom and would affect `_chemical_identity_key` grouping. Deferred pending a decision.
+  - `_chemical_identity_key` formula-only collision (`557FragCofOnlyNode` vs `637FragCofMin`, both `C18H24N6O6`) still swaps nondeterministically between runs.
+
+## [2026-09-17] COF building blocks: k+k classification, per-site linker placement, bond-order capping
+- Files touched: `coffragmentor.py`, `fragmentation_oop.py`, `project-decisions.md`, `project-agent-log.md`
+- Test folders: `runUniFrag/CoRECOF/test_411_blocks` (isolated 411), `runUniFrag/CoRECOF/test_dimer20_final4` (regression).
+- Trigger: user review of `411` reported (1) no linker in the extxyz, (2) a node with a redundant carbon past the N on two of three arms, (3) a linker missing parts in both normal and min versions, with reference images of the expected node and linker.
+- Root cause: all three were one failure. `coffragmentor` already produced both correct blocks but labelled both as nodes (k+k COF), so Path J bailed and Path A's fallback block growth produced the malformed output. See `project-decisions.md` 2026-09-17 for the three fixes.
+- Validation - `411` now matches the user's reference images exactly:
+  - `cof_nodes_lib/411_00.xyz` = `H6 C9 N3 O1` (triformylphenol core), `cof_linkers_lib/411_00.xyz` = `H15 C24 N3` (tris(aminophenyl)benzene).
+  - Fragments: `411FragCof` C162H126N18O2 (node + 3 full linkers, dimer), `411FragCofMin` C90H70N10O2, `411FragCofOnlyNode` C18H18N6O2, `411FragCofOnlyLinker` C48H42N6.
+  - Node nitrogen is now the neutral aldimine `Ar-CH=NH` (1 H at a 1.27 A C=N); linker nitrogen stays aniline `Ar-NH2` (2 H at 1.40 A); the reconnected junction N carries 0 H with both 1.27 and 1.40 A bonds.
+- Validation - 20-structure regression (exit 0, no errors):
+  - Fragment frames 65 -> 74; `103`, `1102`, `1120` now yield node/linker blocks for the first time, `637` gained a Min.
+  - Min coverage 19/20 -> **20/20**.
+  - Over-valent terminal sites **74 -> 4** (all 4 in the distorted `760.cif`); correctly capped sites 275 -> 363.
+  - Dimers 33, minimum interlayer contact 1.84 -> **2.55 A**, zero sub-2.4 A contacts. The 411 methyl clash reported earlier disappeared on its own: that carbon is now capped as a planar sp2 `=CH-` rather than a tetrahedral `-CH3`.
+- Follow-up risks / open items:
+  - `760.cif` has a geometrically distorted parent (C-N 1.154-1.338 A, all C-H exactly 1.140 A). Its 4 over-valent sites and 10 bridging-H artefacts trace to that, not to UniFrag. Consider screening the 884 set for non-physical bond lengths before the full run.
+  - `_chemical_identity_key` heavy-atom-formula collision still unresolved.
+  - `1102FragCof` atom 72 under-coordinated carbon (Path D).
+
+## [2026-09-17] Vinylene COF linkage (704) and sp2 carbon cap planarization
+- Files touched: `coffragmentor.py`, `fragmentation_oop.py`, `project-decisions.md`, `project-agent-log.md`
+- Test folders: `runUniFrag/CoRECOF/test_704_blocks`, `runUniFrag/CoRECOF/test_dimer20_v2` (regression), `runUniFrag/CoRECOF/test_hcno100` (100-structure run).
+- Trigger: user reported "similar problems for 704" after the `411` fixes.
+- Root cause: `704` is a vinylene-linked sp2-carbon COF. Its `Ar-CH=CH-Ar` linkage was in none of the cleavage rules, so `COF.fragment()` severed **nothing** and returned whole periodic networks as blocks; Path J bailed and the fallback path produced garbage. Distinct from the `411` failure (which was a classification tie), though both ended in the same fallback.
+- Validation:
+  - `704`: node lib `H5 C11 N1`, linker lib `H27 C45 N3`; fragments `704FragCof` C140H98N10, `Min` C66H48N4, `OnlyNode` C11H11N, `OnlyLinker` C45H33N3. Previously a single malformed `H10 C14 N1` node block and no linker.
+  - 20-structure regression (exit 0, no errors): 75 frames, correctly capped terminal sites 367, Min coverage 20/20, 33 dimers, minimum interlayer contact 2.55 A, **zero** sub-2.4 A contacts.
+  - `851` is a mixed imine/vinylene COF; its fragments are now decomposed further, which is correct, and the clashes the new caps briefly introduced were removed by extending planarization to sp2 carbon.
+- Follow-up risks / open items:
+  - Cleavage-rule coverage is still enumerated by hand (boroxine, imine, oxazole, dioxin, vinylene). A COF whose linkage is absent from that list fails silently through the fallback path rather than reporting that it recognised nothing. Worth a diagnostic that flags "zero severed bonds" as a warning.
+  - `760.cif` parent geometry is distorted (C-N 1.154-1.338 A, all C-H 1.140 A); screen the 884 set for non-physical bond lengths.
+  - `_chemical_identity_key` heavy-atom-formula collision; `1102FragCof` atom 72 under-coordinated carbon.
+
+## [2026-09-17] 100-structure HCNO test run and unified layer-planarity guard
+- Files touched: `fragmentation_oop.py`, `project-decisions.md`, `project-agent-log.md`
+- Test folders: `runUniFrag/CoRECOF/test_hcno100` (first run), `runUniFrag/CoRECOF/test_hcno100_v2` (after the guard).
+- Dataset: 100 structures sampled from `CoRE-COF_HCNO884` with seed 20260917, **disjoint** from the original 20 (`selection.txt` in each folder lists them).
+- Summary:
+  - First run: 100/100 structures processed, 0 tracebacks, Min coverage 89/100, 268 fragment frames, 96.0% of terminal capped sites chemically clean. But 63 of 150 dimer frames had a sub-2.4 A interlayer contact (worst 1.17 A), 48 of them with non-flat layers - the corrugated-framework mode reaching output through Path J, whose dimer rule had no planarity guard.
+  - Unified the guard across both dimer rules (see `project-decisions.md` 2026-09-17).
+- Validation (same 100 structures, exit 0, 0 tracebacks):
+  - Dimer frames 150 -> 74; sub-2.4 A contacts **63 -> 14**; median interlayer contact 2.60 -> 3.45 A; non-flat clashes **48 -> 0**.
+  - Min coverage 89/100 -> 88/100. Clean terminal sites ~96% in both runs.
+- Follow-up risks / open items:
+  - All 14 remaining dimer clashes are capping geometry on flat layers: 100 of 132 contacts are owned by `Ar-CH3` caps, 20 by `=CH2` caps whose local ring system was too small to planarize. A methyl cannot be planarized (it is genuinely sp3). The faithful fix is capping a severed aldimine as `Ar-CH=NH` rather than `Ar-CH3`, preserving sp2 planarity, at the cost of one extra heavy atom and a shift in `_chemical_identity_key` grouping. Affects 8 structures / 14 frames of 74 dimers here. Not started - needs a decision.
+  - 12 structures still produce no Min; 46 over-valent and 12 under-valent terminal sites remain, concentrated in a handful of structures (`1169`, `689`, `1189`, `1242`).
+  - Cleavage-rule coverage remains hand-enumerated; a "zero severed bonds" diagnostic is still wanted.
+
+## [2026-09-17] Biaryl fallback for all-hydrocarbon COFs (463)
+- Files touched: `coffragmentor.py`, `project-decisions.md`, `project-agent-log.md`
+- Test folders: `runUniFrag/CoRECOF/test_463_blocks`, `runUniFrag/CoRECOF/test_hcno100_v3`.
+- Trigger: user reported `463.cif` (C/H only) yielding no proper node or linker, with reference images of the expected benzene node and biphenyl linker.
+- Root cause: `463` is an all-hydrocarbon COF linked by direct aryl-aryl C-C bonds. No cleavage rule matched, so `COF.fragment()` severed nothing and returned 0 nodes and 0 linkers. This is the **third** distinct cause of the same silent fallback (411 = classification tie, 704 = unknown vinylene chemistry, 463 = unknown biaryl chemistry).
+- Validation:
+  - `463`: node lib `H3 C6`, linker lib `H8 C12`; fragments `463FragCof` C84H60, `Min` C60H44, `OnlyNode` C12H12 (benzene dimer), `OnlyLinker` C24H20 (biphenyl dimer). Every carbon has degree 3, and the interlayer contact is exactly 3.40 A = |T| (previously 1.42-2.31 A).
+  - 100-structure regression (exit 0, 0 tracebacks): frames 259 -> 268, structures with fragments 90 -> 91, Min 88 -> 89, sub-2.4 A contacts 14 -> 11, valence quality ~96% unchanged.
+- Follow-up risks / open items:
+  - Three separate structures have now failed silently through the fallback path for three different reasons. A "zero severed bonds" diagnostic is overdue: it would have surfaced `704` and `463` immediately instead of leaving them to visual review.
+  - All 11 remaining dimer clashes are still capping geometry on flat layers: 78 of 118 contacts from `Ar-CH3` caps, 28 from `=CH2` caps in ring systems too small to planarize. Affects 5 structures (`68`, `175`, `502`, `1049`, `1081`). The `Ar-CH=NH` capping change remains the open decision.
+  - 11 structures still produce no Min; 46 over-valent / 12 under-valent terminal sites persist.
+
+## [2026-09-17] 543 alkyne capping + stackability, 612 duplicate-key false positives
+- Files touched: `fragmentation_oop.py`, `project-decisions.md`, `project-agent-log.md`
+- Test folders: `runUniFrag/CoRECOF/test_543_blocks`, `runUniFrag/CoRECOF/test_612_blocks`, `runUniFrag/CoRECOF/test_dedup`.
+- Trigger: user reported a redundant H on the two-carbon chain of `543.cif` plus a monomer where a dimer was expected, then that `612.cif` produced no normal, no min and no node - only a linker.
+- Root causes (three, see `project-decisions.md` 2026-09-17):
+  1. `543`'s two-carbon chain is an **alkyne** (C#C, 1.205 A), not a vinylene. `_cap_open_oxygens` treats a 2-heavy-neighbour carbon with no H as an aromatic edge carbon and caps it, but an alkyne carbon is already fully valent.
+  2. `543`'s dimer was rejected by an absolute 0.5 A flatness cutoff at a measured 0.51 A, although its parent is genuinely layered with twisted aryl rings.
+  3. `612` was not a fragmentation failure at all: its fragments were discarded as formula-only "duplicates" of an unrelated framework.
+- Validation:
+  - `543`: every alkyne carbon now carries 0 H (matching the parent), and all four fragments are dimers with interlayer contacts of 3.31-3.58 A.
+  - `612`: now emits `FragCof`, `Min`, `OnlyNode`, `OnlyLinker_0`, `OnlyLinker_1`, plus node and linker libraries.
+  - Ten-structure dedup test: `612`, `221`, `1032`, `370`, `579`, `141` all retained; `144`/`603`/`651`/`372` still flagged duplicates, confirmed correct - their Weisfeiler-Lehman topology hashes match their partners exactly.
+  - MOF isolation proven by identity, not by sampling: `MOFFragmenter._skip_aromatic_carbon_h_cap is BaseFragmenter._skip_aromatic_carbon_h_cap` and `_flush_mof_result` still uses the MOF formula-only key.
+- Not re-run: the 100-structure sweep, at the user's instruction - it will be run once all reported problems are fixed.
+- Follow-up risks / open items:
+  - `612` yields a 4-atom `C2 N2` block as `OnlyLinker_1` (an isolated azine `-CH=N-N=CH-` unit). Chemically it is the linkage itself rather than a strut; worth deciding whether such minimal units should be exported as linkers.
+  - The formula-only key is still used for MOFs. It has the same false-positive weakness there, but changing it would alter MOF results and was deliberately left alone.
+  - Still open: `Ar-CH=NH` vs `Ar-CH3` capping decision; hand-enumerated cleavage rules with no "zero severed bonds" diagnostic.
+
+## [2026-09-17] Symmetry-aware stacked dimers for staggered (AB) COFs - 585
+- Files touched: `fragmentation_oop.py`, `project-decisions.md`, `project-agent-log.md`
+- Test folders: `runUniFrag/CoRECOF/test_585_blocks`, `runUniFrag/CoRECOF/test_d20_sym` (regression).
+- Trigger: user expected `585.cif` to be a dimer, with the second layer diagonally offset rather than directly opposite.
+- Root cause: `585` is P6_3/m with two layers per cell (c = 7.00 A). Adjacent layers are related by a 6_3 screw - 60-degree rotation plus c/2 - not by a lattice translation, so the translation-only rule found no axis in the stacking window and produced a monomer. See `project-decisions.md` 2026-09-17.
+- Validation:
+  - `585`: all four fragments are dimers, each placed by a 60-degree rotation about the fragment axis, separation 3.50 A, lateral offset 0.00 A, closest contact 3.50-3.51 A. Kabsch check confirms the halves are related by exactly 60 degrees with rmsd 0.000.
+  - 20-structure regression (exit 0, 0 tracebacks): all 24 dimer placements still resolve to "lattice translation", **zero composition changes**, nothing lost, frames 75 -> 76 (`167FragCofOnlyNode` gained), dimers 33 -> 34, minimum contact 2.55 A, median 3.48 A, zero sub-2.4 A contacts.
+- Two regressions caught during development and fixed before reporting:
+  - `lattice_reduce` originally minimised total displacement, which collapsed pure lattice translations to zero and removed **every** dimer from the 20-set.
+  - The local rotation was first stored as a fragment-centred transform and re-applied verbatim to node and linker blocks, putting their halves 33-38 A apart; `_apply_partner_op` now recentres per block.
+- Not re-run: the 100-structure sweep, per the user's instruction.
+- Follow-up risks / open items:
+  - Unchanged: `Ar-CH=NH` vs `Ar-CH3` capping decision; no "zero severed bonds" diagnostic; `612`'s 4-atom `C2 N2` azine block exported as a linker; MOF duplicate key still formula-only.
+
+## [2026-09-17] Linkage-recognition diagnostic; imine length guard investigated and rejected
+- Files touched: `coffragmentor.py`, `fragmentation_oop.py`, `project-decisions.md`, `project-agent-log.md`
+- Summary:
+  - Added the linkage-recognition diagnostic requested after `704`/`463` failed silently, plus per-bond linkage tags so the report names the real chemistry (see `project-decisions.md` 2026-09-17).
+  - Investigated the `612` `C2 N2` linker via a bond-length guard on the imine rule, measured the consequences, and **rejected** the change - it would strip every cut from 15 of 100 structures.
+- Validation:
+  - Diagnostic output is accurate per structure: `704` -> vinylene, `463` -> biaryl, `211`/`543` -> imine, `1031` -> oxazole, `612` -> imine + vinylene.
+  - Tagging is behaviourally inert: 20-structure regression unchanged (76 frames, Min 20/20, 34 dimers, min contact 2.55 A, zero sub-2.4 A, no composition changes, none gained or lost).
+- Follow-up risks / open items:
+  - A full-884 scan for structures with zero severed bonds was launched to size how much linkage chemistry is still missing; results pending.
+  - `Ar-CH=NH` vs `Ar-CH3` capping remains the one open decision. Note that since the dimer contact gate was added, its symptom should change from "clashing dimer" to "no dimer", i.e. lost coverage rather than corrupt geometry - to be confirmed on the next full sweep.
+
+## [2026-09-17] Full 884 linkage-recognition scan
+- Scanned all 884 HCNO structures through `COF.fragment()` (4 processes, 0 errors) to count severed bonds and recognised linkage types.
+- Results:
+  | linkage types recognised | structures |
+  |---|---|
+  | imine | 727 |
+  | biaryl | 53 |
+  | imine + vinylene | 27 |
+  | vinylene | 25 |
+  | oxazole | 8 |
+  | dioxin + imine | 7 |
+  | dioxin | 4 |
+  | oxazole + vinylene | 2 |
+  | **none (0 bonds severed)** | **31** |
+- The vinylene and biaryl rules added today account for **107 of 884 structures (12%)**. Before today every one of them severed nothing and fell silently to the crude fallback path.
+- The 31 still unrecognised are **not** one missing rule. Sampling them (`68` = C12N6, `1013`, `24`, `181`, `1013`) shows mostly fully fused / edge-sharing frameworks with no inter-ring bonds at all - there is no discrete node-linker linkage to cut, so "0 severed bonds" is arguably the correct answer and the node/linker paradigm simply does not apply. A couple (`357`, `900`) do have inter-ring C-N/C-C bonds that no rule claims.
+- Consequence for the planned 884 run: expect ~3.5% of structures to be flagged by the new diagnostic. They should be reviewed or excluded rather than trusted, since they will be built by the fallback path.
+
+## [2026-09-17] Ar-CH=NH capping: already implemented; clash cause re-diagnosed
+- Files touched: `project-decisions.md`, `project-agent-log.md` (no code change).
+- The user approved implementing `Ar-CH=NH` capping. Measuring first showed the code already produces it - 153 aldimine caps against zero imine-derived methyls in the 20-structure set - as a free consequence of the earlier carry-over decision. My earlier premise ("the carbon side becomes `Ar-CH3`") was wrong, inferred from contact-owner statistics without checking what those carbons were.
+- Re-diagnosed the residual dimer clashes: they are inherited from parent CIF hydrogen placement, not produced by UniFrag. 147 of 567 layered parents (26%) already contain a sub-2.0 A non-bonded interlayer contact; heavy-atom contacts are healthy (median 3.27 A). See `project-decisions.md` 2026-09-17.
+- Correction recorded for future agents: the first parent scan used the raw minimum interatomic distance and reported 333/567 "clashing" parents. That metric is wrong - a contact at bond length is a covalent bond spanning the cell boundary, not a clash. Excluding pairs inside a covalent cutoff gives the defensible figure of 147.
+- Open decision for the user: leave clashing-parent structures to come out as monomers (current, safe), or re-place parent hydrogens (better geometry, but conflicts with "keep every structure original").
+
+## [2026-09-17] 760 nitrile mis-cut fixed; 167 under-capped N diagnosed
+- Files touched: `coffragmentor.py`, `project-decisions.md`, `project-agent-log.md`
+- Test folders: scratchpad `x_167`, `x_760`; `runUniFrag/CoRECOF/test_d20_nitrile` (regression).
+- `760`: fixed. The imine rule was severing the structure's nitriles, which decomposed nothing but suppressed the biaryl fallback. Requiring the nitrogen to have >= 2 heavy neighbours resolves it (see `project-decisions.md` 2026-09-17).
+  - Now: node lib `H6 C16`, linker lib `H16 C28 N4`; `FragCof` C128H82N16, `Min` C62H40N4, `OnlyNode` C16H10, `OnlyLinker` C28H20N4 - matching the user's reference images.
+  - Nitrile nitrogens are now retained (`C102H72N4` -> `C128H82N16`).
+  - 20-structure regression: exit 0, no warnings, Min 20/20, dimers 34, min contact 2.55 A, zero sub-2.4 A. Only `760` changed; it gained `OnlyNode` and `OnlyLinker`. Nothing else touched.
+- `167`: diagnosed, not fixed. The under-capped nitrogen is `fix_odd_electron_multiplicity` stripping an aldimine's only H. The parity is forced by composition (`h + n` odd) and the fragment offers no benign site - all three removal candidates are aldimines and every nitrogen is already valence-complete. Three options recorded in `project-decisions.md`; awaiting a user decision.
+
+## [2026-09-18] 167 uncapped nitrogen fixed by moving parity repair after dimerisation
+- Files touched: `fragmentation_oop.py`, `project-decisions.md`, `project-agent-log.md`
+- Trigger: user reported an uncapped N in `167.cif` and asked for multiplicity = 1, suggesting adding a hydrogen rather than removing one.
+- Diagnosis: the cap was right; the parity repair was checking the monomer before the second layer was added. `167`'s monomer is odd (Z_sum 369) but its dimer is even (738), so the repair was stripping an aldimine's hydrogen for no reason. RDKit confirmed the emitted `167FragCof` could not be assigned a valence at that atom, while the node and linker fragments were already clean.
+- Changes (see `project-decisions.md` 2026-09-18): parity repair moved after dimer construction in both COF fragment paths, and addition preferred over removal when a repair is genuinely needed - both COF-scoped via hooks, MOF untouched.
+- Validation:
+  - `167`: no parity surgery at all now. All five fragments even, RDKit-valid at charge 0 with zero radical electrons. `167FragCof` C84H58N18O6 -> C84H60N18O6, `Min` C60H42N14O6 -> C60H44N14O6.
+  - 20-structure regression: exit 0, no tracebacks, QM-Fix events 7 -> 1, RDKit-valid closed-shell fragments 75 -> 77 of 78, Min 20/20, dimers 34, min contact 2.55 A, zero clashes, nothing gained or lost.
+- Follow-up: `142FragCofMin` remains the single fragment needing a sacrificed cap - a true monomer whose composition admits no closed-shell neutral capping.
+
+## [2026-09-18] 100-structure re-run after the full day's fixes (test_hcno100_v5)
+- Same 100 structures as before (seed 20260917, disjoint from the original 20). Exit 0, no tracebacks.
+- | metric | baseline (start of day) | v4 (pre nitrile-cap fix) | **v5 final** |
+  |---|---|---|---|
+  | fragment frames | 268 | 311 | **312** |
+  | Min coverage | 89/100 | 94/100 | **94/100** |
+  | structures yielding fragments | 91 | 93 | **93** |
+  | flagged duplicate | 14 | 8 | **8** |
+  | terminal-site valence correct | 96.0% | 94.2% | **99.2%** |
+  | over-valent sites | 46 | 89 | **4** |
+  | under-valent sites | 12 | 8 | 10 |
+  | odd-electron fragments | 4 | 3 | **3** |
+  | stacked dimers | 75 | 113 | **115** |
+  | dimers with a sub-2.4 A contact | 11 | 2 | **3** |
+- v5 fragment kinds: Frag 92, Min 87, OnlyLinker 79, OnlyNode 54.
+- Linkage recognition across the 100: imine 77, biaryl 9, vinylene 6, imine+vinylene 3, oxazole+vinylene 1, dioxin 1, **unrecognised 3** (`68`, `363`, `1112` - all flagged by the new diagnostic). Fallback paths used only 12 times in total.
+- Residual defects are concentrated, not diffuse: the 4 over-valent sites sit in `1112` and `526`; the 3 clashing dimers are `175FragCofOnlyLinker_0` (1.64 A), `526FragCofOnlyNode` (1.63 A) and `689FragCofOnlyNode` (1.96 A). `1112` is one of the three structures whose linkage chemistry is unrecognised, so its problems come from the fallback path, as expected.
+- Follow-up: two further disjoint 100-structure sets (`test_hcno100_B`, `test_hcno100_C`, seed 20260918) were selected and queued at the user's request, bringing planned coverage to 320 of 884.
+
+## [2026-09-18] Three independent 100-structure validation runs (300 of 884)
+- Sets: `test_hcno100_v5` (seed 20260917) and `test_hcno100_B` / `test_hcno100_C` (seed 20260918), all mutually disjoint and disjoint from the original 20. B and C were run in parallel (4 processes each across 8 cores) after the sequential chain proved too slow. All three: exit 0, zero tracebacks.
+- | set | frames | Min | yielding | dup | valence ok | OVER | under | odd | dimers | clashing |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | v5 | 312 | 94/100 | 93 | 8 | 99.2% | 4 | 10 | 3 | 115 | 3 |
+  | B | 308 | 91/100 | 97 | 4 | 98.4% | 0 | 26 | 2 | 121 | 3 |
+  | C | 286 | 87/100 | 91 | 10 | 98.8% | 7 | 10 | 6 | 95 | 2 |
+  | **total** | **906** | **272/300** | **281/300** | 22 | **98.8%** | 11 | 46 | 11 | **331** | **8** |
+- Linkage recognition across the 300: imine 238, biaryl 29, vinylene 13, imine+vinylene 4, dioxin+imine 2, dioxin 3, oxazole 1, oxazole+vinylene 1, **unrecognised 9 (3.0%)**. That 3.0% matches the full-884 scan's 31/884 = 3.5%, so the sample is representative.
+- The vinylene and biaryl rules added today account for **47 of the 300 structures (~16%)**; before today every one of them severed nothing and fell silently to the crude fallback path.
+- Residual defects across 906 fragments: 8 clashing dimers, 11 over-valent and 46 under-valent terminal sites, 11 odd-electron fragments. Concentrated in the structures flagged as unrecognised or with distorted parent CIFs, not spread across the set.

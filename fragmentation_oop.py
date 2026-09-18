@@ -90,12 +90,13 @@ def _parse_extxyz(filepath):
     return frames
 
 
-def _load_seen_keys_from_extxyz(filepath):
+def _load_seen_keys_from_extxyz(filepath, key_fn=None):
     seen_keys = set()
+    if key_fn is None:
+        key_fn = MOFFragmenter._chemical_identity_key
     frames = _parse_extxyz(filepath)
     for frame in frames:
-        key = MOFFragmenter._chemical_identity_key(frame["species"], frame["coords"])
-        seen_keys.add(key)
+        seen_keys.add(key_fn(frame["species"], frame["coords"]))
     return seen_keys
 
 
@@ -710,6 +711,15 @@ class BaseFragmenter:
             
         return 8, f"{parent_sym}-group"
 
+    # Parity-repair policy. Defaults keep MOF and macromolecule behaviour
+    # byte-identical; COFFragmenter overrides both.
+    _prefer_h_addition_for_parity = False
+
+    def _can_accept_extra_h(self, idx, species, coords):
+        """Hook: may this heavy atom take one more H? The base answer is yes,
+        reproducing the previous behaviour; COFFragmenter checks bond order."""
+        return True
+
     def fix_odd_electron_multiplicity(self, species, coords, capped_h_indices, label):
         _ATOMIC_NUMBERS = {
             "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
@@ -730,31 +740,6 @@ class BaseFragmenter:
         n = len(species)
         coords_arr = np.array(coords, dtype=float)
         
-        removal_candidates = []
-        for h_idx in capped_h_indices:
-            score, group = self._classify_cap_removal_priority(h_idx, species, coords_arr)
-            if score > 0:
-                removal_candidates.append((score, h_idx, group))
-                
-        if removal_candidates:
-            removal_candidates.sort(key=lambda x: x[0], reverse=True)
-            score, target_idx, group = removal_candidates[0]
-            
-            p_sym = "unknown"
-            for j in range(n):
-                if species[j] != "H" and float(np.linalg.norm(coords_arr[j] - coords_arr[target_idx])) < 1.5:
-                    p_sym = species[j]
-                    break
-                    
-            print(f"QM-Fix [{group}]: Removed capping H from {p_sym}[{target_idx}] (priority={score}) to achieve even electron count for '{label}'.")
-            
-            keep = [i for i in range(n) if i != target_idx]
-            species = [species[i] for i in keep]
-            coords = [coords[i] for i in keep]
-            new_caps = [i for i in capped_h_indices if i != target_idx]
-            capped_h_indices = [i - 1 if i > target_idx else i for i in new_caps]
-            return species, coords, capped_h_indices
-            
         def _heavy_and_h_nbs(atom_idx):
             pos = coords_arr[atom_idx]
             heavy, h_nb = [], []
@@ -781,10 +766,43 @@ class BaseFragmenter:
                 continue
             if sym == "N" and len(heavy_nbs) != 2:
                 continue
+            if not self._can_accept_extra_h(i, species, coords):
+                continue
                 
             simulated_coords = np.vstack([coords_arr, coords_arr[i] + [0, 0, 1.0]])
             score, group = self._classify_cap_removal_priority(n, species + ["H"], simulated_coords)
             add_candidates.append((score, i, group, heavy_nbs))
+            
+
+        # Adding a hydrogen leaves every existing atom valence-complete, whereas
+        # removing one necessarily creates an under-coordinated site: stripping
+        # the single H off an aldimine Ar-CH=NH leaves a nitrene, the worst
+        # possible reference geometry. So when some atom can genuinely take
+        # another H, prefer that and fall back to removal only when none can.
+        removal_candidates = []
+        for h_idx in capped_h_indices:
+            score, group = self._classify_cap_removal_priority(h_idx, species, coords_arr)
+            if score > 0:
+                removal_candidates.append((score, h_idx, group))
+                
+        if removal_candidates and not (self._prefer_h_addition_for_parity and add_candidates):
+            removal_candidates.sort(key=lambda x: x[0], reverse=True)
+            score, target_idx, group = removal_candidates[0]
+            
+            p_sym = "unknown"
+            for j in range(n):
+                if species[j] != "H" and float(np.linalg.norm(coords_arr[j] - coords_arr[target_idx])) < 1.5:
+                    p_sym = species[j]
+                    break
+                    
+            print(f"QM-Fix [{group}]: Removed capping H from {p_sym}[{target_idx}] (priority={score}) to achieve even electron count for '{label}'.")
+            
+            keep = [i for i in range(n) if i != target_idx]
+            species = [species[i] for i in keep]
+            coords = [coords[i] for i in keep]
+            new_caps = [i for i in capped_h_indices if i != target_idx]
+            capped_h_indices = [i - 1 if i > target_idx else i for i in new_caps]
+            return species, coords, capped_h_indices
             
         if add_candidates:
             add_candidates.sort(key=lambda x: x[0], reverse=True)
@@ -836,6 +854,14 @@ class BaseFragmenter:
         counts = tuple(sorted((sp, heavy_species.count(sp)) for sp in set(heavy_species)))
         return counts
 
+    def _skip_saturated_h_cap(self, idx, species, coords):
+        """Hook: veto an H cap in `_cap_open_oxygens` on an already-saturated atom.
+
+        Returns False here so MOF and macromolecule fragmentation keep their
+        existing behaviour exactly; `COFFragmenter` overrides it.
+        """
+        return False
+
     def _cap_open_oxygens(self, species, coords, capped_h_flags):
         heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
         for i in list(heavy_idx):
@@ -860,6 +886,9 @@ class BaseFragmenter:
                 d = np.linalg.norm(pos - np.array(coords[j], dtype=float))
                 if self.is_valid_bond(sp, spj, d):
                     heavy_neighbors.append(j)
+
+            if self._skip_saturated_h_cap(i, species, coords):
+                continue
 
             if sp == "O":
                 if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "B", "Si", "P", "S", "N"}:
@@ -2840,6 +2869,7 @@ class COFFragmenter(BaseFragmenter):
             raise ValueError(f"layer_mode must be one of {sorted(allowed)}")
         self.layer_mode = layer_mode
         self.partner_vec = None
+        self.partner_op = None
 
     def _rad(self, sym):
         return self.COV_RAD.get(sym, 0.77)
@@ -2850,6 +2880,614 @@ class COFFragmenter(BaseFragmenter):
         cutoff = 1.25 * (self._rad(s1) + self._rad(s2))
         cutoff = min(2.2, max(1.1, cutoff))
         return dist <= cutoff
+
+    @staticmethod
+    def _chemical_identity_key(species, coords, decimals=1):
+        """COF duplicate key: heavy-atom formula PLUS bond-graph topology.
+
+        The inherited MOF key is the heavy-atom formula alone. For COFs that is
+        far too coarse - distinct frameworks routinely share a formula, and the
+        colliding fragment is then silently dropped as a "duplicate". On a
+        100-structure HCNO sample this discarded the normal fragment of 14
+        structures; 612.cif survived only as a single linker, with no normal,
+        no min and no node, purely because its C48H36N12 fragment collided with
+        an unrelated framework of the same formula.
+
+        Raw geometry cannot serve as the key (lattice differences between CIF
+        files shift every interatomic distance), which is why the MOF key
+        avoids it. Connectivity can: this adds an element-labelled
+        Weisfeiler-Lehman hash of the heavy-atom bond graph, which is invariant
+        to coordinate noise but differs whenever the topology differs.
+        """
+        species = [str(sp) for sp in species]
+        heavy = [(i, sp) for i, sp in enumerate(species) if sp != "H"]
+        if not heavy:
+            return (("H", len(species)),)
+        counts = tuple(sorted(
+            (sp, sum(1 for _, s in heavy if s == sp)) for sp in {s for _, s in heavy}
+        ))
+        try:
+            import networkx as nx
+            pts = [np.array(coords[i], dtype=float) for i, _ in heavy]
+            g = nx.Graph()
+            for k, (_, sp) in enumerate(heavy):
+                g.add_node(k, specie=sp)
+            for a in range(len(heavy)):
+                for b in range(a + 1, len(heavy)):
+                    sa, sb = heavy[a][1], heavy[b][1]
+                    cutoff = min(2.2, max(1.1, 1.25 * (
+                        COFFragmenter.COV_RAD.get(sa, 0.77)
+                        + COFFragmenter.COV_RAD.get(sb, 0.77)
+                    )))
+                    if float(np.linalg.norm(pts[a] - pts[b])) <= cutoff:
+                        g.add_edge(a, b)
+            topo = nx.weisfeiler_lehman_graph_hash(g, node_attr="specie")
+        except Exception:
+            topo = ""
+        return (counts, topo)
+
+    # Upper bond-length bound (A) for treating a heavy-heavy bond as a double
+    # bond. Chosen to sit clearly below the corresponding aromatic/single
+    # lengths: C=N 1.28 vs aromatic C-N 1.38; C=O 1.21 vs C-O 1.36/1.43;
+    # C=C 1.33 vs aromatic C-C 1.39; N=N 1.25 vs N-N 1.40.
+    _DOUBLE_BOND_MAX = {
+        # C=N up to 1.36 so that ring-type C=N (pyridine/triazine, 1.34-1.35)
+        # counts as double while aniline/amine C-N (1.38-1.47) stays single.
+        ("C", "N"): 1.36,
+        ("C", "O"): 1.30,
+        ("C", "C"): 1.35,
+        ("N", "N"): 1.30,
+        ("N", "O"): 1.30,
+    }
+
+    # Triple bonds: a nitrile nitrogen (C#N, 1.16 A) already has its full
+    # valence from that one bond and must receive NO capping hydrogen at all.
+    _TRIPLE_BOND_MAX = {
+        ("C", "N"): 1.20,
+        ("C", "C"): 1.24,
+    }
+
+    @classmethod
+    def _terminal_bond_order(cls, sp_a, sp_b, dist):
+        """Bond order (1, 2 or 3) of a single heavy-heavy bond, from its length.
+
+        Only used at terminal cut sites, where the atom has exactly one heavy
+        neighbour and the number of capping H depends on that bond's order.
+        """
+        for order, table in ((3, cls._TRIPLE_BOND_MAX), (2, cls._DOUBLE_BOND_MAX)):
+            cutoff = table.get((sp_a, sp_b), table.get((sp_b, sp_a)))
+            if cutoff is not None and dist <= cutoff:
+                return order
+        return 1
+
+    def _find_stacked_partner(self, struct, species, coords, label=""):
+        """Find the operation that places the neighbouring layer on this
+        fragment, returning ``(R, t)`` in Cartesian coordinates such that the
+        second layer is ``R @ x + t``, or None when the fragment is not part of
+        a stacked 2D COF.
+
+        A pure lattice translation is tried first, so every AA (eclipsed) COF
+        keeps exactly the behaviour it had before. Many layered COFs are not
+        eclipsed, though: in 585.cif (space group P6_3/m) successive layers are
+        related by the 6_3 SCREW AXIS, so the neighbour is rotated 60 degrees
+        about the stacking axis and shifted by c/2. Its c parameter is 7.0 A -
+        two layers per cell - so a translation-only rule sees no 2.5-5.0 A axis
+        at all and silently produced a monomer. Searching the crystal's own
+        symmetry operations covers screw axes and glides as well as
+        translations, and each candidate still has to pass the same stacking
+        checks.
+        """
+        heavy = np.array([c for sp, c in zip(species, coords) if sp != "H"], dtype=float)
+        if len(heavy) < 5:
+            return None
+        pts = np.asarray([np.asarray(c, dtype=float) for c in coords])
+        centroid_all = pts.mean(axis=0)
+        hc = heavy.mean(axis=0)
+        normal = np.linalg.svd(heavy - hc, full_matrices=False)[2][-1]
+        lat = np.array(struct.lattice.matrix, dtype=float)
+
+        def lattice_reduce(shift):
+            """Slide a displacement LATERALLY by lattice vectors so the copy sits
+            over the fragment, while keeping it one layer away.
+
+            Minimising the total length instead would be wrong: a pure lattice
+            translation along the stacking axis would collapse straight back to
+            zero, and no dimer would ever be built.
+            """
+            best = None
+            best_key = None
+            for ia in (-1, 0, 1):
+                for ib in (-1, 0, 1):
+                    for ic in (-1, 0, 1):
+                        cand = shift + ia * lat[0] + ib * lat[1] + ic * lat[2]
+                        sep = abs(float(np.dot(cand, normal)))
+                        if not (2.5 <= sep <= 5.0):
+                            continue
+                        lateral = float(
+                            np.linalg.norm(cand - np.dot(cand, normal) * normal)
+                        )
+                        key = (round(lateral, 6), round(sep, 6))
+                        if best_key is None or key < best_key:
+                            best_key, best = key, cand
+            return shift if best is None else best
+
+        def rotation_angle(R):
+            return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
+
+        def evaluate(R, t, local=False):
+            """Score one candidate. `local=True` means the rotation is applied
+            about the transformed block's OWN centroid, so the same operation
+            can later be re-applied to the node and linker blocks, which have
+            different centroids from the assembled fragment."""
+            if local:
+                moved = (pts - centroid_all) @ R.T + centroid_all + t
+            else:
+                moved = pts @ R.T + t
+            raw = moved.mean(axis=0) - centroid_all
+            delta = lattice_reduce(raw)
+            t_fixed = t + (delta - raw)
+            if local:
+                moved = (pts - centroid_all) @ R.T + centroid_all + t_fixed
+            else:
+                moved = pts @ R.T + t_fixed
+            sep = float(abs(np.dot(delta, normal)))
+            lateral = float(np.linalg.norm(delta - np.dot(delta, normal) * normal))
+            if not (2.5 <= sep <= 5.0):
+                return None
+            # The copy must sit ON the fragment, not beside it.
+            if lateral > 2.0:
+                return None
+            contact = float(
+                np.linalg.norm(pts[:, None, :] - moved[None, :, :], axis=-1).min()
+            )
+            if contact < 2.4:
+                return None
+            # Prefer, in order: the closest layer, then the SMALLEST rotation -
+            # the primitive screw is the true adjacent-layer relationship, and
+            # without this tie-break different fragments of one structure can
+            # pick different equivalent operations - then the roomiest contact.
+            return (float(np.linalg.norm(delta)), rotation_angle(R), -contact,
+                    R, t_fixed, sep, lateral, local)
+
+        candidates = []
+        eye = np.eye(3)
+        # 1) pure lattice translations (AA / eclipsed stacking)
+        for axis in range(3):
+            for sign in (1.0, -1.0):
+                got = evaluate(eye, sign * lat[axis])
+                if got:
+                    candidates.append(got)
+        # 2) crystal symmetry operations (AB / screw / glide stacking)
+        if not candidates:
+            try:
+                from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+                ops = SpacegroupAnalyzer(struct, symprec=0.1).get_symmetry_operations()
+            except Exception:
+                ops = []
+            minv = np.linalg.inv(lat.T)
+            for op in ops:
+                Rf = np.array(op.rotation_matrix, dtype=float)
+                tf = np.array(op.translation_vector, dtype=float)
+                R = lat.T @ Rf @ minv
+                t = tf @ lat
+                if np.allclose(R, eye) and np.allclose(t, 0.0):
+                    continue
+                got = evaluate(R, t)
+                if got:
+                    candidates.append(got)
+        # 3) Staggered (AB) stacking where the fragment does not sit on the
+        # symmetry axis. In 585.cif the 6_3 screw relates the layers correctly
+        # - 3.50 A apart, rotated 60 degrees - but the axis runs through a pore
+        # rather than through the node this fragment is built around, so the
+        # crystallographic image of the fragment lands ~19 A to the side and
+        # layer 2's node sits over layer 1's pore. The interlayer ENVIRONMENT is
+        # still "the same motif, rotated, 3.5 A above", so reproduce it locally:
+        # apply the crystal's own rotation angle about the axis through this
+        # fragment's centroid. The result is a faithful model of the AB contact
+        # geometry rather than a crystallographic overlay, and it still has to
+        # pass the contact test below.
+        if not candidates:
+            try:
+                from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+                ops = SpacegroupAnalyzer(struct, symprec=0.1).get_symmetry_operations()
+            except Exception:
+                ops = []
+            minv = np.linalg.inv(lat.T)
+            for op in ops:
+                R = lat.T @ np.array(op.rotation_matrix, dtype=float) @ minv
+                t = np.array(op.translation_vector, dtype=float) @ lat
+                if np.linalg.det(R) < 0:
+                    continue
+                # rotation must be about the stacking axis
+                if not np.allclose(R @ normal, normal, atol=1e-3):
+                    continue
+                if np.allclose(R, eye):
+                    continue
+                sep = float(abs(np.dot(t, normal)))
+                if not (2.5 <= sep <= 5.0):
+                    continue
+                for sign in (1.0, -1.0):
+                    got = evaluate(R, sign * sep * normal, local=True)
+                    if got:
+                        candidates.append(got)
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[:3])
+        _, angle, neg_contact, R, t, sep, lateral, local = candidates[0]
+        if np.allclose(R, eye):
+            kind = "lattice translation"
+        else:
+            kind = f"{angle:.0f}-degree rotation" + (" about the fragment axis" if local else " (crystal symmetry)")
+        print(
+            f"  -> COF layered dimer{label}: second layer placed by {kind} "
+            f"(interlayer separation {sep:.2f} A, lateral offset {lateral:.2f} A, "
+            f"closest contact {-neg_contact:.2f} A)."
+        )
+        return R, t, local
+
+    def _report_linkage_recognition(self, result, cif_path):
+        """Say out loud when no linkage chemistry was recognised.
+
+        The cleavage rules are enumerated by hand (boroxine, imine, oxazole,
+        dioxin, vinylene, biaryl). A COF whose linkage is not among them has
+        NOTHING severed: `fragment()` then returns the structure's connected
+        components - often still-periodic networks - which look like building
+        blocks but are not, and the caller quietly drops to its crudest
+        fallback path. That failure is invisible in the output: the run exits
+        0 and writes plausible-looking files.
+
+        704.cif (vinylene) and 463.cif (biaryl) both reached the user this way
+        and were caught only by eye, so make it greppable instead. Printed once
+        per structure; `extract` runs several times per CIF.
+        """
+        n_cut = getattr(result, "n_cut_bonds", None)
+        if n_cut is None:
+            return
+        stem = Path(cif_path).stem
+        seen = getattr(self, "_linkage_warned", None)
+        if seen is None:
+            seen = self._linkage_warned = set()
+        if stem in seen:
+            return
+        seen.add(stem)
+        if n_cut == 0:
+            print(
+                f"  !! UniFrag COF WARNING [{stem}]: no known linkage chemistry "
+                f"recognised (0 bonds severed). The building blocks below are "
+                f"connected components, not real node/linker units, and this "
+                f"structure will fall back to a much cruder path. Its linkage "
+                f"type is probably missing from the cleavage rules."
+            )
+        else:
+            kinds = ", ".join(getattr(result, "linkage_types", []) or ["unknown"])
+            print(f"  -> COF linkages recognised: {n_cut} bonds severed ({kinds}).")
+
+    @staticmethod
+    def _apply_partner_op(partner, block_coords):
+        """Place the second layer of a stacked dimer for one block of atoms.
+
+        A `local` operation rotates about the block's OWN centroid, so it can be
+        re-applied correctly to the node and linker blocks, whose centroids
+        differ from the assembled fragment's.
+        """
+        R, t, local = partner
+        pts = np.asarray([np.asarray(c, dtype=float) for c in block_coords])
+        if local:
+            centre = pts.mean(axis=0)
+            moved = (pts - centre) @ R.T + centre + t
+        else:
+            moved = pts @ R.T + t
+        return [row for row in moved]
+
+    def _is_stackable_layer(self, species, coords, layer_vec, label=""):
+        """True when a fragment is a flat sheet lying perpendicular to
+        `layer_vec`, and so may be duplicated along it to form a stacked dimer.
+
+        A short lattice axis on its own does not prove a stacked 2D COF. A
+        corrugated or interpenetrated framework can have a short repeat while
+        its atoms span that whole repeat; translating such a fragment by the
+        axis drops atoms onto neighbouring-cell positions and manufactures
+        1.2-2.0 A contacts in exactly the interlayer region the dimer exists to
+        represent. Measured over a 100-structure HCNO sample, 48 of the 63
+        clashing dimer frames were of this kind.
+        """
+        heavy = np.array(
+            [c for sp, c in zip(species, coords) if sp != "H"], dtype=float
+        )
+        if len(heavy) < 5:
+            return False
+        lv_vec = np.asarray(layer_vec, dtype=float)
+        lv = float(np.linalg.norm(lv_vec))
+        if lv < 1e-8:
+            return False
+        centroid = heavy.mean(axis=0)
+        normal = np.linalg.svd(heavy - centroid, full_matrices=False)[2][-1]
+        flatness = float(np.abs((heavy - centroid) @ normal).max())
+        align = abs(float(np.dot(normal, lv_vec / lv)))
+
+        # Corrugation is judged RELATIVE to the stacking distance, not against a
+        # fixed length. A real layered COF can still have its aryl rings twisted
+        # out of the mean plane by a few tenths of an Angstrom (543.cif twists
+        # by 0.5 A over a 3.58 A repeat and is unambiguously a stacked 2D COF),
+        # whereas a corrugated framework such as 760.cif spans 2.5 A of its
+        # 3.56 A repeat. An absolute 0.5 A cutoff cannot tell those apart.
+        if align < 0.8 or flatness > max(0.6, 0.30 * lv):
+            print(
+                f"  -> COF layered dimer skipped{label}: fragment is not a flat "
+                f"sheet perpendicular to the stacking axis "
+                f"(corrugation = {flatness:.2f} A over a {lv:.2f} A repeat, "
+                f"alignment = {align:.2f})."
+            )
+            return False
+
+        # Final arbiter: actually place the second layer and measure. The point
+        # of the geometric tests above is to predict a clash, so check the
+        # prediction directly rather than trusting the proxy - this also catches
+        # cases where the mean plane is fine but some substituent still collides.
+        pts = np.asarray([np.asarray(c, dtype=float) for c in coords])
+        shifted = pts + lv_vec
+        contact = float(np.linalg.norm(pts[:, None, :] - shifted[None, :, :], axis=-1).min())
+        if contact < 2.4:
+            print(
+                f"  -> COF layered dimer skipped{label}: second layer would "
+                f"clash (closest interlayer contact {contact:.2f} A over a "
+                f"{lv:.2f} A repeat)."
+            )
+            return False
+        return True
+
+    _prefer_h_addition_for_parity = True
+
+    def _can_accept_extra_h(self, idx, species, coords):
+        """COF-only: only let an atom take another H if bond order leaves room.
+
+        Connectivity alone is not enough: a reconnected imine junction
+        (Ar-CH=N-Ar) has two heavy neighbours and no hydrogen, so it looks
+        eligible, but its C=N already consumes two of nitrogen's three
+        valences and adding an H there would make an iminium cation.
+        """
+        target = {"C": 4, "N": 3, "O": 2}.get(species[idx])
+        if target is None:
+            return False
+        return self._local_valence_used(idx, species, coords) < target
+
+    def _skip_saturated_h_cap(self, idx, species, coords):
+        """COF-only: never cap an atom whose valence is already satisfied.
+
+        `_cap_open_oxygens` decides purely from connectivity, which mistakes
+        triple-bonded atoms for under-coordinated ones:
+          * a nitrile nitrogen (Ar-C#N) has one heavy neighbour and no H, the
+            same signature as a severed amine, but C#N already uses all three
+            of its valences - protonating it gives a spurious N-H on the
+            nitrile;
+          * an alkyne carbon (Ar-C#C-Ar) has two heavy neighbours and no H,
+            the same signature as an aromatic edge carbon that lost its H,
+            but 3 + 1 already completes it.
+        Counting bond order separates these from the genuine cases: a real
+        aromatic edge carbon's two ~1.39 A bonds score only 2, and a severed
+        amine nitrogen's single ~1.40 A bond scores 1.
+        """
+        target = {"C": 4, "N": 3, "O": 2}.get(species[idx])
+        if target is None:
+            return False
+        return self._local_valence_used(idx, species, coords) >= target
+
+    def _local_valence_used(self, idx, species, coords):
+        """Valence already consumed at `idx`, counting bond ORDER not just
+        neighbour count. An aromatic bond (C-C 1.39, C-N 1.38) scores 1, so
+        ordinary aromatic sites behave exactly as before; only genuinely short
+        double/triple bonds (imine C=N, carbonyl C=O, nitrile C#N) score more
+        and correctly reduce the number of capping hydrogens.
+        """
+        used = 0
+        sp = species[idx]
+        pos = np.array(coords[idx], dtype=float)
+        for j, spj in enumerate(species):
+            if j == idx:
+                continue
+            d = float(np.linalg.norm(pos - np.array(coords[j], dtype=float)))
+            if not self.is_valid_bond(sp, spj, d):
+                continue
+            used += 1 if spj == "H" else self._terminal_bond_order(sp, spj, d)
+        return used
+
+    def _cap_severed_double_bond_sites(self, species, coords, capped_h_flags):
+        """COF-only: cap C/N atoms left with only ONE bonded HEAVY neighbor
+        after a double bond was cleaved during node/linker partitioning (e.g.
+        an imine C=N cut). The atom may already carry its own native H (e.g.
+        an aldimine ArCH=N- carbon keeps its native H after the =N side is
+        cut) or none at all (e.g. a bare imine nitrogen ArN=CH-), so the
+        number of hydrogens needed is a true valence deficit
+        (target_valence - heavy_neighbors - existing_H), not a fixed count.
+        A genuine aromatic/carbonyl carbon or nitrogen always keeps >=2 heavy
+        neighbors, so "exactly 1 heavy neighbor" is a safe, narrow marker for
+        this specific cut-site case and never fires on already-complete
+        atoms.
+        """
+        target_valence = {"C": 4, "N": 3}
+        heavy_idx = [i for i, sp in enumerate(species) if sp in target_valence]
+        planarize_targets = []
+        for i in heavy_idx:
+            if i >= len(species):
+                continue
+            sp = species[i]
+            pos = np.array(coords[i], dtype=float)
+            heavy_nbrs = []
+            h_count = 0
+            for j, spj in enumerate(species):
+                if j == i:
+                    continue
+                d = np.linalg.norm(pos - np.array(coords[j], dtype=float))
+                if self.is_valid_bond(sp, spj, d):
+                    if spj == "H":
+                        h_count += 1
+                    else:
+                        heavy_nbrs.append(j)
+            if len(heavy_nbrs) != 1:
+                continue
+            anchor = heavy_nbrs[0]
+            # The remaining heavy bond may well be a DOUBLE bond: an imine that
+            # was cut on the far side of its nitrogen leaves Ar-CH=N with the
+            # C=N intact. Counting it as one bond over-hydrogenates the atom -
+            # an imine nitrogen would pick up two H and become an iminium
+            # cation (four bonds on N) instead of the neutral aldimine
+            # Ar-CH=NH. Bond length separates the cases cleanly here (C=N
+            # ~1.28 A vs aromatic C-N ~1.38 A and amine C-N ~1.47 A), so use it
+            # to charge the anchor its true bond order.
+            anchor_d = float(np.linalg.norm(pos - np.array(coords[anchor], dtype=float)))
+            anchor_order = self._terminal_bond_order(sp, species[anchor], anchor_d)
+            deficit = target_valence[sp] - (anchor_order + h_count)
+            if deficit <= 0:
+                continue
+            base = pos - np.array(coords[anchor], dtype=float)
+            if np.linalg.norm(base) < 1e-8:
+                continue
+            new_h_indices = []
+            for _ in range(deficit):
+                before = len(species)
+                self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+                if len(species) == before:
+                    break
+                new_h_indices.append(before)
+            if new_h_indices:
+                # The cone search only avoids steric clashes; it does not
+                # target a specific bond angle. Placing >=2 new H on the same
+                # atom this way can leave the first H nearly collinear with
+                # the anchor bond (~180 degrees) instead of a proper
+                # tetrahedral/trigonal angle. Locally relax just these new H
+                # (everything else fixed) with UFF via RDKit to get correct
+                # -NH2/-CH3-like angles. Only COF fragments reach this method
+                # (all-organic elements), so UFF parameter coverage is safe.
+                self.refine_h_geometry_with_rdkit(species, coords, capped_h_indices=new_h_indices)
+                # Planarize a cap only where the parent really is sp2. For
+                # nitrogen that is always the case here (a conjugated aryl
+                # amine or an aldimine). For carbon it depends on bond order:
+                # a double bond means a vinylidene =CH2 terminus, which is
+                # planar, whereas a single bond means a genuine tetrahedral
+                # -CH3 that must be left alone.
+                if sp == "N" or anchor_order >= 2:
+                    planarize_targets.append((i, list(new_h_indices)))
+
+        if planarize_targets:
+            self._planarize_conjugated_caps(species, coords, planarize_targets)
+
+    def _planarize_conjugated_caps(self, species, coords, targets):
+        """COF-only: force capping H on a terminal sp2 atom back into the plane
+        of the conjugated system it hangs off.
+
+        Such a nitrogen comes from a cleaved imine (Ar-N=CH-), so in the parent
+        COF it is sp2 and rigorously coplanar with the ring, its lone pair
+        conjugated into the sheet. Capping it as Ar-NH2 and relaxing with UFF
+        instead reproduces an *isolated* aniline, which is pyramidal, and
+        pushes the new H ~0.8 A out of the layer plane. In a stacked 2D dimer
+        (layer spacing ~3.4 A) two such caps face each other and collapse to
+        ~1.7 A H...H - a purely artificial clash sitting in exactly the
+        interlayer region the dimer is built to represent. Restoring the sp2
+        geometry is both the fix and the chemically faithful choice.
+
+        The same holds for a vinylidene terminus (=CH2) left by a severed
+        vinylene linkage, which is likewise sp2 and coplanar with its aryl ring.
+        Callers must pass only genuinely sp2 parents: a terminal carbon holding
+        a SINGLE bond to its neighbour is a real tetrahedral methyl, and
+        flattening that would be chemically wrong.
+        """
+        from collections import deque
+
+        def heavy_neighbors(idx):
+            out = []
+            ci = np.array(coords[idx], dtype=float)
+            for j, spj in enumerate(species):
+                if j == idx or spj == "H":
+                    continue
+                d = np.linalg.norm(ci - np.array(coords[j], dtype=float))
+                if self.is_valid_bond(species[idx], spj, d):
+                    out.append(j)
+            return out
+
+        for n_idx, h_indices in targets:
+            h_indices = [h for h in h_indices if 0 <= h < len(species) and species[h] == "H"]
+            if len(h_indices) not in (1, 2):
+                continue
+            nbrs = heavy_neighbors(n_idx)
+            if len(nbrs) != 1:
+                continue
+            anchor = nbrs[0]
+
+            # Conjugated system reached through the anchor; the N itself is part
+            # of it, so seed the plane fit with both.
+            seen = {n_idx, anchor}
+            ring_atoms = [n_idx, anchor]
+            q = deque([(anchor, 0)])
+            while q:
+                curr, depth = q.popleft()
+                if depth >= 3:
+                    continue
+                for nb in heavy_neighbors(curr):
+                    if nb in seen:
+                        continue
+                    seen.add(nb)
+                    ring_atoms.append(nb)
+                    q.append((nb, depth + 1))
+            if len(ring_atoms) < 5:
+                continue
+
+            pts = np.array([coords[k] for k in ring_atoms], dtype=float)
+            centroid = pts.mean(axis=0)
+            _, _, vh = np.linalg.svd(pts - centroid, full_matrices=False)
+            normal = vh[-1, :]
+            # Only trust a genuinely flat conjugated system; a puckered or
+            # sp3-rich neighbourhood keeps the UFF geometry.
+            if float(np.abs((pts - centroid) @ normal).max()) > 0.35:
+                continue
+
+            npos = np.array(coords[n_idx], dtype=float)
+            u = np.array(coords[anchor], dtype=float) - npos
+            u = u - np.dot(u, normal) * normal
+            nu = np.linalg.norm(u)
+            if nu < 1e-8:
+                continue
+            u = u / nu
+            perp = np.cross(normal, u)
+
+            # sp2 nitrogen: the free slots sit at +/-120 deg from the N-anchor
+            # bond, in the ring plane.
+            slots = [
+                np.cos(np.deg2rad(a)) * u + np.sin(np.deg2rad(a)) * perp
+                for a in (120.0, -120.0)
+            ]
+            if len(h_indices) == 1:
+                # Single H (e.g. after odd-electron correction): keep it in
+                # whichever sp2 slot it already points closest to.
+                hv = np.array(coords[h_indices[0]], dtype=float) - npos
+                slots = [max(slots, key=lambda sl: float(np.dot(hv, sl)))]
+
+            for h, direction in zip(h_indices, slots):
+                bl = float(np.linalg.norm(np.array(coords[h], dtype=float) - npos))
+                if not (0.7 < bl < 1.3):
+                    bl = self.cap_bond_length(species[n_idx])
+                coords[h] = npos + bl * direction
+
+    def _make_cof_qm_ready(self, species, coords, label="only_frag"):
+        """COF-only QM-ready capper for standalone node/linker building blocks.
+        Mirrors BaseFragmenter._make_qm_ready_linker (shared with MOF, left
+        untouched) but additionally resolves severed-double-bond cut sites via
+        _cap_severed_double_bond_sites before the generic open-oxygen pass.
+        """
+        species_copy = list(species)
+        coords_copy = [np.array(c, dtype=float) for c in coords]
+        capped_h_flags = [False] * len(species_copy)
+
+        self._cap_severed_double_bond_sites(species_copy, coords_copy, capped_h_flags)
+        self._cap_open_oxygens(species_copy, coords_copy, capped_h_flags)
+
+        capped_h_indices = [idx for idx, flag in enumerate(capped_h_flags) if flag and species_copy[idx] == "H"]
+        self.optimize_capped_h_geometry_only(species_copy, coords_copy, capped_h_indices)
+
+        species_copy, coords_copy, capped_h_indices = self.fix_odd_electron_multiplicity(
+            species_copy, coords_copy, capped_h_indices, label=label
+        )
+        return FragmentResult(species=species_copy, coords=coords_copy)
 
     def _prune_duplicate_cof_helper_files(self, out_dir, decimals=1):
         seen = {}
@@ -2885,6 +3523,24 @@ class COFFragmenter(BaseFragmenter):
                     key = self._chemical_identity_key(sp, co)
                     if not any(self._chemical_identity_key(x[0], x[1]) == key for x in self.extracted_linkers):
                         self.extracted_linkers.append((sp, co))
+
+        # Always populate self.extracted_nodes (same treatment as linkers, kept
+        # separate so raw cof_nodes_lib/ exports below are unaffected).
+        nodes_coll = getattr(result, "nodes", [])
+        sbus_n = list(nodes_coll) if nodes_coll is not None else []
+        for sbu in sbus_n:
+            mol = getattr(sbu, "molecule", None)
+            if mol is not None:
+                sp = [str(x) for x in mol.species]
+                co = [np.array(c, dtype=float) for c in mol.cart_coords]
+                orig_indices = getattr(sbu, "indices", None)
+                sp, co = self._clean_linker_molecule(sp, co, orig_indices=orig_indices)
+                if sp:
+                    if not hasattr(self, "extracted_nodes"):
+                        self.extracted_nodes = []
+                    key = self._chemical_identity_key(sp, co)
+                    if not any(self._chemical_identity_key(x[0], x[1]) == key for x in self.extracted_nodes):
+                        self.extracted_nodes.append((sp, co))
 
         node_dir = Path("cof_nodes_lib")
         linker_dir = Path("cof_linkers_lib")
@@ -2942,6 +3598,14 @@ class COFFragmenter(BaseFragmenter):
                 key = self._chemical_identity_key(sp_clean, co_clean)
                 if not any(self._chemical_identity_key(x[0], x[1]) == key for x in self.extracted_linkers):
                     self.extracted_linkers.append((sp_clean, co_clean))
+        elif kind == "node":
+            sp_clean, co_clean = self._clean_linker_molecule(species, coords, orig_indices=orig_indices)
+            if sp_clean:
+                if not hasattr(self, "extracted_nodes"):
+                    self.extracted_nodes = []
+                key = self._chemical_identity_key(sp_clean, co_clean)
+                if not any(self._chemical_identity_key(x[0], x[1]) == key for x in self.extracted_nodes):
+                    self.extracted_nodes.append((sp_clean, co_clean))
 
         out_dir = Path("cof_nodes_lib") if kind == "node" else Path("cof_linkers_lib")
         out_dir.mkdir(exist_ok=True)
@@ -3010,6 +3674,7 @@ class COFFragmenter(BaseFragmenter):
             return False
         try:
             result = COF.from_cif(cif_path).fragment()
+            self._report_linkage_recognition(result, cif_path)
         except Exception as exc:
             print(f"  coffragmentor library export failed: {exc}")
             return False
@@ -3425,7 +4090,7 @@ class COFFragmenter(BaseFragmenter):
             print(f"Saved: {output_path}")
         return FragmentResult(species=species, coords=coords)
 
-    def _try_coffragmentor_node_linker_fragment(self, cif_path, output_path, minimize=False):
+    def _try_coffragmentor_node_linker_fragment(self, cif_path, output_path, minimize=False, single_linker=False):
         try:
             from coffragmentor import COF
         except Exception as exc:
@@ -3434,6 +4099,7 @@ class COFFragmenter(BaseFragmenter):
         try:
             struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
             result = COF.from_cif(cif_path).fragment()
+            self._report_linkage_recognition(result, cif_path)
         except Exception as exc:
             print(f"  coffragmentor node+linker failed: {exc}")
             return None
@@ -3449,6 +4115,15 @@ class COFFragmenter(BaseFragmenter):
         node = min(nodes, key=lambda sbu: float(np.linalg.norm(np.mean(sbu.molecule.cart_coords, axis=0) - center)))
         node_sp = [str(x) for x in node.molecule.species]
         node_co = [np.array(c, dtype=float) for c in node.molecule.cart_coords]
+        # NOTE: do NOT cap severed-double-bond sites here, before merging.
+        # A node/linker cut atom that IS reconnected by the merge (its true
+        # bonding partner is geometrically restored once both pieces are
+        # placed at their correct relative positions) must be left alone;
+        # capping it here independently of its partner creates two dead-end
+        # groups (e.g. -NH2 and a -CH3-like stub) sitting next to each other
+        # instead of one real bond. Only cap AFTER merging, when a genuinely
+        # still-dangling atom (no reconnection happened) can be told apart
+        # from a properly reconnected one by heavy-neighbor count.
         node_ctr = np.mean(node_co, axis=0)
 
         image_vectors = []
@@ -3465,6 +4140,7 @@ class COFFragmenter(BaseFragmenter):
             lsp = [str(x) for x in linker.molecule.species]
             lco = [np.array(c, dtype=float) + image_shift for c in linker.molecule.cart_coords]
             attach_bonds = 0
+            attach_sites = set()
             min_d = float("inf")
             for i, si in enumerate(node_sp):
                 if si == "H":
@@ -3476,25 +4152,43 @@ class COFFragmenter(BaseFragmenter):
                     min_d = min(min_d, d)
                     if self.is_valid_bond(si, sj, d):
                         attach_bonds += 1
+                        attach_sites.add(i)
             lctr = np.mean(lco, axis=0)
-            return (attach_bonds, -min_d, -float(np.linalg.norm(lctr - node_ctr)))
+            score = (attach_bonds, -min_d, -float(np.linalg.norm(lctr - node_ctr)))
+            return score, attach_sites
 
         scored_images = []
         for idx, linker in enumerate(linkers):
             for image_shift in image_vectors:
-                score = linker_image_score(linker, image_shift)
+                score, attach_sites = linker_image_score(linker, image_shift)
                 if score[0] > 0:
-                    scored_images.append((score, idx, linker, image_shift))
+                    scored_images.append((score, idx, linker, image_shift, attach_sites))
         if not scored_images:
             return None
         scored_images.sort(key=lambda x: x[0], reverse=True)
 
-        seen_linkers = set()
+        # Select one linker image per node ATTACHMENT SITE, not one per distinct
+        # linker SBU. A symmetric COF can be built from a single symmetry-unique
+        # linker that must be placed at every arm of the node - 411 is one
+        # tris(aminophenyl)benzene strut serving all three arms of a
+        # triformylphenol core. Keying on the linker index alone attached only
+        # one copy, so the node came out with a single arm plugged in, and the
+        # minimized variant (which keeps the first linker whole and trims the
+        # rest) then had nothing left to trim and was dropped for zero size
+        # reduction.
+        seen_placements = set()
+        covered_sites = set()
         selected_images = []
-        for score, idx, linker, image_shift in scored_images:
-            if idx not in seen_linkers:
-                seen_linkers.add(idx)
-                selected_images.append((score, linker, image_shift))
+        for score, idx, linker, image_shift, attach_sites in scored_images:
+            key = (idx, tuple(np.round(np.asarray(image_shift, dtype=float), 3)))
+            if key in seen_placements:
+                continue
+            if attach_sites and attach_sites <= covered_sites:
+                # This image only re-plugs arms that are already occupied.
+                continue
+            seen_placements.add(key)
+            covered_sites |= attach_sites
+            selected_images.append((score, linker, image_shift))
 
         def append_merged(species, coords, add_species, add_coords, tol=0.08):
             for sp, coord in zip(add_species, add_coords):
@@ -3516,9 +4210,22 @@ class COFFragmenter(BaseFragmenter):
         for i_img, (_, linker, image_shift) in enumerate(selected_images):
             lsp = [str(x) for x in linker.molecule.species]
             lco = [np.array(c, dtype=float) + image_shift for c in linker.molecule.cart_coords]
+            # NOTE: do NOT cap here either, before merging — see note at the
+            # node construction site above. The end of this linker that
+            # attaches to our selected node will be reconnected by the merge;
+            # only its true dangling end (if any) should ever get capped,
+            # which the post-merge pass below can tell apart correctly.
             if minimize:
                 if i_img == 0:
                     append_merged(species, coords, lsp, lco)
+                elif single_linker:
+                    # Large-node COFs: trimming the other arms to their first
+                    # ring saves nothing when the linkers are already small and
+                    # the node dominates the fragment. Drop them entirely and
+                    # keep only the node plus one complete linker; the node's
+                    # now-open attachment points are H-capped by the
+                    # post-merge passes below.
+                    continue
                 else:
                     out_sp, out_co, out_fl = self._first_connected_ring_fragment(lsp, lco, node_sp, node_co)
                     if out_sp:
@@ -3569,11 +4276,11 @@ class COFFragmenter(BaseFragmenter):
                     self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
         # Keep helper heavy atoms fixed; only adjust capped H atoms.
+        self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
         _label = str(output_path or 'cof_fragment')
-        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(species, coords, capped_h_indices, label=_label)
 
         # Global layered-COF rule for Path J: if a face-to-face layer spacing is
         # present and dimer output is requested, duplicate the completed fragment
@@ -3582,15 +4289,30 @@ class COFFragmenter(BaseFragmenter):
         abc = np.array(struct.lattice.abc, dtype=float)
         stack_axis = int(np.argmin(abc))
         stack_len = float(abc[stack_axis])
-        if layer_mode != "monomer" and 2.5 <= stack_len <= 5.0 and len(species) > 0:
-            layer_vec = np.array(struct.lattice.matrix[stack_axis], dtype=float)
-            self.partner_vec = layer_vec
-            base_species = list(species)
-            base_coords = [np.array(c, dtype=float) for c in coords]
-            base_flags = list(capped_h_flags)
-            species = base_species + base_species
-            coords = base_coords + [c + layer_vec for c in base_coords]
-            capped_h_flags = base_flags + base_flags
+        if layer_mode != "monomer" and len(species) > 0:
+            partner = self._find_stacked_partner(struct, species, coords, label=" (Path J)")
+            if partner is not None:
+                self.partner_op = partner
+                self.partner_vec = partner[1] if np.allclose(partner[0], np.eye(3)) else None
+                base_species = list(species)
+                base_coords = [np.array(c, dtype=float) for c in coords]
+                base_flags = list(capped_h_flags)
+                species = base_species + base_species
+                coords = base_coords + self._apply_partner_op(partner, base_coords)
+                capped_h_flags = base_flags + base_flags
+                capped_h_indices = list(capped_h_indices) + [
+                    i + len(base_species) for i in capped_h_indices
+                ]
+
+        # Parity is checked on the FINAL system, after any second layer has
+        # been added. A monomer with an odd electron count doubles to an even
+        # one, so running this before duplication makes the repair mutilate a
+        # cap to solve a problem the emitted dimer does not have - that is what
+        # stripped the hydrogen off 167's aldimine and left a nitrogen with a
+        # single bond that RDKit cannot even assign a valence to.
+        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(
+            species, coords, capped_h_indices, label=_label
+        )
 
         if output_path:
             mol = Molecule(species, coords)
@@ -3601,8 +4323,14 @@ class COFFragmenter(BaseFragmenter):
             print(f"Saved: {output_path}")
         return FragmentResult(species=species, coords=coords)
 
-    def extract(self, cif_path, output_path="cof_fragment.xyz", center_idx=-1, minimize=False):
+    def extract(self, cif_path, output_path="cof_fragment.xyz", center_idx=-1, minimize=False, single_linker=False):
+        """`single_linker` only applies together with `minimize`: keep the node
+        plus exactly one complete linker instead of trimming the remaining
+        linkers to their first ring. Used as a fallback for large-node COFs
+        where first-ring trimming cannot shrink the fragment meaningfully.
+        """
         self.extracted_linkers = []
+        self.extracted_nodes = []
         print(f"Loading '{cif_path}'...")
         try:
             struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
@@ -3615,9 +4343,17 @@ class COFFragmenter(BaseFragmenter):
                 raise
             struct = structs[0]
         self.structure = struct
-        combined = self._try_coffragmentor_node_linker_fragment(cif_path, output_path, minimize=minimize)
+        combined = self._try_coffragmentor_node_linker_fragment(
+            cif_path, output_path, minimize=minimize, single_linker=single_linker
+        )
         if combined is not None:
             return combined
+        if single_linker:
+            # The node+one-linker fallback is only defined for the
+            # coffragmentor node+linker route; without that decomposition
+            # there is nothing to drop, so report no result rather than
+            # silently returning a fragment identical to the standard one.
+            return None
         combined = self._try_cof_graph_node_linker_fragment(cif_path, output_path, minimize=minimize)
         if combined is not None:
             return combined
@@ -4272,6 +5008,16 @@ class COFFragmenter(BaseFragmenter):
                 if touches_core:
                     final |= comp
 
+            # NOTE: do NOT export node/linker building blocks from this block.
+            # `core_nodes` here is only the B/O node-species seed (it can even
+            # collapse to a single atom), and `comps` are unbounded BFS
+            # components over every non-node atom in the supercell, so a
+            # "linker" can come out as the whole framework or as a stray
+            # single H. For single-block Path A topologies this `final` set is
+            # also discarded outright further below and rebuilt by the
+            # `single_block_keep_heavy` branch, so anything exported here
+            # would not even correspond to the fragment that is written out.
+
             # Boundary cuts for capping: any kept atom bonded to excluded atom.
             for u in list(final):
                 for v in graph[u]:
@@ -4301,6 +5047,7 @@ class COFFragmenter(BaseFragmenter):
                     queue.append(v)
 
         single_block_keep_heavy = None
+        dimer_already_built = False
 
         # Helper export for single-building-block Path-A COFs (e.g., COF-JLU2):
         # keep one ring-centered motif with C/N arms and two O groups.
@@ -4602,15 +5349,11 @@ class COFFragmenter(BaseFragmenter):
             sp = species[li]
             n_broken = len(vecs)
             if sp in target_valence and n_broken > 0:
-                # local coordination in current fragment (after cut)
-                cur_deg = 0
-                li_pos = np.array(coords[li])
-                for jj in range(len(species)):
-                    if jj == li:
-                        continue
-                    d = np.linalg.norm(li_pos - np.array(coords[jj]))
-                    if self.is_valid_bond(sp, species[jj], d):
-                        cur_deg += 1
+                # Local valence already used in the current fragment (after the
+                # cut), counting bond order: a nitrile N (C#N) is already
+                # saturated by its single triple bond and must get no H at all,
+                # and an imine N (C=N) needs one H rather than two.
+                cur_deg = self._local_valence_used(li, species, coords)
                 deficit = max(0, target_valence[sp] - cur_deg)
                 n_cap = min(n_broken, deficit)
 
@@ -4623,6 +5366,7 @@ class COFFragmenter(BaseFragmenter):
 
         # COF fragments can leave terminal O atoms without a broken heavy-atom
         # edge marker; cap those O sites with H before geometry refinement.
+        self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
 
         if minimize and species and path_mode == "H":
@@ -5065,6 +5809,10 @@ class COFFragmenter(BaseFragmenter):
                     layer_mode = getattr(self, "layer_mode", "auto")
                     keep_n = 1 if layer_mode == "monomer" else 2
                     keep = set().union(*ranked[:keep_n])
+                    if keep_n == 2 and len(ranked) >= 2:
+                        # Path B already carries its second layer as a kept
+                        # component; it must not be duplicated again below.
+                        dimer_already_built = True
                 else:
                     keep = max(comps, key=comp_key)
                 species = [x for i, x in enumerate(species) if i in keep]
@@ -5081,12 +5829,50 @@ class COFFragmenter(BaseFragmenter):
                 species = base_species + base_species
                 coords = base_coords + [c + np.array(layer_vec, dtype=float) for c in base_coords]
                 capped_h_flags = base_flags + base_flags
+                dimer_already_built = True
 
+        self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
         _label = str(output_path or 'cof_fragment')
-        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(species, coords, capped_h_indices, label=_label)
+
+        # Global layered-COF rule for the Path A/B/C/D branch, mirroring the
+        # rule already used on Path J: when the shortest lattice axis falls in
+        # the pi-stacking window the structure is a stacked 2D COF, so the
+        # fragment gets a second layer and therefore carries the interlayer
+        # environment. Without this, layered COFs that reach a fallback path
+        # (e.g. Path A single node, Path D porphyrin core) silently came out as
+        # monomers even though their parent is clearly layered.
+        #
+        # Duplicating *after* capping and the odd-electron fix, exactly as
+        # Path J does, guarantees the second layer is an exact translation of
+        # one fully QM-ready monomer: identical capping in both layers, and an
+        # even electron count preserved by construction.
+        layer_mode = getattr(self, "layer_mode", "auto")
+        if layer_mode != "monomer" and not dimer_already_built and len(species) > 0:
+            partner = self._find_stacked_partner(struct, species, coords)
+            if partner is not None:
+                self.partner_op = partner
+                self.partner_vec = partner[1] if np.allclose(partner[0], np.eye(3)) else None
+                base_species = list(species)
+                base_coords = [np.array(c, dtype=float) for c in coords]
+                species = base_species + base_species
+                coords = base_coords + self._apply_partner_op(partner, base_coords)
+                capped_h_indices = list(capped_h_indices) + [
+                    i + len(base_species) for i in capped_h_indices
+                ]
+
+        # Parity is checked on the FINAL system, after any second layer has
+        # been added. A monomer with an odd electron count doubles to an even
+        # one, so running this before duplication makes the repair mutilate a
+        # cap to solve a problem the emitted dimer does not have - that is what
+        # stripped the hydrogen off 167's aldimine and left a nitrogen with a
+        # single bond that RDKit cannot even assign a valence to.
+        species, coords, capped_h_indices = self.fix_odd_electron_multiplicity(
+            species, coords, capped_h_indices, label=_label
+        )
+
         print(f"Final size: {len(species)} atoms")
         mol = Molecule(species, coords)
         if output_path:
@@ -5096,10 +5882,10 @@ class COFFragmenter(BaseFragmenter):
 
 
 # ---------------------------------------------------------------------------
-# BioMolFragmenter — sliding-window fragmenter for single-chain PDB structures
+# MacromolFragmenter — sliding-window fragmenter for single-chain PDB structures
 # ---------------------------------------------------------------------------
 
-class BioMolFragmenter(BaseFragmenter):
+class MacromolFragmenter(BaseFragmenter):
     """Sliding-window fragmenter for biological macromolecules (PDB format).
 
     Strategy
@@ -5835,6 +6621,18 @@ def _get_formula(species):
     return " ".join(f"{el}{c[el]}" for el in sorted(c))
 
 
+# COF ONLY. Minimum atom-count reduction a minimized COF fragment must achieve
+# over its normal counterpart to be worth keeping as a separate output; below
+# this the minimized fragment is a near-duplicate and is discarded (after the
+# node+one-linker fallback has also been tried).
+#
+# Deliberately NOT applied to MOFs. Measured on the IRMOF series, 12 of 19
+# structures clear a 20-atom bar by exactly one atom (reduction == 21), so any
+# such threshold sits on a cliff edge there and would silently delete valid
+# minimized fragments. MOF minimize output must stay untouched.
+MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF = 20
+
+
 def _process_cof_file(args_tuple):
     cif_path, radius, center, layer_mode, timeout = args_tuple
     import os
@@ -5847,31 +6645,71 @@ def _process_cof_file(args_tuple):
             res = frag.extract(cif_path, center_idx=center, output_path=None, minimize=False)
             norm_atoms = len(res.species) if res else 0
             norm_formula = _get_formula(res.species) if res else "N/A"
+            # Snapshot right after the normal-mode call: extract() resets
+            # extracted_linkers/extracted_nodes on every invocation, and for
+            # some COF paths (e.g. Path A/B) they are only populated during
+            # the normal (non-minimize) pass. Grabbing them now avoids losing
+            # them to the reset at the top of the minimize-mode call below.
+            extracted_linkers_snapshot = list(getattr(frag, "extracted_linkers", []) or [])
+            extracted_nodes_snapshot = list(getattr(frag, "extracted_nodes", []) or [])
+            partner_op_snapshot = getattr(frag, "partner_op", None)
             min_atoms = "N/A"
             min_formula = "N/A"
             res_min = None
             if res and len(res.species) > 50:
                 print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
-                res_min = frag.extract(cif_path, center_idx=center, output_path=None, minimize=True)
-                if res_min:
+                candidate_min = frag.extract(cif_path, center_idx=center, output_path=None, minimize=True)
+                reduction = len(res.species) - len(candidate_min.species) if candidate_min else -1
+                if candidate_min and reduction < MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF:
+                    # First-ring trimming cannot shrink this one (typical of
+                    # large-node COFs whose linkers are already small). Retry
+                    # keeping the node plus exactly one complete linker.
+                    print(f"[{base}] Minimize only reduced size by {reduction} atoms "
+                          f"(< {MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF}); retrying with node + one linker...")
+                    alt_min = frag.extract(cif_path, center_idx=center, output_path=None,
+                                           minimize=True, single_linker=True)
+                    alt_reduction = len(res.species) - len(alt_min.species) if alt_min else -1
+                    if alt_min and alt_reduction > reduction:
+                        candidate_min, reduction = alt_min, alt_reduction
+                if candidate_min and reduction >= MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF:
+                    res_min = candidate_min
                     min_atoms = len(res_min.species)
                     min_formula = _get_formula(res_min.species)
+                elif candidate_min:
+                    print(f"[{base}] Minimize reduced size by only {reduction} atoms "
+                          f"(< {MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF}); skipping minimized fragment.")
             only_linker_res = []
-            if hasattr(frag, "extracted_linkers") and frag.extracted_linkers:
-                for idx, (lsp, lco) in enumerate(frag.extracted_linkers):
-                    if getattr(frag, "partner_vec", None) is not None:
+            if extracted_linkers_snapshot:
+                for idx, (lsp, lco) in enumerate(extracted_linkers_snapshot):
+                    if partner_op_snapshot is not None:
                         lsp_final = lsp + lsp
-                        lco_final = list(lco) + [c + frag.partner_vec for c in lco]
+                        lco_final = list(lco) + COFFragmenter._apply_partner_op(partner_op_snapshot, lco)
                     else:
                         lsp_final = list(lsp)
                         lco_final = [np.array(c) for c in lco]
-                    lbl = f"{base}FragCofOnlyLinker_{idx}" if len(frag.extracted_linkers) > 1 else f"{base}FragCofOnlyLinker"
+                    lbl = f"{base}FragCofOnlyLinker_{idx}" if len(extracted_linkers_snapshot) > 1 else f"{base}FragCofOnlyLinker"
                     try:
-                        qm_linker = frag._make_qm_ready_linker(lsp_final, lco_final, label=lbl)
+                        qm_linker = frag._make_cof_qm_ready(lsp_final, lco_final, label=lbl)
                         only_linker_res.append(qm_linker)
                     except Exception as e:
                         print(f"[{base}] Failed to generate QM-ready OnlyLinker fragment: {e}")
-                
+
+            only_node_res = []
+            if extracted_nodes_snapshot:
+                for idx, (nsp, nco) in enumerate(extracted_nodes_snapshot):
+                    if partner_op_snapshot is not None:
+                        nsp_final = nsp + nsp
+                        nco_final = list(nco) + COFFragmenter._apply_partner_op(partner_op_snapshot, nco)
+                    else:
+                        nsp_final = list(nsp)
+                        nco_final = [np.array(c) for c in nco]
+                    lbl = f"{base}FragCofOnlyNode_{idx}" if len(extracted_nodes_snapshot) > 1 else f"{base}FragCofOnlyNode"
+                    try:
+                        qm_node = frag._make_cof_qm_ready(nsp_final, nco_final, label=lbl)
+                        only_node_res.append(qm_node)
+                    except Exception as e:
+                        print(f"[{base}] Failed to generate QM-ready OnlyNode fragment: {e}")
+
         return {
             "cif": os.path.basename(cif_path),
             "norm_atoms": norm_atoms,
@@ -5880,7 +6718,8 @@ def _process_cof_file(args_tuple):
             "min_formula": min_formula,
             "norm_res": res,
             "min_res": res_min,
-            "only_linker_res": only_linker_res
+            "only_linker_res": only_linker_res,
+            "only_node_res": only_node_res
         }
     except TimeoutError as e:
         print(f"[{base}] TimeoutError: {e}")
@@ -5897,7 +6736,8 @@ def _process_cof_file(args_tuple):
             "norm_atoms": "TIMEOUT", "norm_formula": "TIMEOUT",
             "min_atoms": "TIMEOUT", "min_formula": "TIMEOUT",
             "norm_res": None, "min_res": None,
-            "only_linker_res": []
+            "only_linker_res": [],
+            "only_node_res": []
         }
     except Exception as e:
         print(f"[{base}] Error: {e}")
@@ -5906,7 +6746,8 @@ def _process_cof_file(args_tuple):
             "norm_atoms": "ERROR", "norm_formula": "ERROR",
             "min_atoms": "ERROR", "min_formula": "ERROR",
             "norm_res": None, "min_res": None,
-            "only_linker_res": []
+            "only_linker_res": [],
+            "only_node_res": []
         }
 
 
@@ -5918,7 +6759,7 @@ def _process_bio_file(args_tuple):
         base = base[:-4]
     try:
         with _timeout_context(timeout):
-            frag = BioMolFragmenter(
+            frag = MacromolFragmenter(
                 window_size=window_size, stride=stride,
                 use_pdbfixer=use_pdbfixer, ph=ph,
             )
@@ -6122,6 +6963,11 @@ def main():
         extxyz_path = os.path.join(out_dir, "fragments_collection.extxyz")
         
         seen_keys = set()
+        _identity_key_fn = (
+            COFFragmenter._chemical_identity_key
+            if getattr(args, "kind", "mof") == "cof"
+            else MOFFragmenter._chemical_identity_key
+        )
         if is_dir:
             if os.path.exists(csv_path) and not args.overwrite:
                 # Load completed files from CSV
@@ -6139,7 +6985,7 @@ def main():
                 
                 # Load seen keys from existing extxyz
                 if os.path.exists(extxyz_path):
-                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path, _identity_key_fn)
                 
                 # Filter out files that are already completed
                 cif_files = [f for f in cif_files if os.path.basename(f) not in completed_files]
@@ -6153,7 +6999,7 @@ def main():
                     os.remove(extxyz_path)
         else:
             if os.path.exists(extxyz_path):
-                seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                seen_keys = _load_seen_keys_from_extxyz(extxyz_path, _identity_key_fn)
                 
         pool_args = [(cif, args.radius, args.center, args.nmetals, args.timeout) for cif in cif_files]
         
@@ -6253,6 +7099,11 @@ def main():
         extxyz_path = os.path.join(out_dir, "fragments_collection.extxyz")
         
         seen_keys = set()
+        _identity_key_fn = (
+            COFFragmenter._chemical_identity_key
+            if getattr(args, "kind", "mof") == "cof"
+            else MOFFragmenter._chemical_identity_key
+        )
         if is_dir:
             if os.path.exists(csv_path) and not args.overwrite:
                 # Load completed files from CSV
@@ -6270,7 +7121,7 @@ def main():
                 
                 # Load seen keys from existing extxyz
                 if os.path.exists(extxyz_path):
-                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path, _identity_key_fn)
                 
                 # Filter out files that are already completed
                 cif_files = [f for f in cif_files if os.path.basename(f) not in completed_files]
@@ -6288,20 +7139,22 @@ def main():
         pool_args = [(cif, args.radius, args.center, args.cof_layer, args.timeout) for cif in cif_files]
 
         def _flush_cof_result(r, seen_keys, csv_path, extxyz_path, is_dir):
+            # COF duplicate detection uses COFFragmenter's topology-aware key,
+            # not the MOF formula-only key (see COFFragmenter._chemical_identity_key).
             norm_dup = "no"
             min_dup = "no"
             if r['norm_res']:
-                ckey = MOFFragmenter._chemical_identity_key(r['norm_res'].species, r['norm_res'].coords)
+                ckey = COFFragmenter._chemical_identity_key(r['norm_res'].species, r['norm_res'].coords)
                 if ckey in seen_keys: norm_dup = "yes"
             if r['min_res']:
-                ckey = MOFFragmenter._chemical_identity_key(r['min_res'].species, r['min_res'].coords)
+                ckey = COFFragmenter._chemical_identity_key(r['min_res'].species, r['min_res'].coords)
                 if ckey in seen_keys: min_dup = "yes"
 
             new_extxyz_frags = []
             for key in ["norm_res", "min_res"]:
                 res_obj = r[key]
                 if res_obj:
-                    ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    ckey = COFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -6314,7 +7167,7 @@ def main():
 
             if r.get("only_linker_res"):
                 for idx, res_obj in enumerate(r["only_linker_res"]):
-                    ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    ckey = COFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -6323,6 +7176,19 @@ def main():
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
                     suffix = f"_{idx}" if len(r["only_linker_res"]) > 1 else ""
                     frag_name = f"{clean_base}FragCofOnlyLinker{suffix}"
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+
+            if r.get("only_node_res"):
+                for idx, res_obj in enumerate(r["only_node_res"]):
+                    ckey = COFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    if ckey in seen_keys:
+                        continue
+                    seen_keys.add(ckey)
+                    base_name = r["cif"]
+                    if base_name.endswith(".cif"): base_name = base_name[:-4]
+                    clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
+                    suffix = f"_{idx}" if len(r["only_node_res"]) > 1 else ""
+                    frag_name = f"{clean_base}FragCofOnlyNode{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
@@ -6383,6 +7249,11 @@ def main():
         extxyz_path = os.path.join(out_dir, "bio_fragments_collection.extxyz")
         
         seen_keys = set()
+        _identity_key_fn = (
+            COFFragmenter._chemical_identity_key
+            if getattr(args, "kind", "mof") == "cof"
+            else MOFFragmenter._chemical_identity_key
+        )
         if is_dir:
             if os.path.exists(csv_path) and not args.overwrite:
                 # Load completed files from CSV
@@ -6400,7 +7271,7 @@ def main():
                 
                 # Load seen keys from existing extxyz
                 if os.path.exists(extxyz_path):
-                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                    seen_keys = _load_seen_keys_from_extxyz(extxyz_path, _identity_key_fn)
                 
                 # Filter out files that are already completed
                 pdb_files = [f for f in pdb_files if os.path.basename(f) not in completed_files]
