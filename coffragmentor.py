@@ -173,6 +173,34 @@ class COF:
                 ):
                     edges_to_remove.append((u, v))
                     linkage_of[frozenset((u, v))] = ('imine', frozenset((u, v)))
+                elif (
+                    # Secondary aryl amine linkage, Ar-NH-Ar. The bridging N
+                    # carries exactly two heavy neighbours - both carbon - and
+                    # exactly one H, which is what separates it from a tertiary
+                    # triarylamine NODE (three C, no H, degree 3), a primary
+                    # amine substituent (one C, two H, degree 1) and a ring N
+                    # such as carbazole or indole (caught by in_small_ring).
+                    # The flanking carbons are aromatic, so heavy_degree(C) is
+                    # 3 and the imine rule above - which demands exactly 2 -
+                    # never fires: without this rule 1015 and its relatives cut
+                    # nothing at all, fell back to Path A radius truncation and
+                    # over-capped the amine N to four bonds.
+                    #
+                    # Both C-N bonds are appended, exactly as the imine rule
+                    # does for a linkage it meets twice. That would orphan the
+                    # bare NH, so the orphan guard below restores one of them,
+                    # leaving a single net cut and an Ar-NH- terminus.
+                    heavy_degree(n_idx) == 2
+                    and h_count(n_idx) == 1
+                    and all(
+                        self.structure[nb].specie.symbol == 'C'
+                        for nb in undirected_graph.neighbors(n_idx)
+                        if self.structure[nb].specie.symbol != 'H'
+                    )
+                    and not in_small_ring(u, v)
+                ):
+                    edges_to_remove.append((u, v))
+                    linkage_of[frozenset((u, v))] = ('amine', frozenset((u, v)))
             elif bond_pair == {'C'}:
                 # Vinylene (sp2-carbon) COF linkage: Ar-CH=CH-Ar, formed by
                 # Knoevenagel/aldol condensation. Both alkene carbons carry
