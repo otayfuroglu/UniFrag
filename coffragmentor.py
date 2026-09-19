@@ -108,6 +108,33 @@ class COF:
         # Create an undirected version for component analysis
         undirected_graph = sg.graph.to_undirected()
         
+        # Hydrogen is monovalent, but JmolNN scores by distance alone and will
+        # perceive a short non-covalent contact as a bond. 526 is the case in
+        # point: each of its six beta-ketoenamine hydrogens sits 1.09 A from its
+        # own carbon AND 1.28 A from a neighbouring keto oxygen - the resonance
+        # assisted H-bond drawn as a dashed line in any picture of a TpPa COF -
+        # and the graph took both. Those six phantom edges bridge node and
+        # linker, so cutting all six real linkages still left ONE 114-atom
+        # component: no blocks at all, and the structure fell back to Path A
+        # radius truncation. Dropping them recovers exactly the expected
+        # decomposition, 3 x C12H8N4O4 linkers and 2 x C9H3O3 nodes.
+        #
+        # Keep only each hydrogen's nearest neighbour, which is always its
+        # covalent parent, and drop the rest.
+        for _h in [
+            i for i in range(len(self.structure))
+            if self.structure[i].specie.symbol == 'H'
+        ]:
+            _nbrs = list(undirected_graph.neighbors(_h))
+            if len(_nbrs) <= 1:
+                continue
+            _keep = min(_nbrs, key=lambda j: self.structure.get_distance(_h, j))
+            for _nb in _nbrs:
+                if _nb == _keep:
+                    continue
+                while undirected_graph.has_edge(_h, _nb):
+                    undirected_graph.remove_edge(_h, _nb)
+
         # Create a copy to preserve original connections for neighbor analysis
         original_undirected = undirected_graph.copy()
         

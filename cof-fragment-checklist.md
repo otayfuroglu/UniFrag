@@ -59,6 +59,26 @@ mean the run succeeded.**
 
 ---
 
+## 0b. Bond perception
+
+- [ ] **MUST — no hydrogen has more than one heavy neighbour.** `JmolNN` scores
+      by distance alone, so a short non-covalent contact becomes a bond. In 526
+      each beta-ketoenamine H sits 1.09 A from its own carbon and **1.28 A from
+      a neighbouring keto oxygen** - the resonance-assisted H-bond drawn as a
+      dashed line in every picture of a TpPa COF. Those six phantom edges
+      bridged node and linker, so severing all six genuine linkages still left
+      ONE 114-atom component: no blocks at all, silent fallback to Path A, and
+      a "node" that was neither building block. Dropping them recovers the
+      textbook decomposition, 3 x C12H8N4O4 linkers and 2 x C9H3O3 nodes.
+      `coffragmentor` now keeps only each hydrogen's nearest neighbour.
+      **35 of the 1242 CoRE-COF structures are affected** (worst: 284 with 48
+      such hydrogens, then 133, 134, 832, 286, 55, 843, 525).
+
+- [ ] **A structure that logs cut bonds can still produce no blocks.** 526 logged
+      `6 bonds severed (imine)` and then fell to Path A, because the cuts did
+      not disconnect anything. Treat `linkages recognised` followed by a
+      `Path A` line as a failure signal, not a success.
+
 ## 1. Linkage recognition
 
 - [ ] **MUST — at least one bond severed**, unless the framework is genuinely
