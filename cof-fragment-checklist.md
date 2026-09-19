@@ -368,18 +368,40 @@ Anti-patterns that cost real time on this project:
 
 ## Reference baselines
 
-From the three-set validation (300 of 884 structures):
+Full 884-structure CoRE-COF runs, scored by `runUniFrag/check_cof_fragments.py`.
+Each column is one complete run; `d2f2054` is current.
 
-| Metric | Value |
-|---|---|
-| Frames | 906 |
-| Valence correct | 98.8% |
-| Dimers | 331 |
-| Structures yielding fragments | 281 / 300 |
-| Min versions produced | 272 / 300 |
-| Clashing | 8 |
-| Over-valent | 11 |
-| Under-valent | 46 |
-| Odd-electron | 11 |
+| metric | pre-fix | +dedup/orphan `e28ee72` | +amine `5fd407d` | +parity `371c362` | +clearance `d2f2054` |
+|---|---|---|---|---|---|
+| frames | 1695 | 1737 | 1737 | 1737 | 1737 |
+| ERROR structures | 329 | 0 | 0 | 0 | 0 |
+| degenerate helpers | 4 | 0 | 0 | 0 | 0 |
+| **odd-electron** | 34 | 40 | 39 | **5** | **5** |
+| QM warnings | 47 | 68 | 66 | 10 | 11 |
+| over-coordinated | 96 | 71 | 67 | 69 | 70 |
+| mis-capped terminals | - | 292 | 287 | 214 | 212 |
+| clashing (<2.0 A) | 808 | 835 | 828 | 849 | 842 |
+| detached-junk frames | - | 5 | 7 | 5 | 5 |
+| no recognised linkage | 41 | 43 | 40 | 37 | 40 |
 
-A new full-set run should land at or better than these rates.
+Read the columns as cumulative, not independent: each adds to the one before.
+`no recognised linkage` moves by a few between otherwise identical runs because
+parallel processing order decides which structures are deduplicated before the
+linkage report prints - treat differences under about 5 there as noise.
+
+The parity repair is the single biggest win (odd-electron 39 -> 5) and it paid
+for itself in mis-capped sites too (287 -> 212). It cost clashes (828 -> 849);
+the clearance pass recovered a third of that (-> 842) and no more, because the
+remaining contacts are 1.8-2.0 A H...H pairs where no roomier site exists.
+
+### Known-unfixable residue
+
+These do not respond to fragmenter changes and should be excluded before judging
+a run, not chased:
+
+- **Broken parent CIFs.** 284's own structure has a 0.78 A minimum interatomic
+  distance and 80 over-coordinated atoms; 1091's minimum is 0.75 A. Whatever the
+  fragmenter does, their fragments inherit it.
+- **Genuine quaternary N.** 1180, 526, 671 carry real `N(CCCC)` centres.
+- **5 odd-electron fragments** (1005, 1104 x2, 615, 744): no site can accept a
+  hydrogen at any clearance. All are flagged by `QM WARNING`, never silent.
