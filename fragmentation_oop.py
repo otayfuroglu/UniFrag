@@ -825,51 +825,66 @@ class BaseFragmenter:
             # Widening the candidate set is only safe if the hydrogen actually
             # lands somewhere sane. The escalating fallback below ends at
             # min_hh=0/min_heavy=0, which always "succeeds" by dropping the new
-            # H on top of an existing atom - that turned 39 odd-electron
-            # fragments into 24 over-coordinated ones, H(CC) alone going 1 -> 17.
-            # Here each candidate is tried in priority order, never below a safe
-            # separation, and a placement is kept only if the new H ends up
-            # bonded to exactly its own parent.
+            # H onto an existing atom - that turned 39 odd-electron fragments
+            # into 24 over-coordinated ones, H(CC) alone going 1 -> 17.
+            #
+            # A bonded-distance check alone is still not enough: place_capping_h
+            # honours min_hh=1.5 by putting the new H exactly 1.51 A from its
+            # nearest neighbour, which is a clash rather than a structure, and
+            # that cost 23 newly clashing frames. So candidates are walked in
+            # priority order twice - first demanding real van der Waals
+            # clearance, then accepting a tight site - because an even electron
+            # count still beats a close contact.
             add_candidates.sort(key=lambda x: x[0], reverse=True)
-            for score, target_idx, group, heavy_nbs in add_candidates:
-                target_sym = species[target_idx]
-                parent_pos = coords_arr[target_idx]
-                if len(heavy_nbs) == 1:
-                    vec = parent_pos - coords_arr[heavy_nbs[0]]
-                    nn = np.linalg.norm(vec)
-                    base_vec = vec / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
-                else:
-                    vecs = [parent_pos - coords_arr[nb] for nb in heavy_nbs]
-                    avg = np.mean(vecs, axis=0)
-                    nn = np.linalg.norm(avg)
-                    base_vec = avg / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
-                bl = self.cap_bond_length(target_sym)
-                before = len(species)
-                for mhh in (1.5, 1.2, 1.0):
-                    self.place_capping_h(target_idx, base_vec, bl, species, coords,
-                                         min_hh=mhh, capped_h_flags=None)
-                    if len(species) > before:
-                        break
-                if len(species) == before:
-                    continue
-                new_idx = len(species) - 1
-                new_pos = np.asarray(coords[new_idx], dtype=float)
-                contacts = sum(
-                    1 for j in range(len(species))
-                    if j != new_idx
-                    and self.is_valid_bond(
-                        species[j], "H",
-                        float(np.linalg.norm(np.asarray(coords[j], dtype=float) - new_pos)),
+            for clearance in (1.8, 1.5):
+                for score, target_idx, group, heavy_nbs in add_candidates:
+                    target_sym = species[target_idx]
+                    parent_pos = coords_arr[target_idx]
+                    if len(heavy_nbs) == 1:
+                        vec = parent_pos - coords_arr[heavy_nbs[0]]
+                        nn = np.linalg.norm(vec)
+                        base_vec = vec / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
+                    else:
+                        vecs = [parent_pos - coords_arr[nb] for nb in heavy_nbs]
+                        avg = np.mean(vecs, axis=0)
+                        nn = np.linalg.norm(avg)
+                        base_vec = avg / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
+                    bl = self.cap_bond_length(target_sym)
+                    before = len(species)
+                    for mhh in (1.5, 1.2, 1.0):
+                        self.place_capping_h(target_idx, base_vec, bl, species, coords,
+                                             min_hh=mhh, capped_h_flags=None)
+                        if len(species) > before:
+                            break
+                    if len(species) == before:
+                        continue
+                    new_idx = len(species) - 1
+                    new_pos = np.asarray(coords[new_idx], dtype=float)
+                    contacts = sum(
+                        1 for j in range(len(species))
+                        if j != new_idx
+                        and self.is_valid_bond(
+                            species[j], "H",
+                            float(np.linalg.norm(np.asarray(coords[j], dtype=float) - new_pos)),
+                        )
                     )
-                )
-                if contacts != 1:
-                    species.pop()
-                    coords.pop()
-                    continue
-                capped_h_indices.append(new_idx)
-                print(f"QM-Fix [{group}]: Added H to {target_sym}[{target_idx}] "
-                      f"to achieve even electron count for '{label}'.")
-                return species, coords, capped_h_indices
+                    nearest = min(
+                        (
+                            float(np.linalg.norm(np.asarray(coords[j], dtype=float) - new_pos))
+                            for j in range(len(species))
+                            if j != new_idx and j != target_idx
+                        ),
+                        default=float("inf"),
+                    )
+                    if contacts != 1 or nearest < clearance:
+                        species.pop()
+                        coords.pop()
+                        continue
+                    capped_h_indices.append(new_idx)
+                    print(f"QM-Fix [{group}]: Added H to {target_sym}[{target_idx}] "
+                          f"to achieve even electron count for '{label}' "
+                          f"(clearance {nearest:.2f} A).")
+                    return species, coords, capped_h_indices
         if add_candidates:
             add_candidates.sort(key=lambda x: x[0], reverse=True)
             score, target_idx, group, heavy_nbs = add_candidates[0]
