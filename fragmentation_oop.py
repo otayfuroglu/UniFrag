@@ -3500,7 +3500,12 @@ class COFFragmenter(BaseFragmenter):
             if key is None:
                 continue
             if key in seen:
-                old.unlink()
+                # Another worker may prune the same duplicate concurrently; the
+                # file already being gone is the outcome we wanted anyway.
+                try:
+                    old.unlink()
+                except FileNotFoundError:
+                    continue
                 removed += 1
             else:
                 seen[key] = old
