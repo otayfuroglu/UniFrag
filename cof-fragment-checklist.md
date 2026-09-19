@@ -1,0 +1,329 @@
+# COF Fragment QA Checklist
+
+Standard acceptance checklist for COF cluster models produced by `COFFragmenter`.
+Every threshold below is calibrated against real failures found on the CoRE-COF
+884-structure set; the case IDs in parentheses are the CIF stems that motivated
+the rule.
+
+**How to use it.** Work top to bottom. Sections 0–2 are cheap and catch the
+failures that invalidate everything downstream, so never skip them to get to the
+chemistry. A fragment is QM-ready only when every **MUST** passes.
+
+---
+
+## 0. Run-level sanity — do this before looking at any fragment
+
+The single most important lesson from this dataset: **a zero exit code does not
+mean the run succeeded.**
+
+- [ ] **MUST — count `ERROR` rows in the summary CSV, not the exit status.**
+      A 112-core run exited `0:0` in 5m59s while silently losing 329 of 884
+      structures (37%). Per-structure exceptions are caught and logged; the
+      driver still exits clean.
+      ```bash
+      python3 -c "
+      import csv,collections
+      c=collections.Counter()
+      for r in csv.DictReader(open('cifs/fragmentation_summary.csv')):
+          if r['normal_atoms'].strip()=='ERROR': c['ERROR']+=1
+          elif r['norm_duplicate'].strip()=='yes': c['duplicate']+=1
+          else: c['produced']+=1
+      print(dict(c), 'total', sum(c.values()))"
+      ```
+      Expected: `ERROR == 0`, and `produced + duplicate + ERROR == n_input_cifs`.
+
+- [ ] **MUST — the CSV row count equals the number of input CIFs.** A short CSV
+      means structures were dropped before they were even attempted.
+
+- [ ] **MUST — no `FileNotFoundError` on `cof_nodes_lib/` or `cof_linkers_lib/`.**
+      With `--nproc` all workers share those directories. Any unguarded
+      filesystem op in the prune/export path is a race.
+      ```bash
+      grep -oE "Error: .*" log.out | sed -E 's/[0-9]+_[0-9]+\.xyz/<F>.xyz/' | sort | uniq -c | sort -rn
+      ```
+
+- [ ] **MUST — twin jobs write to separate directories.** UniFrag writes
+      `fragments_collection.extxyz` and `fragmentation_summary.csv` *into the
+      input directory*. Two jobs pointed at the same `cifs/` (including via a
+      symlink) will interleave frames into one file and produce a
+      plausible-looking but corrupt collection. Copy the input directory; do not
+      symlink it.
+
+- [ ] **SHOULD — check timeouts.** `grep -c TimeoutError log.out`. The default
+      `--timeout 300` is too short for the largest frameworks (913 severs 192
+      bonds); use `--timeout 1800` for full-set runs. Timed-out CIFs are moved to
+      `cifs/timed_out_structures/` and must be restored before a rerun.
+
+- [ ] **SHOULD — record counts of `QM WARNING` and `no known linkage chemistry`**
+      as the run's quality baseline, so regressions are visible next time.
+
+---
+
+## 1. Linkage recognition
+
+- [ ] **MUST — at least one bond severed**, unless the framework is genuinely
+      fully fused. `0 bonds severed` emits:
+      `!! UniFrag COF WARNING [stem]: no known linkage chemistry recognised`.
+      Baseline on the full set: **31/884 (3.5%)** unrecognised, nearly all fully
+      fused frameworks where node/linker decomposition does not apply.
+
+- [ ] **MUST — the recognised linkage matches the chemistry you expect.**
+      Full-884 distribution:
+      | Linkage | Count |
+      |---|---|
+      | imine | 727 |
+      | biaryl | 53 |
+      | imine + vinylene | 27 |
+      | vinylene | 25 |
+      | oxazole | 8 |
+      | dioxin + imine | 7 |
+      | dioxin | 4 |
+      | oxazole + vinylene | 2 |
+      | none | 31 |
+
+- [ ] **MUST — linkage tags are per-bond, never per-type.** Tags are
+      `frozenset((u, v))`. A shared per-type tag makes `_count_linkages` merge
+      independent bonds and undercount.
+
+- [ ] **Vinylene (C=C) rule** — both carbons `heavy_degree == 2`, `h_count == 1`,
+      bond ≤ 1.42 Å, **and not in a small ring**. The ring test is the only thing
+      separating a vinylene linker from an ordinary aromatic CH=CH edge; dropping
+      it shreds every aromatic ring.
+
+- [ ] **Imine (C=N) rule** — requires `heavy_degree(C) == 2`,
+      `heavy_degree(N) >= 2`, not in a small ring. The terminal-N guard is what
+      stops a terminal `=NH` being treated as a linkage (760).
+
+- [ ] **DO NOT add a bond-length guard to the imine rule.** This was proposed and
+      **rejected on measurement**: across 810 cut C–N bonds, p75 = 1.348 Å and
+      p95 = 1.447 Å. A 1.36 Å cutoff makes **15 of 100 structures lose every cut**
+      (543 and 585 among them). The rule's length-blindness is load-bearing.
+
+- [ ] **Biaryl (C–C) fallback** — runs *only* when no other edge was found. Fuse
+      rings ≤7 into ring systems; a biaryl bond joins two different systems and
+      lies outside any ring; sever only bonds touching a system of degree ≥3.
+      Vinylene + biaryl together cover **107/884 (12%)** of the set.
+
+---
+
+## 2. Node / linker decomposition
+
+- [ ] **MUST — both a node and a linker are exported** when the framework is not
+      fully fused. "Linker but no node", or a node with no linker, means the
+      classification collapsed (411, 612).
+
+- [ ] **MUST — no degenerate helper fragments.** These are always wrong and were
+      observed in production output:
+      ```
+      931FragCofOnlyLinker_0  -> [N]            (1 atom)
+      929FragCofOnlyLinker_1  -> [H, O]         (2 atoms)
+      645FragCofOnlyLinker    -> [N, N, N, H]
+      1226FragCofOnlyLinker_1 -> [C, N, N, H, H]
+      ```
+      Flag any helper fragment with fewer than ~6 atoms for inspection.
+
+- [ ] **MUST — no redundant carbon carried onto the node side of a severed
+      linkage** (411). Carry-over is allowed only for `_CARRYOVER_ELEMENTS` or an
+      explicit `vinylene_partner` pair.
+
+- [ ] **k+k symmetric frameworks** — when classification yields no linkers but
+      more than one node, the symmetric tie-break demotes all but the smallest
+      `(smiles, n_atoms)` group to linkers. Without it, symmetric COFs return
+      all-nodes and no linker.
+
+- [ ] **MUST — linker images are chosen per attachment site, not per index.**
+      Per-index selection drops symmetry-equivalent placements and yields
+      linkers with missing arms (411, 704).
+
+---
+
+## 3. Capping chemistry — valence and bond order
+
+- [ ] **MUST — no over-valent atom.** Every severed site is capped according to
+      its *perceived bond order*, not blindly with one H.
+      Double-bond ceilings (Å): C–N 1.36, C–O 1.30, C–C 1.35, N–N 1.30, N–O 1.30.
+      Triple-bond ceilings: C–N 1.20, C–C 1.24.
+
+- [ ] **MUST — nitriles and alkynes are never protonated.** The saturation guard
+      (`_skip_saturated_h_cap`) must run **before** the per-element branches in
+      `_cap_open_oxygens`, and must apply to C, N *and* O. Scoping it to carbon
+      only drove over-valent sites from 46 to 89.
+
+- [ ] **MUST — an aldimine terminates as `Ar–CH=NH`, not `Ar–CH₃`.** Note: an
+      `Ar–CH₃` in the output is *usually not* a capping bug. Measured on this set,
+      153 aldimines produced **zero** imine-derived methyls; the methyls found
+      were native alkyl side chains present in the parent CIF (e.g. 502's `C[27]`
+      carries 3 H in the raw block, an `–O–CH₂–CH₃` ethoxy). Check the parent
+      before blaming the capper.
+
+- [ ] **SHOULD — under-valent sites are reviewed.** They are less damaging than
+      over-valent ones but still distort the electronic structure. Baseline on
+      300 structures: 46 under-valent, 11 over-valent, 98.8% valence correct.
+
+---
+
+## 4. Capping geometry — planarity
+
+- [ ] **MUST — capping H on a conjugated site lies in the ring plane.** UFF's
+      pyramidal default puts an NH₂ hydrogen ~0.85 Å out of plane, which is both
+      chemically wrong (aryl amines are near-planar from conjugation) and the
+      direct cause of interlayer clashes in stacked dimers.
+
+- [ ] Planarization applies when `sp == "N"` or `anchor_order >= 2`, fits a plane
+      by SVD over the conjugated system (BFS depth ≤3 from the anchor, N
+      included), and places H at ±120° sp² slots.
+      Guards: **≥5 atoms in the ring system** (`len(ring_atoms) < 5` bails), **flatness ≤ 0.35 Å**.
+
+- [ ] **Do not "fix" this by capping N with a single H.** It was considered and
+      rejected: measured NH1 sites were already 0.85 Å out of plane — no better
+      than NH2 — and a single H leaves a radical, breaking the multiplicity = 1
+      requirement.
+
+---
+
+## 5. Electron parity and multiplicity
+
+- [ ] **MUST — every fragment is closed-shell, multiplicity = 1.** This is a hard
+      project requirement, not a preference.
+
+- [ ] **Parity rule** — for a neutral closed-shell CHNO fragment, `h + n` must be
+      even (h = hydrogen count, n = nitrogen count).
+
+- [ ] **MUST — repair parity by ADDING an H, not removing one**, wherever a site
+      can accept it (`_can_accept_extra_h`: `_local_valence_used(idx) < target`).
+      Removal is gated off whenever an add-candidate exists. Removing H opens a
+      valence that was chemically correct.
+
+- [ ] **MUST — parity repair runs AFTER dimerization**, in both the Path J branch
+      and the A/B/C/D branch, with `capped_h_indices` extended across the
+      duplicated layer. Repairing the monomer first leaves the dimer odd (167).
+
+- [ ] Known residual: `142FragCofMin` is a true monomer with no benign parity
+      site (1 of 78). A `[QM WARNING] could not automatically fix odd electron
+      count` needs manual inspection — do not ship it silently.
+
+---
+
+## 6. Stacked dimers
+
+- [ ] **MUST — the layer is genuinely stackable before a dimer is built.**
+      Unified `_is_stackable_layer` criteria:
+      - flatness ≤ `max(0.6, 0.30 × |T|)` Å (relative to the translation, not absolute)
+      - alignment ≥ 0.8
+      - **measured** closest contact ≥ 2.4 Å
+
+- [ ] **MUST — dimer geometry within bounds:** interlayer separation 2.5–5.0 Å,
+      lateral offset ≤ 2.0 Å, closest contact ≥ 2.4 Å.
+
+- [ ] **MUST — the planarity guard covers every path, not just A/B/C/D.** Scoping
+      it narrowly passed on 20 structures purely by luck; at 100 structures
+      **48 of 63 clashing frames were non-flat Path J dimers**.
+
+- [ ] **Partner ops** — lattice translation, crystal symmetry op, or local screw
+      rotation, as `(R, t, local)`. Sort key `(|delta|, rotation_angle, -contact)`;
+      the rotation-angle term prefers the primitive screw (585 picked 180° over
+      the correct 60° without it).
+
+- [ ] **MUST — `lattice_reduce` slides laterally only.** Minimizing *total*
+      displacement collapses pure lattice translations to zero and silently
+      removes **every** dimer from the set.
+
+- [ ] **MUST — a local screw op is re-centred per block.** Applying it verbatim to
+      node and linker blocks (which have different centroids) puts the halves
+      33–38 Å apart.
+
+- [ ] **MUST — Path B cannot dimerize twice.** Guarded by `dimer_already_built`.
+
+- [ ] Expect roughly **1 dimer per 3 fragments** (331 dimers / 906 frames on the
+      300-structure validation).
+
+---
+
+## 7. Duplicate detection
+
+- [ ] **MUST — COF duplicates use the topology-aware key**: heavy-atom formula +
+      element-labelled Weisfeiler–Lehman hash of the heavy-atom bond graph.
+      Formula alone merges constitutional isomers.
+
+- [ ] **MUST NOT change the MOF key.** MOF duplicate detection remains
+      formula-only by deliberate decision. `_identity_key_fn` is selected by
+      `args.kind`; `_flush_cof_result` and `_flush_mof_result` keep separate keys.
+
+---
+
+## 8. MOF isolation — regression guard
+
+Standing project constraint: **COF work must never alter MOF results.**
+
+- [ ] **MUST — every COF-specific behaviour enters through a hook**: a no-op on
+      `BaseFragmenter`, overridden on `COFFragmenter`. Never inline a COF-only
+      helper into a `BaseFragmenter` method — `_local_valence_used` inlined into
+      `_cap_open_oxygens` would have raised `AttributeError` on every MOF run.
+
+- [ ] **MUST — verify identity, not intent**, after touching shared code:
+      ```python
+      MOFFragmenter._skip_saturated_h_cap is BaseFragmenter._skip_saturated_h_cap  # True
+      ```
+      For a COF-only method, assert it is not reachable from the MOF class at all:
+      ```python
+      hasattr(MOFFragmenter, '_prune_duplicate_cof_helper_files')  # False
+      ```
+
+- [ ] **MUST NOT apply COF-only heuristics to MOFs** — e.g. the reduction < 20
+      rule is COF-only by explicit decision.
+
+---
+
+## 9. Parent structure caveats
+
+- [ ] **MUST — parent CIFs stay untouched.** Every structure remains original;
+      all repair happens on the extracted fragment.
+
+- [ ] **Know the parent's own quality before blaming the fragmenter.**
+      **147 of 567 layered parents (26%)** have a genuine sub-2.0 Å *non-bonded*
+      interlayer contact in the source CIF. Heavy-atom contacts are healthy
+      (p50 = 3.27 Å) — it is hydrogen placement in the deposited structure.
+
+- [ ] **When measuring clashes, exclude pairs inside the covalent cutoff.** A
+      first attempt that counted covalent bonds crossing the cell boundary
+      reported 333/567 "clashing" parents; the corrected figure is 147/567.
+
+---
+
+## Appendix — validation methodology
+
+Anti-patterns that cost real time on this project:
+
+1. **Never justify a path-specific guard on 20 structures.** 20 is too small for
+   path coverage to be meaningful; the Path J planarity gap was invisible there
+   and obvious at 100.
+2. **Measure before adding a threshold.** The imine bond-length guard looked
+   chemically reasonable and would have destroyed 15% of the set. Percentiles
+   over the actual cut-bond population settled it in minutes.
+3. **Trust the failure count, not the exit code.** See §0.
+4. **RDKit `DetermineBonds` is combinatorial** and hangs indefinitely on ~800-atom
+   fragments. Any RDKit-level validation at set scale needs a per-fragment
+   timeout *and* an atom-count cap. The 300-structure validation used the
+   bond-order heuristic instead, not RDKit.
+5. **Distinguish "deduplicated" from "failed."** Both shrink the output; only one
+   is a problem. Always split the CSV three ways: produced / duplicate / ERROR.
+
+---
+
+## Reference baselines
+
+From the three-set validation (300 of 884 structures):
+
+| Metric | Value |
+|---|---|
+| Frames | 906 |
+| Valence correct | 98.8% |
+| Dimers | 331 |
+| Structures yielding fragments | 281 / 300 |
+| Min versions produced | 272 / 300 |
+| Clashing | 8 |
+| Over-valent | 11 |
+| Under-valent | 46 |
+| Odd-electron | 11 |
+
+A new full-set run should land at or better than these rates.
