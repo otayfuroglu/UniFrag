@@ -714,6 +714,12 @@ class BaseFragmenter:
     # Parity-repair policy. Defaults keep MOF and macromolecule behaviour
     # byte-identical; COFFragmenter overrides both.
     _prefer_h_addition_for_parity = False
+    # Which elements may accept the parity-repair hydrogen, and whether the
+    # narrow geometric filter around it applies. MOF keeps the original
+    # behaviour; COFFragmenter widens both (see its overrides).
+    _parity_add_eligible_elements = ("O", "N")
+    _parity_strict_add_geometry = True
+    _parity_add_validate = False
 
     def _can_accept_extra_h(self, idx, species, coords):
         """Hook: may this heavy atom take one more H? The base answer is yes,
@@ -761,17 +767,21 @@ class BaseFragmenter:
                     heavy.append(j)
             return heavy, h_nb
 
-        _ADD_ELIGIBLE = {"O", "N"}
+        _ADD_ELIGIBLE = set(self._parity_add_eligible_elements)
         add_candidates = []
         for i, sym in enumerate(species):
             if sym not in _ADD_ELIGIBLE:
                 continue
             heavy_nbs, h_nbs = _heavy_and_h_nbs(i)
-            if len(h_nbs) > 0:
-                continue
-            if sym == "O" and len(heavy_nbs) != 1:
-                continue
-            if sym == "N" and len(heavy_nbs) != 2:
+            if self._parity_strict_add_geometry:
+                if len(h_nbs) > 0:
+                    continue
+                if sym == "O" and len(heavy_nbs) != 1:
+                    continue
+                if sym == "N" and len(heavy_nbs) != 2:
+                    continue
+            elif not heavy_nbs:
+                # No anchor to point the new bond away from.
                 continue
             if not self._can_accept_extra_h(i, species, coords):
                 continue
@@ -811,6 +821,55 @@ class BaseFragmenter:
             capped_h_indices = [i - 1 if i > target_idx else i for i in new_caps]
             return species, coords, capped_h_indices
             
+        if add_candidates and self._parity_add_validate:
+            # Widening the candidate set is only safe if the hydrogen actually
+            # lands somewhere sane. The escalating fallback below ends at
+            # min_hh=0/min_heavy=0, which always "succeeds" by dropping the new
+            # H on top of an existing atom - that turned 39 odd-electron
+            # fragments into 24 over-coordinated ones, H(CC) alone going 1 -> 17.
+            # Here each candidate is tried in priority order, never below a safe
+            # separation, and a placement is kept only if the new H ends up
+            # bonded to exactly its own parent.
+            add_candidates.sort(key=lambda x: x[0], reverse=True)
+            for score, target_idx, group, heavy_nbs in add_candidates:
+                target_sym = species[target_idx]
+                parent_pos = coords_arr[target_idx]
+                if len(heavy_nbs) == 1:
+                    vec = parent_pos - coords_arr[heavy_nbs[0]]
+                    nn = np.linalg.norm(vec)
+                    base_vec = vec / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
+                else:
+                    vecs = [parent_pos - coords_arr[nb] for nb in heavy_nbs]
+                    avg = np.mean(vecs, axis=0)
+                    nn = np.linalg.norm(avg)
+                    base_vec = avg / nn if nn > 1e-9 else np.array([0.0, 0.0, 1.0])
+                bl = self.cap_bond_length(target_sym)
+                before = len(species)
+                for mhh in (1.5, 1.2, 1.0):
+                    self.place_capping_h(target_idx, base_vec, bl, species, coords,
+                                         min_hh=mhh, capped_h_flags=None)
+                    if len(species) > before:
+                        break
+                if len(species) == before:
+                    continue
+                new_idx = len(species) - 1
+                new_pos = np.asarray(coords[new_idx], dtype=float)
+                contacts = sum(
+                    1 for j in range(len(species))
+                    if j != new_idx
+                    and self.is_valid_bond(
+                        species[j], "H",
+                        float(np.linalg.norm(np.asarray(coords[j], dtype=float) - new_pos)),
+                    )
+                )
+                if contacts != 1:
+                    species.pop()
+                    coords.pop()
+                    continue
+                capped_h_indices.append(new_idx)
+                print(f"QM-Fix [{group}]: Added H to {target_sym}[{target_idx}] "
+                      f"to achieve even electron count for '{label}'.")
+                return species, coords, capped_h_indices
         if add_candidates:
             add_candidates.sort(key=lambda x: x[0], reverse=True)
             score, target_idx, group, heavy_nbs = add_candidates[0]
@@ -3245,6 +3304,16 @@ class COFFragmenter(BaseFragmenter):
         return True
 
     _prefer_h_addition_for_parity = True
+    # Every odd-electron COF fragment measured on CoRE-COF is neutral CHNO with
+    # h + n odd, so exactly one hydrogen repairs it. The base filter could not
+    # place that hydrogen anywhere: carbon was not eligible at all (which leaves
+    # a pure C/H fragment with no route whatsoever), any atom already carrying
+    # an H was skipped, and O/N needed an exact heavy-neighbour count. Carbon is
+    # added here and the geometric filter dropped; _can_accept_extra_h still
+    # gates every site on real spare valence, so nothing becomes over-valent.
+    _parity_add_eligible_elements = ("O", "N", "C")
+    _parity_strict_add_geometry = False
+    _parity_add_validate = True
 
     def _can_accept_extra_h(self, idx, species, coords):
         """COF-only: only let an atom take another H if bond order leaves room.
