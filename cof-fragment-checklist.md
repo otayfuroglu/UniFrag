@@ -99,6 +99,24 @@ mean the run succeeded.**
       p95 = 1.447 Å. A 1.36 Å cutoff makes **15 of 100 structures lose every cut**
       (543 and 585 among them). The rule's length-blindness is load-bearing.
 
+- [ ] **Secondary amine (C–N) rule** — N with exactly two heavy neighbours,
+      both carbon, and exactly one H, outside a small ring. The flanking carbons
+      are NOT both aromatic: measured on 1015 and 525 every bridging N has one
+      ring carbon and one non-ring carbon, so an aryl-only guard matches nothing
+      and was rejected. The rule abstains on tertiary triarylamine nodes (three
+      C, no H), primary amine substituents (one C, two H) and ring N such as
+      carbazole. Without it these structures sever nothing, fall through to Path
+      A radius truncation and that capper leaves the amine N with four bonds.
+      Measured cost/benefit over the full 884 (A/B, separate checkouts):
+      `no_linkage` 43->40, over-coordinated 71->67, odd-electron 40->39,
+      mis-capped 292->287, clashing 835->828, but detached-junk frames 5->7
+      (525 gains four 10-atom pieces). Net positive; 525 remains open.
+
+- [ ] **MUST — a fragment is one connected molecule, or two for a dimer.** A
+      dimer's halves are comparable in size, so anything below ~40% of the
+      largest piece is detached junk, not a layer. Baseline: 5 of 1737 frames
+      (1103 carries six lone H, 1179 three detached 14-atom pieces).
+
 - [ ] **Biaryl (C–C) fallback** — runs *only* when no other edge was found. Fuse
       rings ≤7 into ring systems; a biaryl bond joins two different systems and
       lies outside any ring; sever only bonds touching a system of degree ≥3.

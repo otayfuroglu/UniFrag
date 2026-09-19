@@ -174,8 +174,13 @@ class COF:
                     edges_to_remove.append((u, v))
                     linkage_of[frozenset((u, v))] = ('imine', frozenset((u, v)))
                 elif (
-                    # Secondary aryl amine linkage, Ar-NH-Ar. The bridging N
-                    # carries exactly two heavy neighbours - both carbon - and
+                    # Secondary amine linkage. Measured on CoRE-COF the motif
+                    # is Ar-NH-CH2- rather than the Ar-NH-Ar it was designed
+                    # for: in both 1015 and 525 every bridging N has exactly one
+                    # ring carbon and one non-ring carbon, so an "both carbons
+                    # aromatic" guard was tried and rejected - it matched
+                    # nothing. The bridging N carries exactly two heavy
+                    # neighbours - both carbon - and
                     # exactly one H, which is what separates it from a tertiary
                     # triarylamine NODE (three C, no H, degree 3), a primary
                     # amine substituent (one C, two H, degree 1) and a ring N
