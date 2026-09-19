@@ -249,6 +249,16 @@ mean the run succeeded.**
       and the A/B/C/D branch, with `capped_h_indices` extended across the
       duplicated layer. Repairing the monomer first leaves the dimer odd (167).
 
+- [ ] **MUST — the main collection contains no open-shell fragment.** Anything
+      that still has an odd electron count after the repair is written to
+      `fragments_quarantine.extxyz` instead of `fragments_collection.extxyz`,
+      tagged in its own comment line (`quarantine=odd_electron zsum=N`) and
+      announced per fragment in the log plus a closing `QUARANTINE:` summary.
+      So `odd_electron` in a checklist report on the main collection should read
+      0; the count to watch is the size of the quarantine file. Current residue
+      is 5 of 1737: `1005FragCofOnlyLinker`, `1104FragCof`, `1104FragCofMin`,
+      `615FragCofOnlyLinker`, `744FragCofMin`.
+
 - [ ] Known residual: `142FragCofMin` is a true monomer with no benign parity
       site (1 of 78). A `[QM WARNING] could not automatically fix odd electron
       count` needs manual inspection — do not ship it silently.

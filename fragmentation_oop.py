@@ -14,14 +14,31 @@ class FragmentResult:
     coords: list
 
 
-def _write_extxyz(filepath, species, coords, label):
+_EXTXYZ_Z = {
+    "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
+    "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17,
+    "Ar": 18, "K": 19, "Ca": 20, "Ti": 22, "V": 23, "Cr": 24, "Mn": 25, "Fe": 26,
+    "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30, "Ga": 31, "Ge": 32, "As": 33,
+    "Se": 34, "Br": 35, "Zr": 40, "Mo": 42, "Ru": 44, "Rh": 45, "Pd": 46,
+    "Ag": 47, "Cd": 48, "In": 49, "Sn": 50, "Sb": 51, "Te": 52, "I": 53,
+    "W": 74, "Pt": 78, "Au": 79, "Hg": 80, "Pb": 82, "Bi": 83,
+}
+
+
+def _electron_count(species):
+    """Total electron count of a neutral fragment. Odd means an open shell."""
+    return sum(_EXTXYZ_Z.get(s, 6) for s in species)
+
+
+def _write_extxyz(filepath, species, coords, label, extra=""):
     """
     Writes a molecular fragment to an ExtXYZ file.
     Does not require any external library (like ASE) to ensure zero-dependency robustness.
     """
+    suffix = f" {extra}" if extra else ""
     with open(filepath, "a") as f:
         f.write(f"{len(species)}\n")
-        f.write(f"Properties=species:S:1:pos:R:3 label={label} pbc=\"F F F\"\n")
+        f.write(f"Properties=species:S:1:pos:R:3 label={label}{suffix} pbc=\"F F F\"\n")
         for sym, pos in zip(species, coords):
             f.write(f"{sym:<8}{pos[0]:16.8f}{pos[1]:16.8f}{pos[2]:16.8f}\n")
 
@@ -7237,6 +7254,10 @@ def main():
 
         csv_path = os.path.join(out_dir, "fragmentation_summary.csv")
         extxyz_path = os.path.join(out_dir, "fragments_collection.extxyz")
+        # Fragments that survive the parity repair with an odd electron count are
+        # open-shell and would need multiplicity != 1, so they never enter the
+        # main collection; they are held here instead, labelled with why.
+        quarantine_path = os.path.join(out_dir, "fragments_quarantine.extxyz")
         
         seen_keys = set()
         _identity_key_fn = (
@@ -7333,11 +7354,26 @@ def main():
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
 
+            clean_frags, odd_frags = [], []
+            for species, coords, frag_name in new_extxyz_frags:
+                z = _electron_count(species)
+                if z % 2:
+                    odd_frags.append((species, coords, frag_name, z))
+                else:
+                    clean_frags.append((species, coords, frag_name))
+            for _sp, _co, frag_name, z in odd_frags:
+                print(f"  -> QUARANTINED '{frag_name}': odd electron count "
+                      f"(Z_sum={z}); held in fragments_quarantine.extxyz, "
+                      f"not written to the main collection.")
+
             if is_dir:
                 with open(csv_path, "a") as f:
                     f.write(csv_row)
-                for species, coords, frag_name in new_extxyz_frags:
+                for species, coords, frag_name in clean_frags:
                     _write_extxyz(extxyz_path, species, coords, frag_name)
+                for species, coords, frag_name, z in odd_frags:
+                    _write_extxyz(quarantine_path, species, coords, frag_name,
+                                  extra=f"quarantine=odd_electron zsum={z}")
             else:
                 base_name = r["cif"]
                 if base_name.endswith(".cif"): base_name = base_name[:-4]
@@ -7349,7 +7385,12 @@ def main():
                     [csv_row], 
                     "cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n"
                 )
-                _update_extxyz_collection(extxyz_path, clean_base, new_extxyz_frags)
+                _update_extxyz_collection(extxyz_path, clean_base, clean_frags)
+                if odd_frags:
+                    _update_extxyz_collection(
+                        quarantine_path, clean_base,
+                        [(sp, co, nm) for sp, co, nm, _z in odd_frags],
+                    )
 
         if is_dir and args.nproc > 1:
             print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
@@ -7364,6 +7405,10 @@ def main():
         print(f"CSV summary updated at: {csv_path}")
         if os.path.exists(extxyz_path):
             print(f"ExtXYZ collection updated at: {extxyz_path}")
+        if os.path.exists(quarantine_path):
+            n_q = len(_parse_extxyz(quarantine_path))
+            print(f"QUARANTINE: {n_q} open-shell fragment(s) held at {quarantine_path} "
+                  f"(odd electron count; excluded from the main collection).")
 
     else:  # bio
         import os
