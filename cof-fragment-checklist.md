@@ -126,6 +126,21 @@ mean the run succeeded.**
       linkage** (411). Carry-over is allowed only for `_CARRYOVER_ELEMENTS` or an
       explicit `vinylene_partner` pair.
 
+- [ ] **MUST — no orphaned bridging unit.** A linkage rule matches a bond
+      pattern, not a whole linkage, so it can sever EVERY bond around a small
+      bridge and leave it floating: `Ar-NH-Ar` loses both C-N bonds (931), an
+      `-N=N-N-` triazene is cut on all sides (645), a C bridging two N likewise
+      (1226). The orphan guard in `coffragmentor` restores one cut per component
+      with fewer than 4 heavy atoms, so the unit stays attached as a proper
+      terminus. Do not raise that threshold past 4 without re-measuring: a
+      boroxine `B3O3` node is carbon-free with 6 heavy atoms and must survive.
+
+- [ ] **MUST — guest and solvent molecules are not exported as linkers.** A
+      component with ZERO severed bonds was already disconnected in the parent
+      (929 carries six water/hydroxyl molecules). It reaches the classifier with
+      no linkages, falls below the `>= 3` node test and would otherwise be
+      emitted as a linker.
+
 - [ ] **k+k symmetric frameworks** — when classification yields no linkers but
       more than one node, the symmetric tie-break demotes all but the smallest
       `(smiles, n_atoms)` group to linkers. Without it, symmetric COFs return
@@ -155,6 +170,24 @@ mean the run succeeded.**
       were native alkyl side chains present in the parent CIF (e.g. 502's `C[27]`
       carries 3 H in the raw block, an `–O–CH₂–CH₃` ethoxy). Check the parent
       before blaming the capper.
+
+- [ ] **MUST — no superimposed atoms.** Fragment assembly can emit the same
+      atom twice - a carried-over heteroatom the 0.1 A guard in `coffragmentor`
+      misses, a linker image on an already-filled site, a dimer layer
+      overlapping its source. Duplicates land 0.15-0.75 A apart and surface as
+      hydrogens with two bonds and carbons with six; because each copy carries
+      its own electrons they ALSO flip the parity that the multiplicity repair
+      is about to fix. `_dedupe_superimposed_atoms` (COF-only hook, runs inside
+      `fix_odd_electron_multiplicity` before the repair) drops anything within
+      0.85 A - below the shortest real bond here, O-H at ~0.96 A. Baseline
+      before the fix: 42 of 1695 frames affected.
+
+- [ ] **Separate inherited damage from capping bugs before chasing one.** Check
+      the PARENT for the same defect. Measured on the failing set: 284's parent
+      has a 0.78 A minimum distance and **80 over-coordinated atoms of its own**;
+      1091's is 0.75 A; 1180/526/671 carry genuine quaternary `N(CCCC)`. Those
+      are inherited and unfixable downstream. Only structures whose parent is
+      clean (1015, 1061, 1112, 1128, 652, 900, 901) indicate a real capping bug.
 
 - [ ] **SHOULD — under-valent sites are reviewed.** They are less damaging than
       over-valent ones but still distort the electronic structure. Baseline on
@@ -294,6 +327,11 @@ Standing project constraint: **COF work must never alter MOF results.**
 
 Anti-patterns that cost real time on this project:
 
+0. **Clear the output directory before a re-run.** UniFrag deduplicates
+   against the existing `fragments_collection.extxyz`, so re-running in place
+   after a code change silently reproduces the OLD result: the log goes quiet
+   and the frames come back byte-identical. Delete the extxyz, the CSV and both
+   helper libraries first, or you will validate the fix you did not apply.
 1. **Never justify a path-specific guard on 20 structures.** 20 is too small for
    path coverage to be meaningful; the Path J planarity gap was invisible there
    and obvious at 100.

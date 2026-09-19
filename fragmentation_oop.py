@@ -720,7 +720,14 @@ class BaseFragmenter:
         reproducing the previous behaviour; COFFragmenter checks bond order."""
         return True
 
+    def _dedupe_superimposed_atoms(self, species, coords, capped_h_indices, label=""):
+        """No-op for MOFs. COFFragmenter overrides it; see that docstring."""
+        return species, coords, capped_h_indices
+
     def fix_odd_electron_multiplicity(self, species, coords, capped_h_indices, label):
+        species, coords, capped_h_indices = self._dedupe_superimposed_atoms(
+            species, coords, capped_h_indices, label=label
+        )
         _ATOMIC_NUMBERS = {
             "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
             "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17,
@@ -3467,6 +3474,50 @@ class COFFragmenter(BaseFragmenter):
                 if not (0.7 < bl < 1.3):
                     bl = self.cap_bond_length(species[n_idx])
                 coords[h] = npos + bl * direction
+
+    def _dedupe_superimposed_atoms(self, species, coords, capped_h_indices, label="", tol=0.85):
+        """Drop atoms that sit on top of another atom.
+
+        Assembling a COF fragment can emit the same atom twice: a carried-over
+        heteroatom that the 0.1 A guard in coffragmentor does not recognise as
+        already present, a linker image placed at a site an earlier image
+        already filled, or a dimer layer overlapping the layer it was built
+        from. The duplicates land 0.15-0.7 A apart - far below any real bond -
+        so they show up as hydrogens with two bonds and carbons with six, and
+        because each copy carries its own electrons they also flip the parity
+        that fix_odd_electron_multiplicity is about to repair. Removing them
+        here, before that repair, fixes both symptoms at once.
+
+        A heavy atom always wins over a hydrogen sitting on it, so a real atom
+        is never discarded in favour of a stray cap. The 0.85 A default sits
+        below every real bond in this chemistry - the shortest is O-H at about
+        0.96 A - and above the largest duplicate separation observed (0.75 A).
+        """
+        n = len(species)
+        if n < 2:
+            return species, coords, capped_h_indices
+        co = np.asarray(coords, dtype=float)
+        # Heavy atoms first, so a heavy/H overlap always keeps the heavy atom.
+        order = sorted(range(n), key=lambda i: (species[i] == "H", i))
+        dropped = set()
+        for a_pos, i in enumerate(order):
+            if i in dropped:
+                continue
+            for j in order[a_pos + 1:]:
+                if j in dropped:
+                    continue
+                if float(np.linalg.norm(co[i] - co[j])) < tol:
+                    dropped.add(j)
+        if not dropped:
+            return species, coords, capped_h_indices
+        keep = [i for i in range(n) if i not in dropped]
+        remap = {old: new for new, old in enumerate(keep)}
+        new_species = [species[i] for i in keep]
+        new_coords = [np.array(coords[i], dtype=float) for i in keep]
+        new_capped = [remap[i] for i in capped_h_indices if i in remap]
+        print(f"QM-Fix [superimposed]: dropped {len(dropped)} duplicate atom(s) "
+              f"from '{label}' (closest pair < {tol} A).")
+        return new_species, new_coords, new_capped
 
     def _make_cof_qm_ready(self, species, coords, label="only_frag"):
         """COF-only QM-ready capper for standalone node/linker building blocks.

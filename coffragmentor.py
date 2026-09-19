@@ -352,6 +352,55 @@ class COF:
                             edges_to_remove.append((u, v))
                             linkage_of[frozenset((u, v))] = ('biaryl', frozenset((u, v)))
 
+        # 2b. Orphan guard. A linkage rule matches a bond pattern, not a whole
+        # linkage, so it can sever EVERY bond around a small bridging unit and
+        # leave it floating: an Ar-NH-Ar secondary amine loses both C-N bonds
+        # (931), an -N=N-N- triazene chain is cut on all sides (645), a C
+        # bridging two N likewise (1226). The residue is a 1-3 heavy-atom
+        # "linker" that is meaningless as a QM fragment. Restore one cut per
+        # orphan so the unit stays attached to its largest neighbour and becomes
+        # a proper terminus instead (Ar-NH- then caps to Ar-NH2).
+        MIN_STRUT_HEAVY = 4
+        for _ in range(12):
+            trial = nx.Graph(undirected_graph)
+            trial.remove_edges_from(edges_to_remove)
+            comps = list(nx.connected_components(trial))
+            if len(comps) <= 1:
+                break
+            comp_of, heavy_of = {}, {}
+            for k, comp in enumerate(comps):
+                heavy_of[k] = sum(
+                    1 for i in comp if self.structure[i].specie.symbol != 'H'
+                )
+                for i in comp:
+                    comp_of[i] = k
+            orphans = [k for k, h in heavy_of.items() if h < MIN_STRUT_HEAVY]
+            if not orphans:
+                break
+            restored = False
+            for k in orphans:
+                # Cuts with exactly one endpoint inside this orphan.
+                cands = [
+                    (u, v) for (u, v) in edges_to_remove
+                    if (comp_of.get(u) == k) != (comp_of.get(v) == k)
+                ]
+                if not cands:
+                    # Nothing was severed here: it is a guest/solvent molecule
+                    # that was already disconnected in the parent, not an
+                    # orphan we created. Leave it for the zero-cut skip below.
+                    continue
+                best = max(
+                    cands,
+                    key=lambda e: heavy_of.get(
+                        comp_of.get(e[1]) if comp_of.get(e[0]) == k else comp_of.get(e[0]), 0
+                    ),
+                )
+                edges_to_remove.remove(best)
+                linkage_of.pop(frozenset(best), None)
+                restored = True
+            if not restored:
+                break
+
         # 3. Cleave the bonds in the graph
         undirected_graph.remove_edges_from(edges_to_remove)
         
@@ -458,6 +507,14 @@ class COF:
                             carried.append(
                                 (neighbor, self.structure.lattice.get_cartesian_coords(nb_frac))
                             )
+
+            # A genuine node or linker is attached to the framework by at
+            # least one severed bond. A component with none was already
+            # disconnected in the parent CIF - pore solvent or a guest (929
+            # carries six water/hydroxyl molecules) - and must not be exported
+            # as a linker just because it has fewer than three linkages.
+            if not cut_bonds:
+                continue
 
             # Append carried heteroatoms, skipping positions already present.
             for nb_idx, nb_coord in carried:
