@@ -99,18 +99,25 @@ mean the run succeeded.**
       p95 = 1.447 Å. A 1.36 Å cutoff makes **15 of 100 structures lose every cut**
       (543 and 585 among them). The rule's length-blindness is load-bearing.
 
-- [ ] **Secondary amine (C–N) rule** — N with exactly two heavy neighbours,
-      both carbon, and exactly one H, outside a small ring. The flanking carbons
-      are NOT both aromatic: measured on 1015 and 525 every bridging N has one
-      ring carbon and one non-ring carbon, so an aryl-only guard matches nothing
-      and was rejected. The rule abstains on tertiary triarylamine nodes (three
-      C, no H), primary amine substituents (one C, two H) and ring N such as
-      carbazole. Without it these structures sever nothing, fall through to Path
-      A radius truncation and that capper leaves the amine N with four bonds.
-      Measured cost/benefit over the full 884 (A/B, separate checkouts):
-      `no_linkage` 43->40, over-coordinated 71->67, odd-electron 40->39,
-      mis-capped 292->287, clashing 835->828, but detached-junk frames 5->7
-      (525 gains four 10-atom pieces). Net positive; 525 remains open.
+- [ ] **Secondary amine (C-N) rule - TRIED AND REVERTED, do not re-add
+      without a per-structure review.** N with two heavy neighbours, both
+      carbon, and one H, outside a small ring. It looked good on aggregate
+      metrics over the full 884 (`no_linkage` 43->40, over-coordinated 71->67,
+      odd-electron 40->39, mis-capped 292->287, clashing 835->828) and it did
+      fix 1015, moving it off Path A onto Path J with a clean dimer.
+      It was still wrong. The real motif is `Ar-NH-CH2-R`, not `Ar-NH-Ar`, and
+      when the aliphatic side is a dead-end tail the cut detaches a pendant
+      substituent that the linkage-count classifier then calls a linker. On
+      1180 it emitted an 11-atom `HN-CH2-C(=O)-CH3` scrap AND destroyed a
+      previously correct decomposition - two proper nodes (61 and 81 atoms)
+      vanished. On 525 it split fragments into five disconnected pieces.
+      Two guards were tried and both failed: requiring both flanking carbons
+      to be aromatic matched nothing (every bridging N has exactly one ring and
+      one non-ring carbon), and rejecting components with a single attachment
+      point did not catch the scrap either.
+      **Lesson: aggregate valence/clash metrics cannot see "this is not
+      chemically a strut."** Every linkage-chemistry change needs a
+      per-structure eyeball on the blocks it creates, not just a metric diff.
 
 - [ ] **MUST — a fragment is one connected molecule, or two for a dimer.** A
       dimer's halves are comparable in size, so anything below ~40% of the
