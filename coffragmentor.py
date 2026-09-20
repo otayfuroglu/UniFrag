@@ -128,7 +128,17 @@ class COF:
             _nbrs = list(undirected_graph.neighbors(_h))
             if len(_nbrs) <= 1:
                 continue
-            _keep = min(_nbrs, key=lambda j: self.structure.get_distance(_h, j))
+            # Prefer the nearest HEAVY neighbour, not the nearest neighbour of
+            # any kind. 70 has a disordered hydrogen cluster where H[23] sits
+            # 1.07 A from its carbon but only 0.86 A from another H; picking
+            # the bare minimum would keep that H-H pair and throw away the real
+            # C-H bond.
+            _heavy = [
+                j for j in _nbrs
+                if self.structure[j].specie.symbol != 'H'
+            ]
+            _pool = _heavy or _nbrs
+            _keep = min(_pool, key=lambda j: self.structure.get_distance(_h, j))
             for _nb in _nbrs:
                 if _nb == _keep:
                     continue

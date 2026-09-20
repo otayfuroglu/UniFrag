@@ -79,6 +79,33 @@ mean the run succeeded.**
       not disconnect anything. Treat `linkages recognised` followed by a
       `Path A` line as a failure signal, not a success.
 
+## 0c. Guest / solvent removal (pre-processing)
+
+Run `runUniFrag/remove_guest_molecules.py` over the raw CIFs BEFORE fragmenting
+and point UniFrag at the cleaned collection. Originals are never modified.
+
+- [ ] **MUST — strip finite (non-periodic) components.** A framework is
+      periodic: following its bonds you leave the unit cell and return to the
+      same atom in a different lattice image. A guest closes on itself with zero
+      net translation. That, not size or composition, is the discriminator, and
+      it is what the script tests (BFS carrying each atom's lattice image).
+- [ ] **MUST — leave a structure alone when no periodic component is found.**
+      Otherwise "remove every finite component" deletes the whole thing. The
+      script flags these as `no_framework_detected__left_unchanged`.
+- [ ] Measured on the 884 HCNO set: **11 structures carry guests, 436 atoms
+      removed**. 1180 holds **28 acetone molecules (280 atoms)**, 476 holds
+      C12H18N3O and C8H8O2, 267 a C20H12, 929/930 water and hydroxyl, and five
+      more carry stray single hydrogens.
+- [ ] Cross-checked against the CSD toolkit (`component.is_polymeric`):
+      **10/11 exact atom-count agreement, 0 false negatives in 40 sampled
+      "clean" structures**. The one difference is 70, whose disordered H cluster
+      puts a hydrogen 1.07 A from a carbon and 0.86 A from another hydrogen;
+      CSD calls it isolated, we bond it. Ambiguous input, not a systematic
+      disagreement.
+- [ ] **Guests are not harmless.** In 1180 the acetone made the decomposition
+      emit two confused nodes; on the cleaned CIF it gives one node (C25H24N4)
+      and one linker (C32H30N2O4).
+
 ## 1. Linkage recognition
 
 - [ ] **MUST — at least one bond severed**, unless the framework is genuinely
