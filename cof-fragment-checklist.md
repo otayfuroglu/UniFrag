@@ -102,9 +102,19 @@ and point UniFrag at the cleaned collection. Originals are never modified.
       puts a hydrogen 1.07 A from a carbon and 0.86 A from another hydrogen;
       CSD calls it isolated, we bond it. Ambiguous input, not a systematic
       disagreement.
-- [ ] **Guests are not harmless.** In 1180 the acetone made the decomposition
-      emit two confused nodes; on the cleaned CIF it gives one node (C25H24N4)
-      and one linker (C32H30N2O4).
+- [ ] **Guests are not harmless when a structure is fragmented on its own.** In
+      1180 the acetone made the decomposition emit two confused nodes; on the
+      cleaned CIF it gives one node (C25H24N4) and one linker (C32H30N2O4).
+
+- [ ] **But measured over the full 884, cleaning changed nothing.** A complete
+      run on the cleaned collection reproduced the uncleaned numbers, and NONE
+      of the 11 cleaned structures moved on any metric - 476 and 929 emit
+      byte-identical fragments either way. The reason is that UniFrag already
+      discards guests downstream: the zero-cut-component skip in
+      `coffragmentor` drops any block with no severed bond, which is exactly
+      what a guest is. Treat this pass as a guarantee and a hygiene step for
+      per-structure work, not as something that will move the aggregate
+      numbers.
 
 ## 1. Linkage recognition
 
