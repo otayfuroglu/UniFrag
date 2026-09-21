@@ -54,8 +54,18 @@ mean the run succeeded.**
       bonds); use `--timeout 1800` for full-set runs. Timed-out CIFs are moved to
       `cifs/timed_out_structures/` and must be restored before a rerun.
 
+- [ ] **MUST — the log is complete before any log-derived metric is quoted.**
+      Twenty workers share one redirected stdout and lines get clobbered; one
+      full-set run kept all 884 structures, the next lost 60% of them while
+      still writing a complete CSV and extxyz. An incomplete log makes
+      `QM WARNING` and `no known linkage chemistry` look better than they are.
+      ```bash
+      grep -oE "cifs/[0-9]+\.cif" log.out | sort -u | wc -l   # must equal n_input_cifs
+      ```
+
 - [ ] **SHOULD — record counts of `QM WARNING` and `no known linkage chemistry`**
-      as the run's quality baseline, so regressions are visible next time.
+      as the run's quality baseline, so regressions are visible next time. Only
+      after the completeness check above passes.
 
 ---
 
@@ -466,20 +476,20 @@ Anti-patterns that cost real time on this project:
 ## Reference baselines
 
 Full 884-structure CoRE-COF runs, scored by `runUniFrag/check_cof_fragments.py`.
-Each column is one complete run; `d2f2054` is current.
+Each column is one complete run; `a2bff35` is current.
 
-| metric | pre-fix | +dedup/orphan `e28ee72` | +amine `5fd407d` | +parity `371c362` | +clearance `d2f2054` |
-|---|---|---|---|---|---|
-| frames | 1695 | 1737 | 1737 | 1737 | 1737 |
-| ERROR structures | 329 | 0 | 0 | 0 | 0 |
-| degenerate helpers | 4 | 0 | 0 | 0 | 0 |
-| **odd-electron** | 34 | 40 | 39 | **5** | **5** |
-| QM warnings | 47 | 68 | 66 | 10 | 11 |
-| over-coordinated | 96 | 71 | 67 | 69 | 70 |
-| mis-capped terminals | - | 292 | 287 | 214 | 212 |
-| clashing (<2.0 A) | 808 | 835 | 828 | 849 | 842 |
-| detached-junk frames | - | 5 | 7 | 5 | 5 |
-| no recognised linkage | 41 | 43 | 40 | 37 | 40 |
+| metric | pre-fix | +dedup/orphan `e28ee72` | +amine `5fd407d` | +parity `371c362` | +clearance `d2f2054` | +quarantine/H-prune `81dcfc4` | +partner-op `a2bff35` |
+|---|---|---|---|---|---|---|---|
+| frames | 1695 | 1737 | 1737 | 1737 | 1737 | 1727 | 1726 |
+| ERROR structures | 329 | 0 | 0 | 0 | 0 | 0 | 0 |
+| degenerate helpers | 4 | 0 | 0 | 0 | 0 | 0 | 0 |
+| **odd-electron** (main) | 34 | 40 | 39 | **5** | **5** | **0** | **0** |
+| QM warnings | 47 | 68 | 66 | 10 | 11 | 12 | 3* |
+| over-coordinated | 96 | 71 | 67 | 69 | 70 | 66 | 66 |
+| mis-capped terminals | - | 292 | 287 | 214 | 212 | 212 | 213 |
+| clashing (<2.0 A) | 808 | 835 | 828 | 849 | 842 | 841 | 836 |
+| detached-junk frames | - | 5 | 7 | 5 | 5 | 1 | 1 |
+| no recognised linkage | 41 | 43 | 40 | 37 | 40 | 44 | 20* |
 
 Read the columns as cumulative, not independent: each adds to the one before.
 `no recognised linkage` moves by a few between otherwise identical runs because
@@ -490,6 +500,28 @@ The parity repair is the single biggest win (odd-electron 39 -> 5) and it paid
 for itself in mis-capped sites too (287 -> 212). It cost clashes (828 -> 849);
 the clearance pass recovered a third of that (-> 842) and no more, because the
 remaining contacts are 1.8-2.0 A H...H pairs where no roomier site exists.
+
+From `81dcfc4` on, `odd-electron (main)` is zero because the five unfixable
+fragments are written to `fragments_quarantine.extxyz` instead of the main
+collection. They have not been repaired - count the quarantine file, not this
+row, when asking how many remain. The same commit's monovalent-H prune is what
+moved `detached-junk frames` 5 -> 1 and `over-coordinated` 70 -> 66.
+
+\* **The two starred `a2bff35` numbers are undercounts, not improvements.**
+Both are counted by grepping `log.out`, and that run's log lost roughly 60% of
+its worker output: only 347 of 884 structures appear in it, though the CSV has
+all 884 rows and the extxyz has every frame. Twenty parallel workers share one
+redirected stdout, so lines can be clobbered; the previous run happened to keep
+all 884. Every other row in the table is measured from the extxyz and is
+unaffected. **Before quoting a log-derived metric, check
+`grep -oE "cifs/[0-9]+\.cif" log.out | sort -u | wc -l` equals the input
+count.** If it does not, re-derive that metric from a run whose log is complete,
+or write per-worker log files.
+
+`a2bff35` re-centres crystal-symmetry partner operations on each helper block.
+The scattered-piece check (pieces more than 5 A apart) goes from the 481-class
+defect to 0 fragments. Frames drop by one because two helper dimers now collapse
+to monomers when the stacked copy would clash below 2.4 A.
 
 ### Known-unfixable residue
 
