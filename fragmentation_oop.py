@@ -3222,6 +3222,25 @@ class COFFragmenter(BaseFragmenter):
             f"(interlayer separation {sep:.2f} A, lateral offset {lateral:.2f} A, "
             f"closest contact {-neg_contact:.2f} A)."
         )
+        # Return every operation in BLOCK-LOCAL form: rotate about the block's
+        # own centroid and translate by the net displacement this operation
+        # produces. For the fragment the op was fitted to that is algebraically
+        # identical to R @ x + t (verified to 1e-15), so the assembled dimer is
+        # unchanged - but it is the only form that survives being re-applied to
+        # the node and linker blocks, whose centroids sit elsewhere in the cell.
+        #
+        # 481 is the case in point. Its partner is a 90-degree crystal symmetry
+        # operation carrying |t| = 30.24 A; about the origin that nets to a
+        # 3.54 A interlayer shift for the fragment, but applied verbatim to the
+        # helper blocks it threw the two halves 30 A (node) and 45 A (linker)
+        # apart. A `local` op was already converted this way - that fix simply
+        # never reached the crystal-symmetry branch.
+        if not local:
+            c_ref = np.asarray(
+                [np.asarray(c, dtype=float) for c in coords]
+            ).mean(axis=0)
+            t = R @ c_ref + t - c_ref
+            local = True
         return R, t, local
 
     def _report_linkage_recognition(self, result, cif_path):
@@ -3277,6 +3296,28 @@ class COFFragmenter(BaseFragmenter):
         else:
             moved = pts @ R.T + t
         return [row for row in moved]
+
+    @staticmethod
+    def _dimerize_block(partner, sp, co, label=""):
+        """Stack a second layer onto ONE building block, or leave it a monomer.
+
+        The assembled fragment is only dimerised after passing a measured
+        contact test, but the node and linker blocks were duplicated with no
+        such check. Re-applying 481's partner operation to its linker puts the
+        two halves 1.7 A apart - a clash, and useless for QM. A monomer is the
+        honest answer when the stacked copy will not fit.
+        """
+        moved = COFFragmenter._apply_partner_op(partner, co)
+        a = np.asarray([np.asarray(c, dtype=float) for c in co])
+        b = np.asarray([np.asarray(c, dtype=float) for c in moved])
+        contact = float(
+            np.min(np.linalg.norm(a[:, None, :] - b[None, :, :], axis=-1))
+        )
+        if contact < 2.4:
+            print(f"  -> COF dimer skipped for '{label}': stacked copy would "
+                  f"clash at {contact:.2f} A (< 2.40); emitting the monomer.")
+            return list(sp), [np.asarray(c, dtype=float) for c in co]
+        return list(sp) + list(sp), [np.asarray(c, dtype=float) for c in co] + moved
 
     def _is_stackable_layer(self, species, coords, layer_vec, label=""):
         """True when a fragment is a flat sheet lying perpendicular to
@@ -6839,8 +6880,9 @@ def _process_cof_file(args_tuple):
             if extracted_linkers_snapshot:
                 for idx, (lsp, lco) in enumerate(extracted_linkers_snapshot):
                     if partner_op_snapshot is not None:
-                        lsp_final = lsp + lsp
-                        lco_final = list(lco) + COFFragmenter._apply_partner_op(partner_op_snapshot, lco)
+                        lsp_final, lco_final = COFFragmenter._dimerize_block(
+                            partner_op_snapshot, lsp, lco,
+                            label=f"{base}FragCofOnlyLinker")
                     else:
                         lsp_final = list(lsp)
                         lco_final = [np.array(c) for c in lco]
@@ -6855,8 +6897,9 @@ def _process_cof_file(args_tuple):
             if extracted_nodes_snapshot:
                 for idx, (nsp, nco) in enumerate(extracted_nodes_snapshot):
                     if partner_op_snapshot is not None:
-                        nsp_final = nsp + nsp
-                        nco_final = list(nco) + COFFragmenter._apply_partner_op(partner_op_snapshot, nco)
+                        nsp_final, nco_final = COFFragmenter._dimerize_block(
+                            partner_op_snapshot, nsp, nco,
+                            label=f"{base}FragCofOnlyNode")
                     else:
                         nsp_final = list(nsp)
                         nco_final = [np.array(c) for c in nco]

@@ -359,6 +359,23 @@ and point UniFrag at the cleaned collection. Originals are never modified.
       displacement collapses pure lattice translations to zero and silently
       removes **every** dimer from the set.
 
+- [ ] **MUST — EVERY partner op is re-centred per block, crystal-symmetry ops
+      included.** A global op `R @ x + t` is only correct for the fragment it
+      was fitted to. 481's partner is a 90-degree crystal symmetry operation
+      carrying `|t| = 30.24 A`; about the origin that nets to a 3.54 A
+      interlayer shift for the fragment, but applied verbatim to the helper
+      blocks it threw the halves **30 A (node) and 45 A (linker)** apart while
+      the assembled dimer looked perfect. `_find_stacked_partner` now returns
+      every op in block-local form, `d = R @ c_ref + t - c_ref`, which is
+      algebraically identical for the reference fragment (verified to 1e-15)
+      and correct everywhere else. Check helper blocks, not just `FragCof`.
+
+- [ ] **MUST — a helper block's dimer passes the same contact test as the
+      fragment's.** Node and linker blocks were duplicated with no check at all.
+      Once 481's linker was placed at the right separation it clashed at 1.91 A,
+      so it is now emitted as a monomer instead. A clashing dimer is as useless
+      as a scattered one.
+
 - [ ] **MUST — a local screw op is re-centred per block.** Applying it verbatim to
       node and linker blocks (which have different centroids) puts the halves
       33–38 Å apart.
