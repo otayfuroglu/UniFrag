@@ -102,9 +102,15 @@ and point UniFrag at the cleaned collection. Originals are never modified.
       puts a hydrogen 1.07 A from a carbon and 0.86 A from another hydrogen;
       CSD calls it isolated, we bond it. Ambiguous input, not a systematic
       disagreement.
-- [ ] **Guests are not harmless when a structure is fragmented on its own.** In
-      1180 the acetone made the decomposition emit two confused nodes; on the
-      cleaned CIF it gives one node (C25H24N4) and one linker (C32H30N2O4).
+- [ ] **CORRECTION — the acetone in 1180 was never the problem.** An earlier
+      version of this file claimed that removing it turned two confused nodes
+      into a clean node/linker pair. That was a false comparison across two code
+      versions: the two-node result came from the RAW cif run BEFORE the
+      monovalent-H fix, the clean result from the CLEANED cif run after it.
+      Fragmenting 1180 raw and cleaned with the same current code gives
+      byte-identical output - FragCof(179), Min(128), OnlyLinker(68:C32H30N2O4),
+      OnlyNode(53:C25H24N4) - so the improvement belongs entirely to the
+      monovalent-H fix. **When attributing a change, hold the code constant.**
 
 - [ ] **But measured over the full 884, cleaning changed nothing.** A complete
       run on the cleaned collection reproduced the uncleaned numbers, and NONE
