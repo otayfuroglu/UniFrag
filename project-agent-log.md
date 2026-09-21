@@ -2109,3 +2109,45 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Linkage recognition across the 300: imine 238, biaryl 29, vinylene 13, imine+vinylene 4, dioxin+imine 2, dioxin 3, oxazole 1, oxazole+vinylene 1, **unrecognised 9 (3.0%)**. That 3.0% matches the full-884 scan's 31/884 = 3.5%, so the sample is representative.
 - The vinylene and biaryl rules added today account for **47 of the 300 structures (~16%)**; before today every one of them severed nothing and fell silently to the crude fallback path.
 - Residual defects across 906 fragments: 8 clashing dimers, 11 over-valent and 46 under-valent terminal sites, 11 odd-electron fragments. Concentrated in the structures flagged as unrecognised or with distorted parent CIFs, not spread across the set.
+
+## [2026-09-19] Analysis of the 300-structure COF fragment output; capping-H collision found
+- Files touched: `project-agent-log.md` only. **No source change was made** - the fix below was proven with a runtime wrapper in the scratchpad, not committed.
+- Scope: pooled re-analysis of `test_hcno100_v5`, `test_hcno100_B`, `test_hcno100_C` (300 structures, 906 fragments) straight from the extxyz collections, independent of the numbers recorded on 2026-09-18.
+- Reproduced exactly: 906 frames, 272/300 Min, 281/300 yielding fragments, 22 duplicates, 0 CSV errors, 9 unrecognised linkages (3.0%), 8 dimers with a sub-2.4 A contact. The logged figures hold.
+- New measurements not previously recorded:
+  - Fragment sizes: Frag median 168 atoms (max 800), Min median 110, OnlyNode median 54, OnlyLinker median 41.
+  - Connectivity: with a `r_i + r_j + 0.40 A` bond criterion **no fragment is split into more than two pieces**. 575 monomers, 331 two-piece.
+  - Of the 331 two-piece fragments, 309 are genuine stacked dimers (2.4-4.0 A), 8 clash (<2.4 A) and **14 are not stacked at all**. Four of those are badly wrong - `481FragCofOnlyLinker` (31.7 A), `1001FragCofOnlyNode` (26.3 A), `1001FragCofOnlyLinker` (19.1 A), `324FragCofOnlyLinker` (16.6 A) - two disjoint blocks emitted as one frame. The other ten (`589`, `531`, `908`) sit at 4.25-4.43 A, wide but plausible.
+  - Chemistry diversity: 118 distinct OnlyNode formulas from 165 fragments, 155 distinct OnlyLinker from 209, 237 distinct Min from 254.
+  - Per-structure completeness: only 95 of 281 structures yield the full set (Frag+Min+OnlyNode+OnlyLinker); 88 give a linker but no node, 40 a node but no linker.
+- **Defect found: capping hydrogens are repositioned into existing atoms.** 43 of 906 fragments contain an atom pair closer than 0.9 A, across 21 structures. Eleven of those structures inherit the overlap from a disordered parent CIF (`1116`, `898`, `502`, `284`, `209`, `134`, `1155`, `1189`, `1091`, `1043`, `1057`), but **ten are introduced by UniFrag** (`819`, `818`, `965`, `903`, `1159`, `526`, `1112`, `173`, `364`, `992`) - their parent CIFs have no sub-0.9 A pair.
+  - Mechanism, confirmed by tracing: `place_capping_h` (`fragmentation_oop.py:214`) does honour its `min_hh=1.5` / `min_heavy=0.9` clearance test, but `enforce_sp2_capped_h_geometry` afterwards rewrites the cap position unconditionally at `fragmentation_oop.py:457` (`coords[hidx] = p + bl * dvec`) with no clearance test at all. It rotates the cap into the sp2 slot that points straight at a bonded neighbour. `_planarize_conjugated_caps` (`fragmentation_oop.py:3469`) and `optimize_capped_h_geometry_only` have the same unguarded write; `enforce_capped_oh_geometry` is the only one of the four that re-scores before committing.
+  - Typical result: a cap 1.09 A from its parent carbon and **0.42 A from the adjacent carbon** (`903FragCof`, four times over), or two caps on neighbouring carbons planarized into each other at 0.61 A H...H (`526FragCof`). These fragments cannot be run in QM.
+  - Validation of the cause: a 6-structure probe (`903`, `819`, `1159`, `526`, `965`, `1112`) reproduces 23 overlapping pairs deterministically. Re-running with a wrapper that reverts any cap move landing within 0.90 A of a heavy atom or 1.20 A of another H gives **23 -> 0 overlaps, 19/19 fragments retained, zero composition changes, no heavy atom displaced**. Scratchpad only; `fragmentation_oop.py` is untouched.
+- Gap in the existing QC: the run-level metric is "terminal capped site valence", which reported 98.8% correct across the 300. It does not look at cap-to-atom distances, so all 43 of these fragments passed. The same is true of `cof-fragment-checklist.md`, which has no minimum-interatomic-distance check.
+- Follow-up risks / open items:
+  - Decide whether to add the clearance test to the three unguarded cap-repositioning methods. Reverting to the pre-planarization position is the conservative option and was the one measured.
+  - Add a minimum-interatomic-distance gate (suggest 0.9 A any pair, 1.2 A H...H) to the checklist and to the run-level summary.
+  - The four fragments with 16-32 A gaps between two disjoint blocks need a separate diagnosis; they are not stacking failures.
+  - Eleven structures carry overlapping atoms in the parent CIF itself. These should be screened out of the input set rather than repaired downstream.
+
+## [2026-09-20] COF fragment QA: checklist, six defect fixes, guest removal
+- Files touched: `coffragmentor.py`, `fragmentation_oop.py`, `cof-fragment-checklist.md` (new), `runUniFrag/check_cof_fragments.py` (new), `runUniFrag/remove_guest_molecules.py` (new).
+- **NOTE**: the 2026-09-19 entry above was found uncommitted in the working tree at the start of this session; it is committed here unchanged. Its finding is unaddressed and still open - `enforce_sp2_capped_h_geometry` and `_planarize_conjugated_caps` reposition capping H with no clearance test.
+- Added `cof-fragment-checklist.md`, a standard acceptance checklist, and `check_cof_fragments.py`, which scores a run against it and exits non-zero on any MUST failure. The checker reuses UniFrag's own `is_valid_bond`/`_terminal_bond_order` so audit and fragmenter cannot disagree, and reports only defects that need no aromatic perception.
+- Defects found and fixed, each measured on the full 884:
+  - Parallel race in `_prune_duplicate_cof_helper_files` (unguarded `unlink`) aborted **329 of 884 structures while the job still exited 0**. Now guarded.
+  - Orphaned bridging units (bare `[N]`, `[N,N,N,H]`) - orphan guard restores one cut per component under 4 heavy atoms.
+  - Guest molecules exported as linkers - components with zero severed bonds are skipped.
+  - Superimposed atoms, 42 of 1695 frames, 0.15-0.75 A apart - COF-only `_dedupe_superimposed_atoms` hook.
+  - Odd-electron fragments 39 -> 5 by widening the parity-repair candidate set (carbon admitted, geometric filter dropped) with a validated, clearance-checked placement. Survivors are quarantined to `fragments_quarantine.extxyz`, never shipped in the main collection.
+  - Non-covalent H contacts perceived as bonds (526: ketoenamine H 1.09 A from C, 1.28 A from keto O) left the framework one component, so 6 severed linkages produced no blocks and it fell silently to Path A. Hydrogen is now monovalent, keeping its nearest HEAVY neighbour.
+  - Crystal-symmetry partner ops applied verbatim to helper blocks threw 481's halves 30-45 A apart. All ops now returned block-local; helper dimers also gained the contact test the assembled fragment always had.
+- **Reverted**: a secondary-amine linkage rule. Every aggregate metric improved and it was still wrong - on 1180 it emitted an 11-atom `HN-CH2-C(=O)-CH3` scrap and destroyed a correct two-node decomposition. Two guards were tried and neither separated the good case from the bad.
+- Added `remove_guest_molecules.py` (periodicity-based, CSD cross-checked 10/11 exact, 0 false negatives in 40). On the 884: 11 structures, 436 guest atoms, 1180 alone holding 28 acetone. **Measured benefit on the full set: zero** - UniFrag already discards guests via the zero-cut-component skip.
+- MOF/bio isolation: all shared-code changes are class attributes or hooks defaulting to previous behaviour; verified `MOFFragmenter` and `MacromolFragmenter` resolve to the base implementation by identity. **Not verified by running MOFs** - no MOF set was fragmented this session.
+- Follow-up risks / open items:
+  - The 2026-09-19 unguarded cap-repositioning finding, still open; 6 structures have a demonstrably self-inflicted sub-1.0 A H...H contact (364: parent 2.45 A -> fragment 0.90 A).
+  - 66 over-coordinated fragments remain, largely inherited (284's parent has 80 of its own).
+  - 40 structures with no recognised linkage; the `N(CC)` no-hydrogen bridge (1061, 1128, 652) is an uncharacterised family.
+  - **Process lesson**: four defects in a row were caught by the user viewing fragments, not by any metric. A fragment that is the wrong molecule, or in two distant pieces, passes every valence/parity/contact check. Confirm linkage-chemistry and geometry changes per structure, visually.
