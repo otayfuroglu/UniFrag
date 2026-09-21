@@ -3,6 +3,7 @@ test/
 test_on_*/
 run_fast_test.sh
 run_test.sh
+runUniFrag/CoRECOF/
 
 # Libraries
 cof_linkers_lib/
