@@ -59,6 +59,8 @@ mean the run succeeded.**
       full-set run kept all 884 structures, the next lost 60% of them while
       still writing a complete CSV and extxyz. An incomplete log makes
       `QM WARNING` and `no known linkage chemistry` look better than they are.
+      Launch with `python -u`; that alone restored a complete log on a rerun of
+      the same code.
       ```bash
       grep -oE "cifs/[0-9]+\.cif" log.out | sort -u | wc -l   # must equal n_input_cifs
       ```
@@ -484,12 +486,12 @@ Each column is one complete run; `a2bff35` is current.
 | ERROR structures | 329 | 0 | 0 | 0 | 0 | 0 | 0 |
 | degenerate helpers | 4 | 0 | 0 | 0 | 0 | 0 | 0 |
 | **odd-electron** (main) | 34 | 40 | 39 | **5** | **5** | **0** | **0** |
-| QM warnings | 47 | 68 | 66 | 10 | 11 | 12 | 3* |
+| QM warnings | 47 | 68 | 66 | 10 | 11 | 12 | 12 |
 | over-coordinated | 96 | 71 | 67 | 69 | 70 | 66 | 66 |
-| mis-capped terminals | - | 292 | 287 | 214 | 212 | 212 | 213 |
-| clashing (<2.0 A) | 808 | 835 | 828 | 849 | 842 | 841 | 836 |
+| mis-capped terminals | - | 292 | 287 | 214 | 212 | 212 | 215 |
+| clashing (<2.0 A) | 808 | 835 | 828 | 849 | 842 | 841 | 842 |
 | detached-junk frames | - | 5 | 7 | 5 | 5 | 1 | 1 |
-| no recognised linkage | 41 | 43 | 40 | 37 | 40 | 44 | 20* |
+| no recognised linkage | 41 | 43 | 40 | 37 | 40 | 44 | 44 |
 
 Read the columns as cumulative, not independent: each adds to the one before.
 `no recognised linkage` moves by a few between otherwise identical runs because
@@ -507,16 +509,16 @@ collection. They have not been repaired - count the quarantine file, not this
 row, when asking how many remain. The same commit's monovalent-H prune is what
 moved `detached-junk frames` 5 -> 1 and `over-coordinated` 70 -> 66.
 
-\* **The two starred `a2bff35` numbers are undercounts, not improvements.**
-Both are counted by grepping `log.out`, and that run's log lost roughly 60% of
-its worker output: only 347 of 884 structures appear in it, though the CSV has
-all 884 rows and the extxyz has every frame. Twenty parallel workers share one
-redirected stdout, so lines can be clobbered; the previous run happened to keep
-all 884. Every other row in the table is measured from the extxyz and is
-unaffected. **Before quoting a log-derived metric, check
-`grep -oE "cifs/[0-9]+\.cif" log.out | sort -u | wc -l` equals the input
-count.** If it does not, re-derive that metric from a run whose log is complete,
-or write per-worker log files.
+The `a2bff35` column is a rerun. The first attempt lost roughly 60% of its
+worker output - only 347 of 884 structures appeared in `log.out`, though the CSV
+had all 884 rows and the extxyz every frame - and its log-derived metrics read
+20 no-linkage and 3 QM warnings, which looked like a large improvement and was
+not. Rerunning the identical code with `python -u` gave a complete log and the
+true values, 44 and 12, unchanged from the run before. **Launch full-set runs
+with `python -u`**, and check
+`grep -oE "cifs/[0-9]+\.cif" log.out | sort -u | wc -l` equals the input count
+before quoting any log-derived metric. Buffered stdout from twenty workers
+sharing one redirection is not reliable.
 
 `a2bff35` re-centres crystal-symmetry partner operations on each helper block.
 The scattered-piece check (pieces more than 5 A apart) goes from the 481-class
