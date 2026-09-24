@@ -3861,6 +3861,144 @@ class COFFragmenter(BaseFragmenter):
                 bl = self.cap_bond_length(species[parent])
             coords[h] = p + bl * direction
 
+    def _drop_clipped_ring_heteroatoms(self, species, coords, capped_h_flags=None):
+        """COF-only: remove ring heteroatoms the fragment boundary cut through.
+
+        Carving a patch out of a fused sheet has to break rings, and a ring
+        carbon left at that edge is fine - it becomes an ordinary aromatic C-H.
+        A ring NITROGEN left there is not: 663 came back with five -C=N-H
+        stubs and 662 with two, a group neither parent contains anywhere.
+        Dropping the stub and letting the carbon take the hydrogen instead
+        gives that edge the same chemistry as the rest of the patch.
+
+        Membership is decided on the periodic parent, so only genuine ring
+        bridges qualify. A nitrogen severed by a linkage rule - an imine, an
+        azine - sits outside every ring and is untouched, and so is a nitrile
+        or an amine, terminal in the parent to begin with.
+        """
+        struct = getattr(self, "_parent_struct", None)
+        if struct is None or not species:
+            return
+        ring_hetero = self._parent_ring_heteroatoms(struct)
+        if not ring_hetero:
+            return
+
+        pos = [np.asarray(c, dtype=float) for c in coords]
+
+        def heavy_count(i):
+            n = 0
+            for j, spj in enumerate(species):
+                if j == i or spj == "H":
+                    continue
+                if self.is_valid_bond(species[i], spj,
+                                      float(np.linalg.norm(pos[i] - pos[j]))):
+                    n += 1
+            return n
+
+        drop = set()
+        for i, sp in enumerate(species):
+            if sp not in ("N", "O", "S") or heavy_count(i) > 1:
+                continue
+            if not self._is_parent_ring_heteroatom(struct, pos[i], ring_hetero):
+                continue
+            drop.add(i)
+            for j, spj in enumerate(species):
+                if spj == "H" and self.is_valid_bond(
+                    sp, "H", float(np.linalg.norm(pos[i] - pos[j]))
+                ):
+                    drop.add(j)
+        if not drop:
+            return
+
+        keep = [i for i in range(len(species)) if i not in drop]
+        kept_species = [species[i] for i in keep]
+        kept_coords = [coords[i] for i in keep]
+        kept_flags = ([capped_h_flags[i] for i in keep]
+                      if capped_h_flags is not None else None)
+        species[:] = kept_species
+        coords[:] = kept_coords
+        if capped_h_flags is not None:
+            capped_h_flags[:] = kept_flags
+        print(f"  -> COF edge: dropped {len(drop)} clipped ring heteroatom(s) "
+              f"(and their H); the carbons take capping H instead.")
+
+    def _parent_ring_heteroatoms(self, struct, max_ring=8):
+        """Fractional coordinates of every N/O/S that bridges a ring.
+
+        Computed on the periodic parent, where nothing is missing a neighbour,
+        and returned as wrapped fractional coordinates so a supercell atom can
+        be matched back to it whatever image it came from.
+        """
+        from collections import deque
+
+        def sym(i):
+            try:
+                return struct[i].specie.symbol
+            except Exception:
+                return max(struct[i].species.items(), key=lambda kv: kv[1])[0].symbol
+
+        nbrs = {}
+        for i in range(len(struct)):
+            if sym(i) == "H":
+                continue
+            out = []
+            for nb in struct.get_neighbors(struct[i], 2.4):
+                j = int(nb.index)
+                if sym(j) == "H":
+                    continue
+                if self.is_valid_bond(sym(i), sym(j), float(nb.nn_distance)):
+                    out.append(j)
+            nbrs[i] = out
+
+        ring_sites = set()
+        for i, heavy in nbrs.items():
+            if sym(i) not in ("N", "O", "S") or len(heavy) < 2:
+                continue
+            found = False
+            for a in range(len(heavy)):
+                for b in range(a + 1, len(heavy)):
+                    src, dst = heavy[a], heavy[b]
+                    seen = {i, src}
+                    q = deque([(src, 1)])
+                    while q and not found:
+                        cur, dist = q.popleft()
+                        if cur == dst:
+                            found = True
+                            break
+                        if dist >= max_ring - 1:
+                            continue
+                        for nxt in nbrs.get(cur, ()):
+                            if nxt in seen:
+                                continue
+                            seen.add(nxt)
+                            q.append((nxt, dist + 1))
+                    if found:
+                        break
+                if found:
+                    break
+            if found:
+                ring_sites.add(i)
+        return {
+            tuple(np.round(np.mod(np.asarray(struct[i].frac_coords, dtype=float), 1.0), 2))
+            for i in ring_sites
+        }
+
+    @staticmethod
+    def _is_parent_ring_heteroatom(struct, cart, ring_hetero, tol=0.02):
+        """Does this Cartesian position sit on one of those parent sites?"""
+        if not ring_hetero:
+            return False
+        f = np.mod(np.asarray(struct.lattice.get_fractional_coords(cart), dtype=float), 1.0)
+        key = tuple(np.round(f, 2))
+        if key in ring_hetero:
+            return True
+        for other in ring_hetero:
+            d = np.abs(f - np.asarray(other))
+            d = np.minimum(d, 1.0 - d)
+            if float(np.max(d)) < tol:
+                return True
+        return False
+
     def _dedupe_superimposed_atoms(self, species, coords, capped_h_indices, label="", tol=0.85):
         """Drop atoms that sit on top of another atom.
 
@@ -3915,6 +4053,7 @@ class COFFragmenter(BaseFragmenter):
         coords_copy = [np.array(c, dtype=float) for c in coords]
         capped_h_flags = [False] * len(species_copy)
 
+        self._drop_clipped_ring_heteroatoms(species_copy, coords_copy, capped_h_flags)
         self._cap_severed_double_bond_sites(species_copy, coords_copy, capped_h_flags)
         self._cap_open_oxygens(species_copy, coords_copy, capped_h_flags)
 
@@ -4718,6 +4857,7 @@ class COFFragmenter(BaseFragmenter):
                     self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 
         # Keep helper heavy atoms fixed; only adjust capped H atoms.
+        self._drop_clipped_ring_heteroatoms(species, coords, capped_h_flags)
         self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
@@ -4800,6 +4940,7 @@ class COFFragmenter(BaseFragmenter):
         if combined is not None:
             return combined
         print("Creating supercell...")
+        self._parent_struct = struct
         dims = [max(1, int(np.ceil(28.0 / a))) for a in struct.lattice.abc]
         dims = [max(3, d) if a < 15.0 else d for d, a in zip(dims, struct.lattice.abc)]
         supercell = struct * dims
@@ -5808,6 +5949,7 @@ class COFFragmenter(BaseFragmenter):
 
         # COF fragments can leave terminal O atoms without a broken heavy-atom
         # edge marker; cap those O sites with H before geometry refinement.
+        self._drop_clipped_ring_heteroatoms(species, coords, capped_h_flags)
         self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
 
@@ -6282,6 +6424,7 @@ class COFFragmenter(BaseFragmenter):
                 capped_h_flags = base_flags + base_flags
                 dimer_already_built = True
 
+        self._drop_clipped_ring_heteroatoms(species, coords, capped_h_flags)
         self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
