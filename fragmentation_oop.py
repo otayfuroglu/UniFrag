@@ -353,6 +353,20 @@ class BaseFragmenter:
                 if i not in movable_h:
                     ff.AddFixedPoint(i)
 
+            def _parent_of(idx, snapshot):
+                hp = np.asarray(snapshot[idx], dtype=float)
+                best, who = float("inf"), None
+                for j in range(n):
+                    if j == idx or species[j] == "H":
+                        continue
+                    d = float(np.linalg.norm(np.asarray(snapshot[j], dtype=float) - hp))
+                    if d < best:
+                        best, who = d, j
+                return who, best
+
+            pre = [np.array(c, dtype=float) for c in coords]
+            pre_parent = {i: _parent_of(i, pre) for i in movable_h}
+
             ff.Initialize()
             ff.Minimize(maxIts=max_iters)
 
@@ -360,6 +374,22 @@ class BaseFragmenter:
             for i in range(n):
                 p = conf2.GetAtomPosition(i)
                 coords[i] = np.array([p.x, p.y, p.z], dtype=float)
+
+            # UFF sees every bond as single and relaxes against that, which can
+            # walk a hydrogen clean off its parent: on 1015 it pushed a methyl
+            # cap 0.9 A, leaving the carbon with two hydrogens and the third
+            # stranded 2.1 A away. Keep only the moves that still describe the
+            # same bond.
+            for i in movable_h:
+                who, _ = pre_parent[i]
+                if who is None:
+                    continue
+                d = float(np.linalg.norm(
+                    np.asarray(coords[who], dtype=float)
+                    - np.asarray(coords[i], dtype=float)
+                ))
+                if not self.is_valid_bond(species[who], "H", d):
+                    coords[i] = pre[i]
         except Exception:
             return
 
@@ -3702,19 +3732,54 @@ class COFFragmenter(BaseFragmenter):
                 default=float("inf"),
             )
 
+        def bonded_heavy_set(h_idx):
+            hp = np.asarray(coords[h_idx], dtype=float)
+            return frozenset(
+                j for j in range(len(species))
+                if species[j] != "H"
+                and self.is_valid_bond(
+                    species[j], "H",
+                    float(np.linalg.norm(np.asarray(coords[j], dtype=float) - hp)),
+                )
+            )
+
         parent_of = {h: p for p, hs in targets.items() for h in hs}
         parent_of.update({h: p for (p, _a), hs in sp3_targets.items() for h in hs})
-        before = {h: (np.array(coords[h], dtype=float), clearance(h, parent_of[h]))
+        before = {h: (np.array(coords[h], dtype=float), clearance(h, parent_of[h]),
+                      bonded_heavy_set(h))
                   for h in moved}
         if targets:
             self._planarize_conjugated_caps(species, coords, list(targets.items()))
         for (parent, anchor), caps in sp3_targets.items():
             self._tetrahedralize_terminal_caps(species, coords, parent, anchor, caps)
-        for h in moved:
-            old_pos, old_clear = before[h]
-            new_clear = clearance(h, parent_of[h])
-            if new_clear < 1.5 and new_clear < old_clear:
-                coords[h] = old_pos
+        # Accept or reject a whole group at once. Reverting one hydrogen of a
+        # rebuilt methyl and keeping its siblings leaves the group half on the
+        # new cone and half on the old directions: in 1015 that put two of them
+        # 0.60 A apart, and the superimposed-atom pass then deleted one, so the
+        # carbon ended up with two hydrogens.
+        #
+        # A group is rejected if any of its hydrogens would sit closer than
+        # 0.9 A to something (that pass would eat it), would come inside 1.5 A
+        # of something it was previously clear of, or would end up bonded to a
+        # different set of heavy atoms than before - a hydrogen between two
+        # heavy atoms belongs to the nearer one by this routine's reckoning but
+        # may be bonded to both.
+        groups = [list(hs) for hs in targets.values()]
+        groups += [list(hs) for hs in sp3_targets.values()]
+        for group in groups:
+            reject = False
+            for h in group:
+                old_pos, old_clear, old_bonds = before[h]
+                new_clear = clearance(h, parent_of[h])
+                if new_clear < 0.90 or (new_clear < 1.5 and new_clear < old_clear):
+                    reject = True
+                    break
+                if bonded_heavy_set(h) != old_bonds:
+                    reject = True
+                    break
+            if reject:
+                for h in group:
+                    coords[h] = before[h][0]
 
     def _tetrahedralize_terminal_caps(self, species, coords, parent, anchor, caps):
         """COF-only: rebuild an sp3 terminal group (-CH3, -CH2-, -NH2).
