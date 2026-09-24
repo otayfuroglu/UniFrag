@@ -178,6 +178,86 @@ class COF:
             except nx.NetworkXNoPath:
                 return False
 
+        # Pyrazine linkages: two aromatic units fused through a pyrazine ring
+        # (quinoxaline, phenazine, hexaazatriphenylene). The ring is the
+        # linkage - it is what the condensation of an o-diamine with an
+        # o-diketone forms - but every one of its bonds sits inside a ring, so
+        # no rule here touched it and 662 and 663 came out as a patch of sheet
+        # with no node or linker at all.
+        #
+        # Both nitrogens are severed from both of their carbons, which leaves
+        # each nitrogen alone and the two carbon units separate. The carry-over
+        # below then gives each unit its own copy of the nitrogens it was
+        # bonded to, so 662 decomposes into the hexa-substituted benzene node
+        # carrying six N and the tetra-substituted linker carrying four - the
+        # two halves of the condensation, each showing its linkage
+        # environment, exactly as for every other linkage type here.
+        #
+        # The test: a six-ring holding exactly two nitrogens para to each
+        # other, each with exactly two heavy neighbours, both carbons, both in
+        # that ring. Pyridine-type ring N (one per ring) and fused imidazoles
+        # do not match, and neither does a pyrazine whose nitrogen carries a
+        # substituent.
+        pyrazine_bonds = {}
+        pyrazine_bridge_atoms = set()
+
+        def _heavy_nbrs_of(idx):
+            return [nb for nb in undirected_graph.neighbors(idx)
+                    if self.structure[nb].specie.symbol != 'H']
+
+        def _is_bridge_n(idx):
+            if self.structure[idx].specie.symbol != 'N':
+                return None
+            heavy = _heavy_nbrs_of(idx)
+            if len(heavy) != 2:
+                return None
+            if any(self.structure[nb].specie.symbol != 'C' for nb in heavy):
+                return None
+            return heavy
+
+        # Walk the ring by hand rather than through a cycle basis: a basis is
+        # free to return one big cycle instead of the six-rings it is made of,
+        # and the pyrazines of 662 come back inside a sixteen-membered cycle.
+        for _n1 in list(undirected_graph.nodes()):
+            _pair1 = _is_bridge_n(_n1)
+            if _pair1 is None:
+                continue
+            _cA, _cB = _pair1
+            found = None
+            for _cA2 in _heavy_nbrs_of(_cA):
+                if _cA2 == _n1 or self.structure[_cA2].specie.symbol != 'C':
+                    continue
+                for _n2 in _heavy_nbrs_of(_cA2):
+                    if _n2 == _cA or _n2 == _n1:
+                        continue
+                    _pair2 = _is_bridge_n(_n2)
+                    if _pair2 is None:
+                        continue
+                    _other = [c for c in _pair2 if c != _cA2]
+                    if len(_other) != 1:
+                        continue
+                    _cB2 = _other[0]
+                    if _cB2 == _cB or not undirected_graph.has_edge(_cB2, _cB):
+                        continue
+                    found = (_n2, _cA2, _cB2)
+                    break
+                if found:
+                    break
+            if not found:
+                continue
+            _n2 = found[0]
+            # All four bonds of one pyrazine carry the same linkage id, keyed
+            # on its two nitrogens. Without that they count as four separate
+            # linkages, and a linker sitting between two pyrazines scores four
+            # - over the three that mark a node - so 662 came back as five
+            # nodes and no linker at all.
+            _tag = ('pyrazine', frozenset((_n1, _n2)))
+            for _n in (_n1, _n2):
+                pyrazine_bridge_atoms.add(_n)
+                for nb in _heavy_nbrs_of(_n):
+                    if self.structure[nb].specie.symbol == 'C':
+                        pyrazine_bonds[frozenset((_n, nb))] = _tag
+
         # Nitrogen-nitrogen linkages: azine (Ar-CH=N-N=CH-Ar), acylhydrazone
         # (Ar-CH=N-NH-CO-Ar), azo and hydrazo (Ar-N=N-Ar, Ar-NH-NH-Ar). In all
         # of them the N-N bond IS the linkage, and it is the bond to sever.
@@ -234,6 +314,9 @@ class COF:
             if bond_pair == {'B', 'O'}:
                 edges_to_remove.append((u, v))
                 linkage_of[frozenset((u, v))] = ('boroxine', frozenset((u, v)))
+            elif bond_pair == {'C', 'N'} and frozenset((u, v)) in pyrazine_bonds:
+                edges_to_remove.append((u, v))
+                linkage_of[frozenset((u, v))] = pyrazine_bonds[frozenset((u, v))]
             elif bond_pair == {'C', 'N'}:
                 # Cut the imine C=N double bond itself (where Carbon has heavy degree == 2)
                 # so that the terminal Nitrogen atoms stay with the amine-derived building block
@@ -462,7 +545,18 @@ class COF:
                 )
                 for i in comp:
                     comp_of[i] = k
-            orphans = [k for k, h in heavy_of.items() if h < MIN_STRUT_HEAVY]
+            # A pyrazine nitrogen is meant to be left on its own: it is
+            # carried into both blocks below, not exported as a block, so
+            # restoring one of its bonds here would undo the linkage cut.
+            orphans = [
+                k for k, h in heavy_of.items()
+                if h < MIN_STRUT_HEAVY
+                and not all(
+                    i in pyrazine_bridge_atoms
+                    or self.structure[i].specie.symbol == 'H'
+                    for i in comps[k]
+                )
+            ]
             if not orphans:
                 break
             restored = False

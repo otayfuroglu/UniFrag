@@ -3085,17 +3085,70 @@ class COFFragmenter(BaseFragmenter):
     }
 
     @classmethod
-    def _terminal_bond_order(cls, sp_a, sp_b, dist):
+    def _terminal_bond_order(cls, sp_a, sp_b, dist, scale=1.0):
         """Bond order (1, 2 or 3) of a single heavy-heavy bond, from its length.
 
         Only used at terminal cut sites, where the atom has exactly one heavy
         neighbour and the number of capping H depends on that bond's order.
+
+        `scale` rescales the measured length to the structure's own geometry.
+        Several CoRE-COF entries are idealised models whose bonds are uniformly
+        short - 662's aromatic C-C sit at 1.33 A against the usual 1.39 - and
+        read against a fixed table every bond in them looks double. A pyrazine
+        nitrogen then came back as -NH instead of the -NH2 its amine precursor
+        calls for.
         """
+        if scale and scale > 0:
+            dist = dist / scale
         for order, table in ((3, cls._TRIPLE_BOND_MAX), (2, cls._DOUBLE_BOND_MAX)):
             cutoff = table.get((sp_a, sp_b), table.get((sp_b, sp_a)))
             if cutoff is not None and dist <= cutoff:
                 return order
         return 1
+
+    def _length_scale(self):
+        """How this structure's aromatic C-C compares with a real one (1.39 A).
+
+        Measured once per parent from the median C-C bond, clamped so a badly
+        mixed structure cannot move the thresholds far, and 1.0 whenever there
+        is nothing to measure - so a normally refined structure is unaffected.
+        """
+        cached = getattr(self, "_length_scale_value", None)
+        if cached is not None:
+            return cached
+        struct = getattr(self, "_parent_struct", None)
+        scale = 1.0
+        if struct is not None:
+            try:
+                def _sym(site):
+                    try:
+                        return site.specie.symbol
+                    except Exception:
+                        return max(site.species.items(), key=lambda kv: kv[1])[0].symbol
+                # Conjugated C-C only: an sp3 chain at 1.54 A would drag the
+                # median up and shift every threshold for a structure that has
+                # nothing wrong with it.
+                lengths = []
+                for i, site in enumerate(struct):
+                    if _sym(site) != "C":
+                        continue
+                    for nb in struct.get_neighbors(site, 1.8):
+                        if _sym(nb) != "C" or int(nb.index) <= i:
+                            continue
+                        d = float(nb.nn_distance)
+                        if d <= 1.46:
+                            lengths.append(d)
+                if len(lengths) >= 6:
+                    ratio = float(np.median(lengths)) / 1.39
+                    # Only a structure that is plainly off its own scale gets
+                    # rescaled; ordinary refinement scatter is left alone, so
+                    # nothing changes for a normally refined COF.
+                    if abs(ratio - 1.0) >= 0.03:
+                        scale = float(min(1.08, max(0.92, ratio)))
+            except Exception:
+                scale = 1.0
+        self._length_scale_value = scale
+        return scale
 
     def _find_stacked_partner(self, struct, species, coords, label=""):
         """Find the operation that places the neighbouring layer on this
@@ -3301,6 +3354,11 @@ class COFFragmenter(BaseFragmenter):
         if n_cut is None:
             return
         stem = Path(cif_path).stem
+        # Remember whether any linkage rule fired: a terminal heteroatom in a
+        # block that came out of a real cleavage is put there on purpose (the
+        # carry-over convention), and must not be mistaken for a ring atom the
+        # boundary sliced through.
+        self._had_linkage_cuts = bool(n_cut)
         seen = getattr(self, "_linkage_warned", None)
         if seen is None:
             seen = self._linkage_warned = set()
@@ -3477,7 +3535,8 @@ class COFFragmenter(BaseFragmenter):
             d = float(np.linalg.norm(pos - np.array(coords[j], dtype=float)))
             if not self.is_valid_bond(sp, spj, d):
                 continue
-            used += 1 if spj == "H" else self._terminal_bond_order(sp, spj, d)
+            used += (1 if spj == "H"
+                     else self._terminal_bond_order(sp, spj, d, self._length_scale()))
         return used
 
     def _cap_severed_double_bond_sites(self, species, coords, capped_h_flags):
@@ -3524,7 +3583,9 @@ class COFFragmenter(BaseFragmenter):
             # ~1.28 A vs aromatic C-N ~1.38 A and amine C-N ~1.47 A), so use it
             # to charge the anchor its true bond order.
             anchor_d = float(np.linalg.norm(pos - np.array(coords[anchor], dtype=float)))
-            anchor_order = self._terminal_bond_order(sp, species[anchor], anchor_d)
+            anchor_order = self._terminal_bond_order(
+                sp, species[anchor], anchor_d, self._length_scale()
+            )
             deficit = target_valence[sp] - (anchor_order + h_count)
             if deficit <= 0:
                 continue
@@ -3707,7 +3768,7 @@ class COFFragmenter(BaseFragmenter):
                 continue
             anchor, anchor_d = heavy[0]
             order = self._terminal_bond_order(
-                species[parent], species[anchor], anchor_d
+                species[parent], species[anchor], anchor_d, self._length_scale()
             )
             if order >= 2:
                 targets.setdefault(parent, []).append(h)
@@ -3876,6 +3937,9 @@ class COFFragmenter(BaseFragmenter):
         azine - sits outside every ring and is untouched, and so is a nitrile
         or an amine, terminal in the parent to begin with.
         """
+        if getattr(self, "_had_linkage_cuts", False):
+            # Linkage-derived blocks carry their partner heteroatom by design.
+            return
         struct = getattr(self, "_parent_struct", None)
         if struct is None or not species:
             return
@@ -4274,6 +4338,8 @@ class COFFragmenter(BaseFragmenter):
     def _try_cof_graph_node_linker_fragment(self, cif_path, output_path, minimize=False):
         try:
             struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
+            self._parent_struct = struct
+            self._length_scale_value = None
         except Exception:
             return None
 
@@ -4679,6 +4745,8 @@ class COFFragmenter(BaseFragmenter):
             return None
         try:
             struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
+            self._parent_struct = struct
+            self._length_scale_value = None
             result = COF.from_cif(cif_path).fragment()
             self._report_linkage_recognition(result, cif_path)
         except Exception as exc:
@@ -4916,6 +4984,8 @@ class COFFragmenter(BaseFragmenter):
         print(f"Loading '{cif_path}'...")
         try:
             struct = Structure.from_file(cif_path, occupancy_tolerance=100.0)
+            self._parent_struct = struct
+            self._length_scale_value = None
         except Exception as exc:
             print(f"  Standard CIF load failed: {exc}")
             print("  Retrying with tolerant CIF parser...")
@@ -4941,6 +5011,7 @@ class COFFragmenter(BaseFragmenter):
             return combined
         print("Creating supercell...")
         self._parent_struct = struct
+        self._length_scale_value = None
         dims = [max(1, int(np.ceil(28.0 / a))) for a in struct.lattice.abc]
         dims = [max(3, d) if a < 15.0 else d for d, a in zip(dims, struct.lattice.abc)]
         supercell = struct * dims

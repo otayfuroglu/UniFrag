@@ -69,6 +69,23 @@ def analyse(fr):
     n=len(sp); out={"n":n}
     adj = bonds_of(sp, co)
 
+    # Same length scale the fragmenter uses, measured here on the fragment's
+    # own conjugated C-C bonds. Some CoRE-COF entries are idealised models
+    # whose bonds are uniformly short; judging their caps against a fixed
+    # table would disagree with the code that placed them.
+    _cc=[]
+    for i in range(n):
+        if sp[i]!="C": continue
+        for j in adj[i]:
+            if j>i and sp[j]=="C":
+                d=float(np.linalg.norm(co[i]-co[j]))
+                if d<=1.46: _cc.append(d)
+    scale=1.0
+    if len(_cc)>=4:   # a single ring is enough here; the fragmenter sees the whole parent
+        r=float(np.median(_cc))/1.39
+        if abs(r-1.0)>=0.03: scale=float(min(1.08, max(0.92, r)))
+    out["length_scale"]=scale
+
     over=[]; bad_term=[]
     for i in range(n):
         tgt=VALENCE.get(sp[i])
@@ -81,7 +98,7 @@ def analyse(fr):
         if sp[i]!="H" and len(heavy)==1:
             j=heavy[0]
             d=float(np.linalg.norm(co[i]-co[j]))
-            order=_F._terminal_bond_order(sp[i], sp[j], d)
+            order=_F._terminal_bond_order(sp[i], sp[j], d, scale)
             deficit=tgt-order
             if nh != deficit:
                 bad_term.append((i, sp[i], f"H={nh} need={deficit}"))
