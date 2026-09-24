@@ -632,6 +632,15 @@ class BaseFragmenter:
         # RDKit can slightly pull aromatic C-H caps out of the phenyl plane;
         # enforce the final sp2 direction again before writing coordinates.
         self.enforce_sp2_capped_h_geometry(species, coords, capped_h_indices)
+        self._fix_terminal_cap_geometry(species, coords, capped_h_indices)
+
+    def _fix_terminal_cap_geometry(self, species, coords, capped_h_indices):
+        """Hook: fix caps on atoms with a SINGLE heavy neighbour.
+
+        No-op here, so MOF and macromolecule output is unchanged.
+        COFFragmenter overrides it; see that docstring.
+        """
+        return
 
 
     @staticmethod
@@ -3616,6 +3625,176 @@ class COFFragmenter(BaseFragmenter):
                 if not (0.7 < bl < 1.3):
                     bl = self.cap_bond_length(species[n_idx])
                 coords[h] = npos + bl * direction
+
+    def _fix_terminal_cap_geometry(self, species, coords, capped_h_indices):
+        """COF-only: give a cap on a TERMINAL sp2 atom its 120 degree angle.
+
+        enforce_sp2_capped_h_geometry derives the sp2 direction from the
+        parent's two heavy neighbours, so it skips exactly the atoms a cut
+        creates: an aldimine nitrogen left holding a single C=N. The generic
+        cappers aim the new hydrogen straight along the severed bond, which is
+        180 degrees from the anchor - 1223 came back with twelve linear
+        C=N-H. Route those caps through the planarizer, which places them in
+        one of the two sp2 slots of the conjugated plane.
+
+        Only a genuine double bond qualifies: a terminal atom whose single
+        bond is long is a real tetrahedral -CH3 or -NH2 and must keep its
+        109 degree geometry. A cap is left where it was if moving it would
+        put it inside 1.5 A of something it was previously clear of, because
+        a correct angle is not worth a manufactured clash.
+        """
+        if not capped_h_indices:
+            return
+        n = len(species)
+        pos = [np.asarray(c, dtype=float) for c in coords]
+
+        def bonded_heavy(idx):
+            out = []
+            for j in range(n):
+                if j == idx or species[j] == "H":
+                    continue
+                d = float(np.linalg.norm(pos[idx] - pos[j]))
+                if self.is_valid_bond(species[idx], species[j], d):
+                    out.append((j, d))
+            return out
+
+        targets = {}
+        sp3_targets = {}
+        for h in capped_h_indices:
+            if not (0 <= h < n) or species[h] != "H":
+                continue
+            parent, best = None, float("inf")
+            for j in range(n):
+                if species[j] == "H":
+                    continue
+                d = float(np.linalg.norm(pos[h] - pos[j]))
+                if self.is_valid_bond("H", species[j], d) and d < best:
+                    best, parent = d, j
+            if parent is None or species[parent] not in ("C", "N"):
+                continue
+            heavy = bonded_heavy(parent)
+            if len(heavy) != 1:
+                continue
+            anchor, anchor_d = heavy[0]
+            order = self._terminal_bond_order(
+                species[parent], species[anchor], anchor_d
+            )
+            if order >= 2:
+                targets.setdefault(parent, []).append(h)
+            elif order == 1:
+                sp3_targets.setdefault((parent, anchor), []).append(h)
+
+        moved = sorted({h for hs in targets.values() for h in hs}
+                       | {h for hs in sp3_targets.values() for h in hs})
+        if not moved:
+            return
+
+        def clearance(h_idx, parent_idx):
+            return min(
+                (
+                    float(np.linalg.norm(
+                        np.asarray(coords[h_idx], dtype=float)
+                        - np.asarray(coords[j], dtype=float)
+                    ))
+                    for j in range(len(species))
+                    if j != h_idx and j != parent_idx
+                ),
+                default=float("inf"),
+            )
+
+        parent_of = {h: p for p, hs in targets.items() for h in hs}
+        parent_of.update({h: p for (p, _a), hs in sp3_targets.items() for h in hs})
+        before = {h: (np.array(coords[h], dtype=float), clearance(h, parent_of[h]))
+                  for h in moved}
+        if targets:
+            self._planarize_conjugated_caps(species, coords, list(targets.items()))
+        for (parent, anchor), caps in sp3_targets.items():
+            self._tetrahedralize_terminal_caps(species, coords, parent, anchor, caps)
+        for h in moved:
+            old_pos, old_clear = before[h]
+            new_clear = clearance(h, parent_of[h])
+            if new_clear < 1.5 and new_clear < old_clear:
+                coords[h] = old_pos
+
+    def _tetrahedralize_terminal_caps(self, species, coords, parent, anchor, caps):
+        """COF-only: rebuild an sp3 terminal group (-CH3, -CH2-, -NH2).
+
+        Severing an aryl-aryl bond leaves a carbon that gets three capping
+        hydrogens. The cone search aims the first one straight along the
+        broken bond and then drops the other two wherever they fit, which
+        gives C-C-H angles of 94/94/180 degrees and H...H down to 1.37 A
+        against the 1.78 A of a real methyl - a self-inflicted clash in every
+        such cap. Place them on the proper tetrahedral cone instead: 109.47
+        degrees from the anchor bond, evenly spaced in azimuth, staggered
+        against the anchor's own substituent.
+
+        Hydrogens the parent already carried are left where they are and
+        simply claim the slot they are nearest to, so only caps move.
+        """
+        p = np.asarray(coords[parent], dtype=float)
+        a = np.asarray(coords[anchor], dtype=float)
+        w = a - p
+        nw = np.linalg.norm(w)
+        if nw < 1e-8:
+            return
+        w = w / nw
+        e1, e2 = self._orthonormal_basis(w)
+
+        native = []
+        for j, spj in enumerate(species):
+            if spj != "H" or j in caps:
+                continue
+            d = float(np.linalg.norm(p - np.asarray(coords[j], dtype=float)))
+            if self.is_valid_bond(species[parent], "H", d):
+                native.append(j)
+
+        # Azimuth reference. A hydrogen the parent already carried anchors the
+        # frame, so the new caps land a full 120 degrees away from where it
+        # actually sits: these parents come from distorted CIFs whose own C-H
+        # is nowhere near the ideal cone, and fitting the caps to an ideal
+        # tetrahedron while ignoring the native H put one of them 0.99 A from
+        # it in 29. With no native H, stagger against the anchor's substituent
+        # instead.
+        ref = None
+        if native:
+            ref = np.asarray(coords[native[0]], dtype=float) - p
+        else:
+            for j, spj in enumerate(species):
+                if j in (parent, anchor) or spj == "H":
+                    continue
+                d = float(np.linalg.norm(a - np.asarray(coords[j], dtype=float)))
+                if self.is_valid_bond(species[anchor], spj, d):
+                    ref = -(np.asarray(coords[j], dtype=float) - a)
+                    break
+        if ref is not None:
+            perp = ref - np.dot(ref, w) * w
+            if np.linalg.norm(perp) > 1e-8:
+                e1 = perp / np.linalg.norm(perp)
+                e2 = np.cross(w, e1)
+
+        ct, st = np.cos(np.deg2rad(109.47)), np.sin(np.deg2rad(109.47))
+        slots = [
+            ct * w + st * (np.cos(np.deg2rad(phi)) * e1 + np.sin(np.deg2rad(phi)) * e2)
+            for phi in (0.0, 120.0, 240.0)
+        ]
+
+        # Track slots by index: list.remove on numpy arrays compares
+        # element-wise and raises "truth value of an array is ambiguous".
+        free = list(range(len(slots)))
+        for j in native:
+            v = np.asarray(coords[j], dtype=float) - p
+            nv = np.linalg.norm(v)
+            if nv < 1e-8 or not free:
+                continue
+            v = v / nv
+            best = max(free, key=lambda k: float(np.dot(v, slots[k])))
+            free.remove(best)
+
+        for h, direction in zip(caps, [slots[k] for k in free]):
+            bl = float(np.linalg.norm(np.asarray(coords[h], dtype=float) - p))
+            if not (0.7 < bl < 1.3):
+                bl = self.cap_bond_length(species[parent])
+            coords[h] = p + bl * direction
 
     def _dedupe_superimposed_atoms(self, species, coords, capped_h_indices, label="", tol=0.85):
         """Drop atoms that sit on top of another atom.
