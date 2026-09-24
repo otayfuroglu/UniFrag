@@ -178,25 +178,31 @@ class COF:
             except nx.NetworkXNoPath:
                 return False
 
-        # Azine linkage Ar-CH=N-N=CH-Ar, formed from a polyaldehyde and
-        # hydrazine. The linkage is the N-N bond, not the flanking C=N: cutting
-        # the C=N instead (which the imine rule below does, because both the
-        # methine carbon and the nitrogen have two heavy neighbours) leaves the
-        # whole hydrazine unit dangling off one block, so that block terminates
-        # as =N-NH2 while the block on the other side terminates as a bare
-        # aryl-H. 1223 is the case in point: every one of its six bridges was
-        # cut at the C=N, giving a fragment with two nitrogens at some edges
-        # and one at others. Severing the N-N puts one nitrogen on each side
-        # and every edge terminates as the same Ar-CH=NH aldimine.
+        # Nitrogen-nitrogen linkages: azine (Ar-CH=N-N=CH-Ar), acylhydrazone
+        # (Ar-CH=N-NH-CO-Ar), azo and hydrazo (Ar-N=N-Ar, Ar-NH-NH-Ar). In all
+        # of them the N-N bond IS the linkage, and it is the bond to sever.
         #
-        # The test is deliberately narrow. Both nitrogens must have exactly two
-        # heavy neighbours, one carbon and one nitrogen, and each of those
-        # carbons must be a methine (two heavy neighbours, exactly one H) -
-        # that is the CH=N signature. An azo linkage Ar-N=N-Ar fails it because
-        # its carbons are ring carbons with three heavy neighbours, and an
-        # acylhydrazone fails it on the amide side, where the carbon carries an
-        # oxygen instead of a hydrogen. Both of those are left to the existing
-        # rules until their own chemistry is worked out.
+        # Cutting the flanking C=N instead - which the imine rule below does
+        # wherever that carbon has two heavy neighbours - leaves the whole
+        # N-N unit dangling off one block, so that block terminates as =N-NH2
+        # while the other side ends as a bare aryl. 1223 was the case in
+        # point: all six of its bridges were cut at the C=N, and the fragment
+        # came back with two nitrogens at some edges and one at others.
+        # Severing the N-N puts one nitrogen on each side, and every edge
+        # terminates the same way.
+        #
+        # The predicate is the bridging geometry, not any one chemistry: both
+        # nitrogens must have exactly two heavy neighbours, one carbon and one
+        # nitrogen, and the bond must lie outside any small ring. That covers
+        # every N-N bridge in the CoRE-COF set - 34 azine, 66 acylhydrazone,
+        # 15 azo/hydrazo, 2 mixed - while excluding ring systems (pyrazole,
+        # pyridazine, tetrazine) and pendant hydrazides, whose terminal
+        # nitrogen has no carbon of its own.
+        #
+        # The carbon on either side keeps its own chemistry, so the caps come
+        # out right per family without a special case: an azine gives two
+        # Ar-CH=NH aldimines, an acylhydrazone gives one aldimine and one
+        # primary amide, an azo or hydrazo bridge gives two anilines.
         azine_nn_bonds = set()
         azine_nitrogens = set()
         for _u, _v in undirected_graph.edges():
@@ -212,11 +218,6 @@ class COF:
                     break
                 if sorted(self.structure[nb].specie.symbol
                           for nb in _heavy) != ['C', 'N']:
-                    _ok = False
-                    break
-                _c = next(nb for nb in _heavy
-                          if self.structure[nb].specie.symbol == 'C')
-                if heavy_degree(_c) != 2 or h_count(_c) != 1:
                     _ok = False
                     break
             if _ok and not in_small_ring(_u, _v):
@@ -283,7 +284,7 @@ class COF:
             elif bond_pair == {'N'}:
                 if frozenset((u, v)) in azine_nn_bonds:
                     edges_to_remove.append((u, v))
-                    linkage_of[frozenset((u, v))] = ('azine', frozenset((u, v)))
+                    linkage_of[frozenset((u, v))] = ('N-N bridge', frozenset((u, v)))
 
         # Benzoxazole / oxazole linkage. The C2 carbon of the five-membered
         # oxazole ring is bonded to BOTH the ring oxygen and the ring nitrogen
@@ -586,7 +587,7 @@ class COF:
                         # exists to avoid (802's node came back with three of
                         # them). One nitrogen per edge is the whole point.
                         _linkage = linkage_of.get(frozenset((i, neighbor)))
-                        if _linkage is not None and _linkage[0] == 'azine':
+                        if _linkage is not None and _linkage[0] == 'N-N bridge':
                             continue
                         if (
                             self.structure[neighbor].specie.symbol in _CARRYOVER_ELEMENTS
