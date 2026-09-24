@@ -4080,6 +4080,14 @@ class COFFragmenter(BaseFragmenter):
         is never discarded in favour of a stray cap. The 0.85 A default sits
         below every real bond in this chemistry - the shortest is O-H at about
         0.96 A - and above the largest duplicate separation observed (0.75 A).
+
+        Two atoms of DIFFERENT elements that close are a short bond, not a
+        duplicate: every case this pass exists for - a heteroatom carried twice,
+        a linker image on top of another, a dimer layer over its own source -
+        puts the same element in both places. 209's hydroxyls are written with
+        an O-H of 0.80 A, and the flat cutoff was deleting all six of them and
+        leaving the oxygens bare. Across elements the bar drops to 0.50 A,
+        below anything that can be a bond at all.
         """
         n = len(species)
         if n < 2:
@@ -4094,7 +4102,8 @@ class COFFragmenter(BaseFragmenter):
             for j in order[a_pos + 1:]:
                 if j in dropped:
                     continue
-                if float(np.linalg.norm(co[i] - co[j])) < tol:
+                limit = tol if species[i] == species[j] else 0.50
+                if float(np.linalg.norm(co[i] - co[j])) < limit:
                     dropped.add(j)
         if not dropped:
             return species, coords, capped_h_indices
