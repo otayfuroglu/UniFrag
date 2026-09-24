@@ -5929,6 +5929,15 @@ class COFFragmenter(BaseFragmenter):
                     kept_nbs = hadj2.get(i, [])
                     if len(kept_nbs) >= 2:
                         continue
+                    # Counting heavy neighbours alone mistakes an already
+                    # complete nitrogen for an under-coordinated one. After an
+                    # azine N-N cut, 1223's terminal nitrogen holds a C=N (bond
+                    # order 2) plus the hydrogen that capped it earlier in this
+                    # same pass: one heavy neighbour, but a full valence of 3.
+                    # Capping it again produced the iminium N(C)(H)(H). Score
+                    # real bond order, as every other capper here does.
+                    if self._local_valence_used(i, species, coords) >= 3:
+                        continue
                     base = np.zeros(3)
                     if kept_nbs:
                         for nb in kept_nbs:

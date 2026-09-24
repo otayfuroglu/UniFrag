@@ -178,6 +178,51 @@ class COF:
             except nx.NetworkXNoPath:
                 return False
 
+        # Azine linkage Ar-CH=N-N=CH-Ar, formed from a polyaldehyde and
+        # hydrazine. The linkage is the N-N bond, not the flanking C=N: cutting
+        # the C=N instead (which the imine rule below does, because both the
+        # methine carbon and the nitrogen have two heavy neighbours) leaves the
+        # whole hydrazine unit dangling off one block, so that block terminates
+        # as =N-NH2 while the block on the other side terminates as a bare
+        # aryl-H. 1223 is the case in point: every one of its six bridges was
+        # cut at the C=N, giving a fragment with two nitrogens at some edges
+        # and one at others. Severing the N-N puts one nitrogen on each side
+        # and every edge terminates as the same Ar-CH=NH aldimine.
+        #
+        # The test is deliberately narrow. Both nitrogens must have exactly two
+        # heavy neighbours, one carbon and one nitrogen, and each of those
+        # carbons must be a methine (two heavy neighbours, exactly one H) -
+        # that is the CH=N signature. An azo linkage Ar-N=N-Ar fails it because
+        # its carbons are ring carbons with three heavy neighbours, and an
+        # acylhydrazone fails it on the amide side, where the carbon carries an
+        # oxygen instead of a hydrogen. Both of those are left to the existing
+        # rules until their own chemistry is worked out.
+        azine_nn_bonds = set()
+        azine_nitrogens = set()
+        for _u, _v in undirected_graph.edges():
+            if (self.structure[_u].specie.symbol != 'N'
+                    or self.structure[_v].specie.symbol != 'N'):
+                continue
+            _ok = True
+            for _n in (_u, _v):
+                _heavy = [nb for nb in undirected_graph.neighbors(_n)
+                          if self.structure[nb].specie.symbol != 'H']
+                if len(_heavy) != 2:
+                    _ok = False
+                    break
+                if sorted(self.structure[nb].specie.symbol
+                          for nb in _heavy) != ['C', 'N']:
+                    _ok = False
+                    break
+                _c = next(nb for nb in _heavy
+                          if self.structure[nb].specie.symbol == 'C')
+                if heavy_degree(_c) != 2 or h_count(_c) != 1:
+                    _ok = False
+                    break
+            if _ok and not in_small_ring(_u, _v):
+                azine_nn_bonds.add(frozenset((_u, _v)))
+                azine_nitrogens.update((_u, _v))
+
         for u, v, data in undirected_graph.edges(data=True):
             atom_u = self.structure[u].specie.symbol
             atom_v = self.structure[v].specie.symbol
@@ -206,6 +251,7 @@ class COF:
                 if (
                     heavy_degree(c_idx) == 2
                     and heavy_degree(n_idx) >= 2
+                    and n_idx not in azine_nitrogens
                     and not in_small_ring(u, v)
                 ):
                     edges_to_remove.append((u, v))
@@ -234,6 +280,10 @@ class COF:
                     linkage_of[frozenset((u, v))] = ('vinylene', frozenset((u, v)))
                     vinylene_partner[u] = v
                     vinylene_partner[v] = u
+            elif bond_pair == {'N'}:
+                if frozenset((u, v)) in azine_nn_bonds:
+                    edges_to_remove.append((u, v))
+                    linkage_of[frozenset((u, v))] = ('azine', frozenset((u, v)))
 
         # Benzoxazole / oxazole linkage. The C2 carbon of the five-membered
         # oxazole ring is bonded to BOTH the ring oxygen and the ring nitrogen
@@ -529,6 +579,15 @@ class COF:
                         # duplicated atoms merge on recombination; only the
                         # standalone helper-library and OnlyNode/OnlyLinker
                         # exports differ.
+                        # An azine cut is the exception: its two atoms are
+                        # both nitrogen, so carrying the far one back would
+                        # rebuild the N-N the cut just severed and hand the
+                        # block the very -N=N-H terminus this linkage rule
+                        # exists to avoid (802's node came back with three of
+                        # them). One nitrogen per edge is the whole point.
+                        _linkage = linkage_of.get(frozenset((i, neighbor)))
+                        if _linkage is not None and _linkage[0] == 'azine':
+                            continue
                         if (
                             self.structure[neighbor].specie.symbol in _CARRYOVER_ELEMENTS
                             or vinylene_partner.get(i) == neighbor
