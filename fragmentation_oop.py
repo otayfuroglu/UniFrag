@@ -3595,7 +3595,7 @@ class COFFragmenter(BaseFragmenter):
             new_h_indices = []
             for _ in range(deficit):
                 before = len(species)
-                self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+                self._place_capping_h_relaxing(i, base, self.cap_bond_length(sp), species, coords, capped_h_flags=capped_h_flags)
                 if len(species) == before:
                     break
                 new_h_indices.append(before)
@@ -3921,6 +3921,24 @@ class COFFragmenter(BaseFragmenter):
             if not (0.7 < bl < 1.3):
                 bl = self.cap_bond_length(species[parent])
             coords[h] = p + bl * direction
+
+    def _place_capping_h_relaxing(self, parent_idx, base_vec, bl, species, coords,
+                                  capped_h_flags=None):
+        """Place one capping H, easing the clearance demand until it fits.
+
+        Every capping loop here asked for 1.5 A of room and gave up silently
+        when there was none, so a terminal atom needing three hydrogens often
+        got two: 18 of the mis-capped sites across the outlier set are a methyl
+        left with one hydrogen missing. An H at 1.2 A from its neighbour is
+        tight but still a better model than a valence hole.
+        """
+        for mhh in (1.5, 1.2, 1.0):
+            before = len(species)
+            self.place_capping_h(parent_idx, base_vec, bl, species, coords,
+                                 min_hh=mhh, capped_h_flags=capped_h_flags)
+            if len(species) > before:
+                return True
+        return False
 
     def _drop_clipped_ring_heteroatoms(self, species, coords, capped_h_flags=None):
         """COF-only: remove ring heteroatoms the fragment boundary cut through.
@@ -4663,7 +4681,7 @@ class COFFragmenter(BaseFragmenter):
                 else:
                     base = np.array([1.0, 0.0, 0.0])
                 for _ in range(deficit):
-                    self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+                    self._place_capping_h_relaxing(i, base, self.cap_bond_length(sp), species, coords, capped_h_flags=capped_h_flags)
 
         # Enforce boron cap limit in this fallback path: at most 2 bonded H per B.
         remove_h = set()
@@ -4917,7 +4935,12 @@ class COFFragmenter(BaseFragmenter):
                     continue
                 if sp == "O" and self.oxygen_already_protonated(i, species, coords):
                     continue
-                cur_deg = len(hadj.get(i, []))
+                # Score bond order, not neighbour count. A ketone oxygen has a
+                # single heavy neighbour and is already complete; counting
+                # neighbours made it look one short and put an H on it, turning
+                # every C=O in 1012 into a hydroxyl - 85 of the 138 mis-capped
+                # sites across the outlier set came from this one line.
+                cur_deg = self._local_valence_used(i, species, coords)
                 deficit = max(0, target_valence[sp] - cur_deg)
                 if deficit <= 0:
                     continue
@@ -4931,7 +4954,7 @@ class COFFragmenter(BaseFragmenter):
                     base = np.array([1.0, 0.0, 0.0])
 
                 for _ in range(deficit):
-                    self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+                    self._place_capping_h_relaxing(i, base, self.cap_bond_length(sp), species, coords, capped_h_flags=capped_h_flags)
 
         # Keep helper heavy atoms fixed; only adjust capped H atoms.
         self._drop_clipped_ring_heteroatoms(species, coords, capped_h_flags)
@@ -6025,7 +6048,7 @@ class COFFragmenter(BaseFragmenter):
                     n_cap = 0
 
                 for _ in range(n_cap):
-                    self.place_capping_h(li, dir_vec, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+                    self._place_capping_h_relaxing(li, dir_vec, self.cap_bond_length(sp), species, coords, capped_h_flags=capped_h_flags)
 
         # COF fragments can leave terminal O atoms without a broken heavy-atom
         # edge marker; cap those O sites with H before geometry refinement.
@@ -6373,7 +6396,7 @@ class COFFragmenter(BaseFragmenter):
                         base = np.array([1.0, 0.0, 0.0])
 
                     for _ in range(n_cap):
-                        self.place_capping_h(new_i, base, self.cap_bond_length("C"), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+                        self._place_capping_h_relaxing(new_i, base, self.cap_bond_length("C"), species, coords, capped_h_flags=capped_h_flags)
 
                 # Post-trim N capping: if retained N has low retained valence,
                 # place one H opposite to kept neighbors.
