@@ -114,11 +114,20 @@ def analyse(fr):
             # two can land on opposite sides of the line. Accept any hydrogen
             # count that a bond order in that window would justify, and flag
             # only what is wrong however the bond is read.
-            orders={_F._terminal_bond_order(sp[i], sp[j], d+off, scale)
-                    for off in (-0.02, 0.0, 0.02)}
+            if _F._severed_alkene_terminus(i, j, sp, co):
+                # The far half of a cut vinylene bridge. Its bond is a C=C
+                # however long the entry drew it, so it takes two hydrogens;
+                # judging it by length would report the correct =CH2 as a
+                # methyl one hydrogen short.
+                orders={2}
+            else:
+                orders={_F._terminal_bond_order(sp[i], sp[j], d+off, scale)
+                        for off in (-0.02, 0.0, 0.02)}
             allowed={tgt-o for o in orders}
             if nh not in allowed:
-                deficit=tgt-_F._terminal_bond_order(sp[i], sp[j], d, scale)
+                # Report the deficit implied by the SAME bond order the test
+                # used, or the message contradicts the verdict ("H=3 need=3").
+                deficit=tgt-min(orders)
                 bad_term.append((i, sp[i], f"H={nh} need={deficit}"))
     out["over_coord"]=over
     out["bad_terminal"]=bad_term

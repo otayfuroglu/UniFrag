@@ -3777,6 +3777,75 @@ class COFFragmenter(BaseFragmenter):
             return None
         return n_idx if idx == c_idx else c_idx
 
+    def _severed_alkene_terminus(self, t_idx, anchor_idx, species, coords):
+        """COF-only: is this bare carbon the far half of a severed C=C?
+
+        The vinylene carry-over exists so a block keeps an intact sp2 vinyl
+        terminus, Ar-CH=CH2, instead of collapsing to a tetrahedral Ar-CH3 -
+        but the capper sizes the terminus from the bond LENGTH, and several
+        entries here draw the whole framework at one distance. 187 draws every
+        C-C at 1.40 A, so its three vinylene termini were read as single bonds
+        and came back as methyls.
+
+        Valence decides it where length cannot. The anchor is a carbon with
+        exactly two heavy neighbours and exactly one hydrogen: three
+        substituents in all, so in a neutral closed-shell molecule it must
+        double-bond one of them. The other heavy neighbour is a ring or branch
+        carbon with its own full complement, so the only partner left is this
+        bare, hydrogen-free carbon hanging off the cut. A severed aryl bond
+        does not match - there the anchor sits in a ring and carries three
+        heavy neighbours - and neither does an sp3 chain, whose anchor carries
+        two hydrogens.
+        """
+        if species[t_idx] != "C" or species[anchor_idx] != "C":
+            return False
+        pos = lambda k: np.array(coords[k], dtype=float)
+
+        def nbrs(k):
+            out = []
+            for j, spj in enumerate(species):
+                if j == k:
+                    continue
+                if self.is_valid_bond(species[k], spj,
+                                      float(np.linalg.norm(pos(k) - pos(j)))):
+                    out.append(j)
+            return out
+
+        # Deliberately NOT a condition on this carbon's own hydrogens. The
+        # capper asks before placing any, the QA report asks afterwards, and
+        # both must get the same answer or the report contradicts the code that
+        # wrote the file. The anchor carries the whole discriminator anyway.
+        if [j for j in nbrs(t_idx) if species[j] != "H"] != [anchor_idx]:
+            return False
+        # This rule exists for entries that draw a C=C at aromatic length, not
+        # to overrule a length that is unambiguous. 1.47 A and beyond is a
+        # plain single bond whatever the environment looks like: 402 has a
+        # saturated carbon at 1.53 A whose parent is simply missing a hydrogen,
+        # and without this guard it was read as an alkene.
+        if float(np.linalg.norm(pos(t_idx) - pos(anchor_idx))) > 1.46:
+            return False
+        a_nb = nbrs(anchor_idx)
+        a_heavy = [j for j in a_nb if species[j] != "H"]
+        a_h = [j for j in a_nb if species[j] == "H"]
+        if len(a_heavy) != 2 or len(a_h) != 1 or t_idx not in a_heavy:
+            return False
+        other = a_heavy[0] if a_heavy[1] == t_idx else a_heavy[1]
+        if len(nbrs(other)) < 3:
+            return False
+        # Sanity check the anchor really is planar; a distorted or broken site
+        # is left to the length-based path rather than forced into a double bond.
+        n = np.cross(pos(t_idx) - pos(anchor_idx), pos(other) - pos(anchor_idx))
+        nn = np.linalg.norm(n)
+        if nn < 1e-8:
+            return False
+        v = pos(a_h[0]) - pos(anchor_idx)
+        nv = np.linalg.norm(v)
+        if nv < 1e-8:
+            return False
+        out_of_plane = abs(90.0 - np.degrees(np.arccos(
+            np.clip(abs(float(np.dot(v / nv, n / nn))), -1.0, 1.0))))
+        return out_of_plane <= 20.0
+
     def _local_valence_used(self, idx, species, coords):
         """Valence already consumed at `idx`, counting bond ORDER not just
         neighbour count. An aromatic bond (C-C 1.39, C-N 1.38) scores 1, so
@@ -3848,7 +3917,11 @@ class COFFragmenter(BaseFragmenter):
             # ~1.28 A vs aromatic C-N ~1.38 A and amine C-N ~1.47 A), so use it
             # to charge the anchor its true bond order.
             anchor_d = float(np.linalg.norm(pos - np.array(coords[anchor], dtype=float)))
-            if self._drawn_nitrile_partner(i, species, coords) == anchor:
+            if self._severed_alkene_terminus(i, anchor, species, coords):
+                # The far half of a cut vinylene bridge: two hydrogens, giving
+                # the planar =CH2 the carry-over exists to preserve.
+                anchor_order = 2
+            elif self._drawn_nitrile_partner(i, species, coords) == anchor:
                 # A nitrile nitrogen has exactly one heavy neighbour and no
                 # hydrogen, which is also what a severed amine looks like, and
                 # entries that draw the C#N at 1.38 A instead of 1.15 A defeat
@@ -4864,7 +4937,11 @@ class COFFragmenter(BaseFragmenter):
 
         nodes = getattr(result, "nodes", [])
         linkers = getattr(result, "linkers", [])
-        if not nodes or not linkers:
+        # A framework can be built from ONE kind of building block, joined to
+        # copies of itself: 187 is triazine rings bridged directly by vinylene,
+        # so the cut yields nodes and no linker at all. That is a complete
+        # decomposition, not a failed one, and it still has a node to export.
+        if not nodes and not linkers:
             print("  coffragmentor found no node/linker set to export.")
             return False
 
@@ -5294,8 +5371,23 @@ class COFFragmenter(BaseFragmenter):
 
         nodes = list(getattr(result, "nodes", []))
         linkers = list(getattr(result, "linkers", []))
-        if not nodes or not linkers:
+        if not nodes:
             return None
+
+        # Some frameworks are built from ONE kind of building block bonded
+        # straight to copies of itself, with no second unit between them: 187
+        # is triazine rings joined by vinylene bridges, so the cut gives two
+        # identical C9H3N3 nodes and no linker. Bailing out here sent it to the
+        # supercell fallback, where the porphyrin detector swallowed the whole
+        # N-rich sheet and returned one 466-atom blob with no node or linker
+        # export at all. The partner a node reaches for is then simply another
+        # node, and everything below - image scoring, arm coverage, the merge -
+        # works unchanged on that pool.
+        single_block = not linkers
+        partners = linkers if linkers else nodes
+        if single_block:
+            print("  -> COF single building block: the node bonds to copies of "
+                  "itself, so its partner is another node.")
 
         self._export_coffragmentor_library(result, Path(cif_path).stem)
 
@@ -5346,8 +5438,13 @@ class COFFragmenter(BaseFragmenter):
             return score, attach_sites
 
         scored_images = []
-        for idx, linker in enumerate(linkers):
+        for idx, linker in enumerate(partners):
             for image_shift in image_vectors:
+                # The node cannot be its own partner: the same SBU at zero
+                # shift is the piece we already placed.
+                if (linker is node
+                        and float(np.linalg.norm(np.asarray(image_shift, dtype=float))) < 1e-6):
+                    continue
                 score, attach_sites = linker_image_score(linker, image_shift)
                 if score[0] > 0:
                     scored_images.append((score, idx, linker, image_shift, attach_sites))
@@ -8447,6 +8544,14 @@ def main():
                 print(f"  -> QUARANTINED '{frag_name}': odd electron count "
                       f"(Z_sum={z}); held in fragments_quarantine.extxyz, "
                       f"not written to the main collection.")
+                # A fragment that is being held back must not keep its
+                # duplicate key: it claimed the key above, before anyone knew
+                # it was an open shell, and a later structure with the same
+                # skeleton was then skipped as a duplicate of something the
+                # collection never received. 1049's node vanished exactly that
+                # way, suppressed by 1050's quarantined radical.
+                seen_keys.discard(
+                    COFFragmenter._chemical_identity_key(_sp, _co))
 
             if is_dir:
                 with open(csv_path, "a") as f:
