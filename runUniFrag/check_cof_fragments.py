@@ -34,8 +34,11 @@ def read_extxyz(path):
                 parts=f.readline().split()
                 sp.append(parts[0]); co.append([float(x) for x in parts[1:4]])
             m=re.search(r"label=(\S+)", comment)
+            mc=re.search(r'capped_h="([^"]*)"', comment)
             frames.append({"label": m.group(1) if m else "?",
-                           "species": sp, "coords": np.array(co)})
+                           "species": sp, "coords": np.array(co),
+                           "capped_h": ([int(t) for t in mc.group(1).split()]
+                                        if mc else None)})
     return frames
 
 def bonds_of(sp, co):
@@ -123,7 +126,41 @@ def analyse(fr):
     zsum=sum(Z.get(s,0) for s in sp)
     out["zsum"]=zsum; out["odd_electron"]=(zsum % 2 == 1)
 
-    clash=None
+    # ---- close contacts ----
+    # Two rules, both narrower than a blanket minimum-distance scan.
+    #
+    # 1. Only pairs involving an atom this code ADDED count. The framework's
+    #    own atoms are never moved or deleted, so a contact between two parent
+    #    atoms is the crystal's geometry, not a modelling defect - and several
+    #    CoRE-COF entries are idealised models whose own aromatic hydrogens sit
+    #    1.4 A apart. Reporting those said nothing about the fragment.
+    #
+    # 2. Inside one molecule the bar is 0.9 A for a hydrogen against anything.
+    #    A 1-4 or 1-5 contact in a planar or crowded system is legitimately
+    #    short, so the only unambiguous defect is a hydrogen essentially on top
+    #    of another atom. Between separate molecules - the two layers of a
+    #    stacked dimer, which are not bonded to each other - there is no such
+    #    excuse, so the vdW-scale bar still applies there.
+    INTRA_FLOOR = 0.9
+    INTER_FLOOR = 2.0
+
+    added = fr.get("capped_h")
+    out["has_provenance"] = added is not None
+    added = set(added or [])
+
+    # molecule membership, so intra and inter can be told apart
+    mol_of = {}; mol_id = 0
+    for i in range(n):
+        if i in mol_of: continue
+        stack=[i]; mol_of[i]=mol_id
+        while stack:
+            u=stack.pop()
+            for v in adj[u]:
+                if v not in mol_of:
+                    mol_of[v]=mol_id; stack.append(v)
+        mol_id += 1
+
+    clash=None; clash_pair=None
     if n >= 2:
         d=np.linalg.norm(co[:,None,:]-co[None,:,:], axis=-1)
         excl=set()
@@ -132,13 +169,26 @@ def analyse(fr):
                 excl.add((i,j)); excl.add((j,i))
                 for k in adj[j]:
                     if k!=i: excl.add((i,k)); excl.add((k,i))
-        best=1e9
+        worst=None
         for i in range(n):
             for j in range(i+1,n):
                 if (i,j) in excl: continue
-                if d[i,j] < best: best=float(d[i,j])
-        clash = None if best>=1e9 else best
+                # Without provenance nothing can be attributed, so fall back to
+                # the floor that is never legitimate for any pair.
+                if out["has_provenance"]:
+                    if i not in added and j not in added: continue
+                    if sp[i]!="H" and sp[j]!="H": continue
+                same = mol_of[i]==mol_of[j]
+                floor = INTRA_FLOOR if same else INTER_FLOOR
+                if not out["has_provenance"]:
+                    floor = INTRA_FLOOR
+                dd=float(d[i,j])
+                if dd < floor and (worst is None or dd < worst[0]):
+                    worst=(dd, i, j, "same molecule" if same else "between molecules")
+        if worst is not None:
+            clash, clash_pair = worst[0], worst
     out["min_nonbonded"]=clash
+    out["clash_pair"]=clash_pair
 
     seen=set(); pieces=0
     for i in range(n):
@@ -210,9 +260,10 @@ def main():
         # S3 valence
         if a["over_coord"]: overv.append((lab, a["over_coord"][:3]))
         if a["bad_terminal"]: underv.append((lab, a["bad_terminal"][:3]))
-        # S4/S6 clash
-        if a["min_nonbonded"] is not None and a["min_nonbonded"] < 2.0:
-            clashing.append((lab, round(a["min_nonbonded"],2)))
+        # S4/S6 clash: an added atom sitting on top of something
+        if a["min_nonbonded"] is not None:
+            clashing.append((lab, round(a["min_nonbonded"],2),
+                             a["clash_pair"][3] if a["clash_pair"] else "?"))
         if a["pieces"] > 2: multi.append((lab, a["pieces"]))
 
     report["unique_stems"]=len(stems)
@@ -226,7 +277,9 @@ def main():
     if degenerate: fails.append(f"[S2] {len(degenerate)} degenerate helper fragments: {degenerate[:6]}")
     if odd: fails.append(f"[S5] {len(odd)} odd-electron fragments (multiplicity != 1): {odd[:6]}")
     if overv: fails.append(f"[S3] {len(overv)} fragments with over-coordinated atoms: {overv[:4]}")
-    if clashing: warns.append(f"[S4/S6] {len(clashing)} fragments with non-bonded contact < 2.0 A: {clashing[:6]}")
+    if clashing:
+        warns.append(f"[S4/S6] {len(clashing)} fragments where an added atom is too close "
+                     f"(<0.9 A inside a molecule, <2.0 A between molecules): {clashing[:6]}")
     if underv: warns.append(f"[S3] {len(underv)} fragments with mis-capped terminal sites: {underv[:4]}")
     if multi: warns.append(f"[S6] {len(multi)} fragments in >2 disconnected pieces: {multi[:6]}")
 

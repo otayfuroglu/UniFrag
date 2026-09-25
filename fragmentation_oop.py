@@ -12,6 +12,12 @@ from pymatgen.io.cif import CifParser
 class FragmentResult:
     species: list
     coords: list
+    # Indices of the atoms this code ADDED - the capping hydrogens and anything
+    # the parity repair put on. The framework's own atoms are never moved or
+    # deleted, so these are the only atoms a geometry complaint can be about;
+    # carrying the list out to the extxyz lets the QA report say so instead of
+    # judging every pair of atoms in the fragment.
+    capped_h: list = None
 
 
 _EXTXYZ_Z = {
@@ -30,12 +36,21 @@ def _electron_count(species):
     return sum(_EXTXYZ_Z.get(s, 6) for s in species)
 
 
-def _write_extxyz(filepath, species, coords, label, extra=""):
+def _write_extxyz(filepath, species, coords, label, extra="", capped_h=None):
     """
     Writes a molecular fragment to an ExtXYZ file.
     Does not require any external library (like ASE) to ensure zero-dependency robustness.
+
+    `capped_h` records which atoms this code added. It goes in the comment line
+    as a key=value pair, which is valid extxyz and ignored by any reader that
+    does not ask for it, so the per-atom columns stay exactly as they were.
     """
     suffix = f" {extra}" if extra else ""
+    # An empty list still gets written: "this fragment has no added atoms" and
+    # "nobody recorded which atoms were added" are different facts, and the QA
+    # report has to tell them apart before it decides what a contact means.
+    if capped_h is not None:
+        suffix += ' capped_h="' + " ".join(str(int(i)) for i in sorted(set(capped_h))) + '"'
     with open(filepath, "a") as f:
         f.write(f"{len(species)}\n")
         f.write(f"Properties=species:S:1:pos:R:3 label={label}{suffix} pbc=\"F F F\"\n")
@@ -97,11 +112,17 @@ def _parse_extxyz(filepath):
                 species.append(parts[0])
                 coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
         
+        capped_h = None
+        if 'capped_h="' in comment:
+            val = comment.split('capped_h="', 1)[1].split('"', 1)[0]
+            capped_h = [int(t) for t in val.split() if t.lstrip("-").isdigit()]
+
         if len(species) == n_atoms:
             frames.append({
                 "label": label,
                 "species": species,
-                "coords": coords
+                "coords": coords,
+                "capped_h": capped_h
             })
         i += 2 + n_atoms
     return frames
@@ -167,10 +188,16 @@ def _update_extxyz_collection(extxyz_path, clean_base, new_fragments):
             os.remove(temp_path)
             
         for f in remaining_frames:
-            _write_extxyz(temp_path, f["species"], f["coords"], f["label"])
-            
-        for species, coords, label in new_fragments:
-            _write_extxyz(temp_path, species, coords, label)
+            # Keep whatever provenance the frame already carried: rewriting the
+            # whole file to replace one structure must not strip the capped_h
+            # list off every other frame in it.
+            _write_extxyz(temp_path, f["species"], f["coords"], f["label"],
+                          capped_h=f.get("capped_h"))
+
+        for frag in new_fragments:
+            species, coords, label = frag[0], frag[1], frag[2]
+            capped_h = frag[3] if len(frag) > 3 else None
+            _write_extxyz(temp_path, species, coords, label, capped_h=capped_h)
             
         if os.path.exists(temp_path):
             if os.path.exists(extxyz_path):
@@ -4637,7 +4664,8 @@ class COFFragmenter(BaseFragmenter):
         species_copy, coords_copy, capped_h_indices = self.fix_odd_electron_multiplicity(
             species_copy, coords_copy, capped_h_indices, label=label
         )
-        return FragmentResult(species=species_copy, coords=coords_copy)
+        return FragmentResult(species=species_copy, coords=coords_copy,
+                              capped_h=list(capped_h_indices))
 
     def _prune_duplicate_cof_helper_files(self, out_dir, decimals=1):
         seen = {}
@@ -5245,7 +5273,8 @@ class COFFragmenter(BaseFragmenter):
             print("  -> Helper fragments available in cof_nodes_lib/ and cof_linkers_lib/.")
             print(f"Final size: {len(species)} atoms")
             print(f"Saved: {output_path}")
-        return FragmentResult(species=species, coords=coords)
+        return FragmentResult(species=species, coords=coords,
+                              capped_h=list(capped_h_indices))
 
     def _try_coffragmentor_node_linker_fragment(self, cif_path, output_path, minimize=False, single_linker=False):
         try:
@@ -5495,7 +5524,8 @@ class COFFragmenter(BaseFragmenter):
             print("  -> Helper fragments available in cof_nodes_lib/ and cof_linkers_lib/.")
             print(f"Final size: {len(species)} atoms")
             print(f"Saved: {output_path}")
-        return FragmentResult(species=species, coords=coords)
+        return FragmentResult(species=species, coords=coords,
+                              capped_h=list(capped_h_indices))
 
     def extract(self, cif_path, output_path="cof_fragment.xyz", center_idx=-1, minimize=False, single_linker=False):
         """`single_linker` only applies together with `minimize`: keep the node
@@ -5821,7 +5851,8 @@ class COFFragmenter(BaseFragmenter):
                         if output_path:
                             mol.to(filename=output_path, fmt="xyz")
                             print(f"Saved: {output_path}")
-                        return FragmentResult(species=species, coords=coords)
+                        return FragmentResult(species=species, coords=coords,
+                                              capped_h=list(capped_h_indices))
 
         bo_node_species = {"B", "O"}
         bo_node_atoms = {i for i in range(len(supercell)) if sc_sym[i] in bo_node_species}
@@ -7075,7 +7106,8 @@ class COFFragmenter(BaseFragmenter):
         if output_path:
             mol.to(filename=output_path, fmt="xyz")
             print(f"Saved: {output_path}")
-        return FragmentResult(species=species, coords=coords)
+        return FragmentResult(species=species, coords=coords,
+                              capped_h=list(capped_h_indices))
 
 
 # ---------------------------------------------------------------------------
@@ -8371,7 +8403,8 @@ def main():
                     if base_name.endswith(".cif"): base_name = base_name[:-4]
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
                     frag_name = f"{clean_base}FragCof{suffix}"
-                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
+                                             res_obj.capped_h))
 
             if r.get("only_linker_res"):
                 for idx, res_obj in enumerate(r["only_linker_res"]):
@@ -8384,7 +8417,8 @@ def main():
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
                     suffix = f"_{idx}" if len(r["only_linker_res"]) > 1 else ""
                     frag_name = f"{clean_base}FragCofOnlyLinker{suffix}"
-                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
+                                             res_obj.capped_h))
 
             if r.get("only_node_res"):
                 for idx, res_obj in enumerate(r["only_node_res"]):
@@ -8397,18 +8431,19 @@ def main():
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
                     suffix = f"_{idx}" if len(r["only_node_res"]) > 1 else ""
                     frag_name = f"{clean_base}FragCofOnlyNode{suffix}"
-                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
+                                             res_obj.capped_h))
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
 
             clean_frags, odd_frags = [], []
-            for species, coords, frag_name in new_extxyz_frags:
+            for species, coords, frag_name, capped_h in new_extxyz_frags:
                 z = _electron_count(species)
                 if z % 2:
-                    odd_frags.append((species, coords, frag_name, z))
+                    odd_frags.append((species, coords, frag_name, capped_h, z))
                 else:
-                    clean_frags.append((species, coords, frag_name))
-            for _sp, _co, frag_name, z in odd_frags:
+                    clean_frags.append((species, coords, frag_name, capped_h))
+            for _sp, _co, frag_name, _ch, z in odd_frags:
                 print(f"  -> QUARANTINED '{frag_name}': odd electron count "
                       f"(Z_sum={z}); held in fragments_quarantine.extxyz, "
                       f"not written to the main collection.")
@@ -8416,11 +8451,13 @@ def main():
             if is_dir:
                 with open(csv_path, "a") as f:
                     f.write(csv_row)
-                for species, coords, frag_name in clean_frags:
-                    _write_extxyz(extxyz_path, species, coords, frag_name)
-                for species, coords, frag_name, z in odd_frags:
+                for species, coords, frag_name, capped_h in clean_frags:
+                    _write_extxyz(extxyz_path, species, coords, frag_name,
+                                  capped_h=capped_h)
+                for species, coords, frag_name, capped_h, z in odd_frags:
                     _write_extxyz(quarantine_path, species, coords, frag_name,
-                                  extra=f"quarantine=odd_electron zsum={z}")
+                                  extra=f"quarantine=odd_electron zsum={z}",
+                                  capped_h=capped_h)
             else:
                 base_name = r["cif"]
                 if base_name.endswith(".cif"): base_name = base_name[:-4]
@@ -8436,7 +8473,7 @@ def main():
                 if odd_frags:
                     _update_extxyz_collection(
                         quarantine_path, clean_base,
-                        [(sp, co, nm) for sp, co, nm, _z in odd_frags],
+                        [(sp, co, nm, ch) for sp, co, nm, ch, _z in odd_frags],
                     )
 
         if is_dir and args.nproc > 1:
