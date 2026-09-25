@@ -999,6 +999,27 @@ class BaseFragmenter:
         """
         return False
 
+    def _carries_hydrogen(self, idx, species, coords):
+        """Hook: does this heavy atom already have a hydrogen on it?
+
+        The base answer uses the fixed cutoffs this method has always used.
+        COFFragmenter overrides it; see that docstring.
+        """
+        sp = species[idx]
+        pos = np.array(coords[idx], dtype=float)
+        h_cut = 1.25 if sp in {"N", "O"} else 1.20
+        return any(
+            spj == "H" and np.linalg.norm(pos - np.array(coords[j], dtype=float)) <= h_cut
+            for j, spj in enumerate(species)
+        )
+
+    def _place_cap_h(self, parent_idx, base_vec, bl, species, coords, capped_h_flags):
+        """Hook: place one capping hydrogen. Base keeps the previous call."""
+        before = len(species)
+        self.place_capping_h(parent_idx, base_vec, bl, species, coords,
+                             min_hh=1.5, capped_h_flags=capped_h_flags)
+        return len(species) > before
+
     def _cap_open_oxygens(self, species, coords, capped_h_flags):
         heavy_idx = [i for i, sp in enumerate(species) if sp != "H"]
         for i in list(heavy_idx):
@@ -1006,12 +1027,7 @@ class BaseFragmenter:
                 continue
             sp = species[i]
             pos = np.array(coords[i], dtype=float)
-            h_cut = 1.25 if sp in {"N", "O"} else 1.20
-            has_h = any(
-                spj == "H" and np.linalg.norm(pos - np.array(coords[j], dtype=float)) <= h_cut
-                for j, spj in enumerate(species)
-            )
-            if has_h:
+            if self._carries_hydrogen(i, species, coords):
                 continue
             if sp == "O" and self.oxygen_already_protonated(i, species, coords):
                 continue
@@ -1048,10 +1064,11 @@ class BaseFragmenter:
                 if np.linalg.norm(base) < 1e-12:
                     base = pos - np.mean([np.array(coords[nb], dtype=float) for nb in heavy_neighbors], axis=0)
 
-            before = len(species)
-            self.place_capping_h(i, base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
-            if len(species) == before and np.linalg.norm(base) > 1e-12:
-                self.place_capping_h(i, -base, self.cap_bond_length(sp), species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
+            placed = self._place_cap_h(i, base, self.cap_bond_length(sp),
+                                       species, coords, capped_h_flags)
+            if not placed and np.linalg.norm(base) > 1e-12:
+                self._place_cap_h(i, -base, self.cap_bond_length(sp),
+                                  species, coords, capped_h_flags)
 
     def _make_qm_ready_linker(self, species, coords, label="only_linker"):
         species_copy = list(species)
@@ -3921,6 +3938,33 @@ class COFFragmenter(BaseFragmenter):
             if not (0.7 < bl < 1.3):
                 bl = self.cap_bond_length(species[parent])
             coords[h] = p + bl * direction
+
+    def _carries_hydrogen(self, idx, species, coords):
+        """COF-only: ask this class's own bond perception, not a fixed cutoff.
+
+        The base test calls a C-H bond only up to 1.20 A while is_valid_bond
+        accepts one out to 1.34. 215 writes its aromatic C-H at 1.204 A, so
+        every one of them fell in the gap: the carbon looked bare, got a second
+        hydrogen, and that hydrogen landed inside the neighbouring aromatic
+        bond - eight atoms bonded to two carbons at once, in a parent that has
+        no over-coordinated atom of its own.
+        """
+        pos = np.asarray(coords[idx], dtype=float)
+        sp = species[idx]
+        for j, spj in enumerate(species):
+            if spj != "H" or j == idx:
+                continue
+            d = float(np.linalg.norm(pos - np.asarray(coords[j], dtype=float)))
+            if self.is_valid_bond(sp, "H", d):
+                return True
+        return False
+
+    def _place_cap_h(self, parent_idx, base_vec, bl, species, coords, capped_h_flags):
+        """COF-only: place through the relaxing helper, which demands real
+        clearance from neighbouring heavy atoms before it accepts a site."""
+        return self._place_capping_h_relaxing(parent_idx, base_vec, bl,
+                                              species, coords,
+                                              capped_h_flags=capped_h_flags)
 
     def _place_capping_h_relaxing(self, parent_idx, base_vec, bl, species, coords,
                                   capped_h_flags=None):
