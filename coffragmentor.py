@@ -198,6 +198,10 @@ class COF:
         # that ring. Pyridine-type ring N (one per ring) and fused imidazoles
         # do not match, and neither does a pyrazine whose nitrogen carries a
         # substituent.
+        def _heavy_nbrs_of(idx):
+            return [nb for nb in undirected_graph.neighbors(idx)
+                    if self.structure[nb].specie.symbol != 'H']
+
         def _is_nitrile_carbon(idx):
             """A carbon whose only other neighbour is a terminal nitrogen."""
             if self.structure[idx].specie.symbol != 'C':
@@ -239,6 +243,56 @@ class COF:
                     return False
             return aryl == 1 and nitrile <= 1
 
+        def _is_amide_bond(u, v):
+            """The C-N bond of a secondary aryl amide, Ar-C(=O)-NH-Ar'.
+
+            Polyamide COFs are condensed from an aryl diacid chloride and an
+            aryl diamine, so the amide C-N bond is the linkage and is the bond
+            to sever. Cutting it hands the acyl block its own carbonyl and, via
+            the carry-over below, a copy of the nitrogen - which caps to
+            Ar-C(=O)NH2, the amide half of the condensation - while the amine
+            block keeps its own nitrogen and caps to Ar-NH2. That is exactly
+            the pair a polyamide is made from.
+
+            The imine rule above cannot reach these: it requires the carbon to
+            have two heavy neighbours, and an amide carbon has three. Without
+            this rule 24 and 1013 matched no linkage chemistry at all and fell
+            through to a fallback that cut straight through their backbone,
+            leaving two methyl stubs 2.39 A apart.
+
+            The test is the carbonyl on one side and a bridging N-H on the
+            other: a carbon whose three heavy neighbours are one terminal
+            oxygen at a carbonyl distance, one nitrogen and one carbon, with
+            that nitrogen carrying exactly two heavy neighbours, and the C-N
+            bond outside any small ring. Each clause excludes a neighbouring
+            group this must not cut - an imide nitrogen carries two carbonyls
+            and so has three heavy neighbours, a urea or carbamate carbon has
+            no carbon neighbour, a primary amide's nitrogen is terminal, and a
+            lactam's C-N lies in a ring.
+            """
+            c_idx = u if self.structure[u].specie.symbol == 'C' else v
+            n_idx = v if c_idx == u else u
+            if heavy_degree(c_idx) != 3 or heavy_degree(n_idx) != 2:
+                return False
+            # The nitrogen's other neighbour must be a carbon. An acylhydrazone
+            # (Ar-C(=O)-NH-N=CH-Ar) carries a real amide group, but its linkage
+            # is the N-N bond and the rule above already cuts it there; without
+            # this clause the amide test matched first and moved the cut onto
+            # the carbonyl, which changed the blocks of seven structures that
+            # were already being cut correctly.
+            if any(self.structure[nb].specie.symbol != 'C'
+                   for nb in _heavy_nbrs_of(n_idx)):
+                return False
+            nbrs = _heavy_nbrs_of(c_idx)
+            syms = sorted(self.structure[nb].specie.symbol for nb in nbrs)
+            if syms != ['C', 'N', 'O']:
+                return False
+            o_idx = next(nb for nb in nbrs
+                         if self.structure[nb].specie.symbol == 'O')
+            if heavy_degree(o_idx) != 1 or bond_length(c_idx, o_idx) > 1.30:
+                return False
+            return not in_small_ring(u, v)
+
         # Six-membered heteroatom linkage rings: two aromatic units fused
         # through a ring whose only heteroatoms are a pair of bridges. A
         # pyrazine (two N, para) joins the sheets of 662 and 663; an oxazine
@@ -261,10 +315,6 @@ class COF:
         # match, and neither does a bridge carrying a substituent.
         pyrazine_bonds = {}
         pyrazine_bridge_atoms = set()
-
-        def _heavy_nbrs_of(idx):
-            return [nb for nb in undirected_graph.neighbors(idx)
-                    if self.structure[nb].specie.symbol != 'H']
 
         def _is_ring_bridge(idx):
             """Two heavy neighbours, both carbon: a bare N or O bridge."""
@@ -408,6 +458,9 @@ class COF:
                 ):
                     edges_to_remove.append((u, v))
                     linkage_of[frozenset((u, v))] = ('imine', frozenset((u, v)))
+                elif _is_amide_bond(u, v):
+                    edges_to_remove.append((u, v))
+                    linkage_of[frozenset((u, v))] = ('amide', frozenset((u, v)))
             elif bond_pair == {'C'}:
                 # Vinylene (sp2-carbon) COF linkage: Ar-CH=CH-Ar, formed by
                 # Knoevenagel/aldol condensation. Both alkene carbons carry

@@ -95,6 +95,13 @@ def analyse(fr):
             over.append((i, sp[i], len(nbrs)))
         heavy=[j for j in nbrs if sp[j]!="H"]
         nh=len(nbrs)-len(heavy)
+        # A nitrile nitrogen has one heavy neighbour and no hydrogen, the same
+        # signature as a severed amine. Several entries draw the C#N far too
+        # long, so it cannot be told apart by bond length - the fragmenter
+        # settles it from the collinear geometry and this must agree, or every
+        # correctly bare nitrile nitrogen reads as a missing cap.
+        if _F._drawn_nitrile_partner(i, sp, co) is not None:
+            continue
         if sp[i]!="H" and len(heavy)==1:
             j=heavy[0]
             d=float(np.linalg.norm(co[i]-co[j]))

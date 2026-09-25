@@ -3687,21 +3687,91 @@ class COFFragmenter(BaseFragmenter):
             return False
         return self._local_valence_used(idx, species, coords) >= target
 
+    def _heavy_neighbours(self, idx, species, coords):
+        """Indices of the non-hydrogen atoms bonded to `idx`."""
+        sp = species[idx]
+        pos = np.array(coords[idx], dtype=float)
+        out = []
+        for j, spj in enumerate(species):
+            if j == idx or spj == "H":
+                continue
+            d = float(np.linalg.norm(pos - np.array(coords[j], dtype=float)))
+            if self.is_valid_bond(sp, spj, d):
+                out.append(j)
+        return out
+
+    def _drawn_nitrile_partner(self, idx, species, coords):
+        """COF-only: the other end of a nitrile, however long the CIF drew it.
+
+        Bond order is read from length everywhere else here, which is right
+        for a crystal but wrong for the idealised models in this collection:
+        903 draws its six nitriles with a 1.38 A C-N distance instead of
+        1.15 A, so the group was perceived as a single bond, the carbon looked
+        one valence short and the nitrogen two, and every C#N came back as
+        CH-NH2 - three spurious hydrogens apiece, one of them landing 1.21 A
+        from a ring hydrogen.
+
+        Geometry settles it without the length. A nitrile carbon has exactly
+        two heavy neighbours, one of them a nitrogen with no other heavy
+        neighbour, and the three atoms are collinear; nothing else in these
+        frameworks puts a terminal nitrogen at the end of a straight line. The
+        angle is the whole test, so a nitrile drawn at its true length matches
+        too and scores the same as before.
+
+        Returns the partner index, or None.
+        """
+        sp = species[idx]
+        if sp not in ("C", "N"):
+            return None
+        heavy = self._heavy_neighbours(idx, species, coords)
+        if sp == "N":
+            if len(heavy) != 1 or species[heavy[0]] != "C":
+                return None
+            c_idx, n_idx = heavy[0], idx
+        else:
+            c_idx = idx
+            ns = [j for j in heavy if species[j] == "N"
+                  and len(self._heavy_neighbours(j, species, coords)) == 1]
+            if len(heavy) != 2 or len(ns) != 1:
+                return None
+            n_idx = ns[0]
+        c_heavy = self._heavy_neighbours(c_idx, species, coords)
+        if len(c_heavy) != 2 or n_idx not in c_heavy:
+            return None
+        other = c_heavy[0] if c_heavy[1] == n_idx else c_heavy[1]
+        c = np.array(coords[c_idx], dtype=float)
+        va = np.array(coords[n_idx], dtype=float) - c
+        vb = np.array(coords[other], dtype=float) - c
+        na, nb = np.linalg.norm(va), np.linalg.norm(vb)
+        if na < 1e-9 or nb < 1e-9:
+            return None
+        ang = np.degrees(np.arccos(np.clip(float(np.dot(va, vb)) / (na * nb), -1.0, 1.0)))
+        if ang < 165.0:
+            return None
+        return n_idx if idx == c_idx else c_idx
+
     def _local_valence_used(self, idx, species, coords):
         """Valence already consumed at `idx`, counting bond ORDER not just
         neighbour count. An aromatic bond (C-C 1.39, C-N 1.38) scores 1, so
         ordinary aromatic sites behave exactly as before; only genuinely short
         double/triple bonds (imine C=N, carbonyl C=O, nitrile C#N) score more
         and correctly reduce the number of capping hydrogens.
+
+        A nitrile is scored from its geometry rather than its length, because
+        some entries here draw it far too long; see _drawn_nitrile_partner.
         """
         used = 0
         sp = species[idx]
         pos = np.array(coords[idx], dtype=float)
+        nitrile = self._drawn_nitrile_partner(idx, species, coords)
         for j, spj in enumerate(species):
             if j == idx:
                 continue
             d = float(np.linalg.norm(pos - np.array(coords[j], dtype=float)))
             if not self.is_valid_bond(sp, spj, d):
+                continue
+            if j == nitrile:
+                used += 3
                 continue
             used += (1 if spj == "H"
                      else self._terminal_bond_order(sp, spj, d, self._length_scale()))
@@ -3751,9 +3821,18 @@ class COFFragmenter(BaseFragmenter):
             # ~1.28 A vs aromatic C-N ~1.38 A and amine C-N ~1.47 A), so use it
             # to charge the anchor its true bond order.
             anchor_d = float(np.linalg.norm(pos - np.array(coords[anchor], dtype=float)))
-            anchor_order = self._terminal_bond_order(
-                sp, species[anchor], anchor_d, self._length_scale()
-            )
+            if self._drawn_nitrile_partner(i, species, coords) == anchor:
+                # A nitrile nitrogen has exactly one heavy neighbour and no
+                # hydrogen, which is also what a severed amine looks like, and
+                # entries that draw the C#N at 1.38 A instead of 1.15 A defeat
+                # the length test below. Its geometry does not: see
+                # _drawn_nitrile_partner. 903's six nitriles were each given
+                # two hydrogens here and came back as anilines.
+                anchor_order = 3
+            else:
+                anchor_order = self._terminal_bond_order(
+                    sp, species[anchor], anchor_d, self._length_scale()
+                )
             deficit = target_valence[sp] - (anchor_order + h_count)
             if deficit <= 0:
                 continue
@@ -3885,83 +3964,133 @@ class COFFragmenter(BaseFragmenter):
                     bl = self.cap_bond_length(species[n_idx])
                 coords[h] = npos + bl * direction
 
-    def _relieve_cap_clashes(self, species, coords, capped_h_indices, min_gap=1.8):
+    def _relieve_cap_clashes(self, species, coords, capped_h_indices,
+                             min_gap=1.8, capped_h_flags=None):
         """COF-only: swing a capping hydrogen away from whatever it is jammed
         against, keeping its bond length and its angle to the anchor.
 
-        Stacking two layers brings each layer's caps up against the other's.
-        Those caps are this model's own atoms, so unlike the framework they can
-        be moved: 1234's bilayer has capping hydrogens meeting at 1.35 A while
-        the material's own closest contact is 2.74 A. Only hydrogens that are
-        genuinely too close are touched, and only when a better direction
-        exists.
+        Two caps placed on neighbouring cut sites never see each other, so they
+        can be aimed into the same pocket: 663's node is a benzene ring whose
+        six amine caps sit on ortho carbons, and two of their hydrogens ended up
+        1.45 A apart. Stacking two layers does the same across the gap, which is
+        what this was first written for - 1234's bilayer had caps meeting at
+        1.35 A while the material's own closest contact is 2.74 A.
+
+        Caps are this model's own atoms, so unlike the framework they may be
+        moved; nothing else is touched. Only hydrogens that are genuinely too
+        close are considered, and only when a better direction exists.
         """
         if not capped_h_indices:
             return
         pos = [np.asarray(c, dtype=float) for c in coords]
 
-        def gap(idx, parent, probe=None):
+        def bonded_to(idx):
+            out = set()
+            for j, spj in enumerate(species):
+                if j == idx:
+                    continue
+                if self.is_valid_bond(species[idx], spj,
+                                      float(np.linalg.norm(pos[idx] - pos[j]))):
+                    out.add(j)
+            return out
+
+        def gap(idx, parent, probe=None, ignore=()):
+            """Closest approach, skipping the atoms bonded to the same parent.
+
+            A cap's geminal partners are placed by the bond angles, not by
+            packing - a methyl's own hydrogens sit 1.78 A apart - so counting
+            them would report every methyl cap as clashing and invite this pass
+            to distort it while chasing a contact that is correct.
+            """
             p = probe if probe is not None else pos[idx]
             best = float("inf")
             for j in range(len(species)):
-                if j == idx or j == parent:
+                if j == idx or j == parent or j in ignore:
                     continue
                 best = min(best, float(np.linalg.norm(p - pos[j])))
             return best
 
+        # Several passes, worst contact first. One cap's move can open the way
+        # for another that had nowhere to go, and a single ordered sweep leaves
+        # exactly the mutually-blocking pairs that used to be resolved by
+        # deleting one of them.
         moved = 0
-        for h in capped_h_indices:
-            if not (0 <= h < len(species)) or species[h] != "H":
-                continue
-            parent, best_d = None, float("inf")
-            for j, spj in enumerate(species):
-                if spj == "H" or j == h:
+        for _pass in range(4):
+            moved_this_pass = 0
+            order = sorted(
+                (h for h in capped_h_indices
+                 if 0 <= h < len(species) and species[h] == "H"),
+                key=lambda h: min((float(np.linalg.norm(pos[h] - pos[j]))
+                                   for j in range(len(species)) if j != h),
+                                  default=float("inf")),
+            )
+            for h in order:
+                parent, best_d = None, float("inf")
+                for j, spj in enumerate(species):
+                    if spj == "H" or j == h:
+                        continue
+                    d = float(np.linalg.norm(pos[h] - pos[j]))
+                    if self.is_valid_bond(spj, "H", d) and d < best_d:
+                        parent, best_d = j, d
+                if parent is None:
                     continue
-                d = float(np.linalg.norm(pos[h] - pos[j]))
-                if self.is_valid_bond(spj, "H", d) and d < best_d:
-                    parent, best_d = j, d
-            if parent is None:
-                continue
-            here = gap(h, parent)
-            if here >= min_gap:
-                continue
-            anchors = [
-                j for j, spj in enumerate(species)
-                if spj != "H" and j != parent
-                and self.is_valid_bond(species[parent], spj,
-                                       float(np.linalg.norm(pos[parent] - pos[j])))
-            ]
-            if not anchors:
-                continue
-            w = pos[parent] - pos[anchors[0]]
-            nw = np.linalg.norm(w)
-            if nw < 1e-9:
-                continue
-            w = w / nw
-            v = pos[h] - pos[parent]
-            bl = float(np.linalg.norm(v))
-            if bl < 1e-9:
-                continue
-            cos_t = float(np.dot(v / bl, w))
-            sin_t = float(np.sqrt(max(0.0, 1.0 - cos_t * cos_t)))
-            e1, e2 = self._orthonormal_basis(w)
-            best_pos, best_gap = None, here
-            for phi in range(0, 360, 20):
-                r = np.deg2rad(phi)
-                d_vec = cos_t * w + sin_t * (np.cos(r) * e1 + np.sin(r) * e2)
-                cand = pos[parent] + bl * d_vec
-                g = gap(h, parent, cand)
-                if g > best_gap + 1e-6:
-                    best_pos, best_gap = cand, g
-            # Improving a hopeless site is not worth it: a hydrogen that still
-            # cannot clear 1.2 A anywhere on its cone is left where it was, so
-            # this pass never turns one bad contact into a different one.
-            if best_gap < 1.2:
-                best_pos = None
-            if best_pos is not None:
-                coords[h] = best_pos
-                pos[h] = best_pos
-                moved += 1
+                geminal = bonded_to(parent) - {h}
+                here = gap(h, parent, ignore=geminal)
+                if here >= min_gap:
+                    continue
+                anchors = [
+                    j for j, spj in enumerate(species)
+                    if spj != "H" and j != parent
+                    and self.is_valid_bond(species[parent], spj,
+                                           float(np.linalg.norm(pos[parent] - pos[j])))
+                ]
+                if not anchors:
+                    continue
+                w = pos[parent] - pos[anchors[0]]
+                nw = np.linalg.norm(w)
+                if nw < 1e-9:
+                    continue
+                w = w / nw
+                v = pos[h] - pos[parent]
+                bl = float(np.linalg.norm(v))
+                if bl < 1e-9:
+                    continue
+                # The group's own hydrogens are set by its bond angles, so a
+                # rotation must not crowd them: turning one H of an -NH2 on its
+                # own used to put it on top of its partner, and the pair was
+                # then deleted as a duplicate. 663's node lost two hydrogens
+                # that way.
+                gem_h = [j for j in geminal if species[j] == "H"]
+                gem_now = min((float(np.linalg.norm(pos[h] - pos[j]))
+                               for j in gem_h), default=float("inf"))
+                cos_t = float(np.dot(v / bl, w))
+                sin_t = float(np.sqrt(max(0.0, 1.0 - cos_t * cos_t)))
+                e1, e2 = self._orthonormal_basis(w)
+                best_pos, best_gap = None, here
+                for phi in range(0, 360, 20):
+                    r = np.deg2rad(phi)
+                    d_vec = cos_t * w + sin_t * (np.cos(r) * e1 + np.sin(r) * e2)
+                    cand = pos[parent] + bl * d_vec
+                    gem_cand = min((float(np.linalg.norm(cand - pos[j]))
+                                    for j in gem_h), default=float("inf"))
+                    if gem_cand < min(gem_now, 1.4) - 1e-6:
+                        continue
+                    g = gap(h, parent, cand, ignore=geminal)
+                    if g > best_gap + 1e-6:
+                        best_pos, best_gap = cand, g
+                # Improving a hopeless site is not worth it: a hydrogen that
+                # still cannot clear 1.2 A anywhere on its cone is left where
+                # it was, so this never turns one bad contact into a different
+                # one.
+                if best_gap < 1.2:
+                    best_pos = None
+                if best_pos is not None:
+                    coords[h] = best_pos
+                    pos[h] = best_pos
+                    moved += 1
+                    moved_this_pass += 1
+            if not moved_this_pass:
+                break
         # A pair of caps from the two layers can land on top of each other,
         # and no azimuth helps because each is the other's obstacle. One of
         # them is redundant: drop it and let the parity repair that follows
@@ -3984,12 +4113,18 @@ class COFFragmenter(BaseFragmenter):
             coords[:] = [coords[i] for i in keep]
             remap = {old_i: new_i for new_i, old_i in enumerate(keep)}
             capped_h_indices[:] = [remap[i] for i in capped_h_indices if i in remap]
-            print(f"  -> COF caps: dropped {len(drop)} capping H that the two "
-                  f"layers put on top of each other.")
+            # The caller keeps a parallel per-atom flag list; it has to shrink
+            # with the atoms or every index after the drop refers to the wrong
+            # one - the second layer would then be built from a mislabelled
+            # cap set.
+            if capped_h_flags is not None:
+                capped_h_flags[:] = [capped_h_flags[i] for i in keep]
+            print(f"  -> COF caps: dropped {len(drop)} capping H placed on top "
+                  f"of another hydrogen.")
 
         if moved:
-            print(f"  -> COF caps: swung {moved} capping H clear of an "
-                  f"interlayer contact.")
+            print(f"  -> COF caps: swung {moved} capping H clear of a close "
+                  f"contact.")
 
     def _fix_terminal_cap_geometry(self, species, coords, capped_h_indices):
         """COF-only: give a cap on a TERMINAL sp2 atom its 120 degree angle.
@@ -4496,7 +4631,8 @@ class COFFragmenter(BaseFragmenter):
 
         capped_h_indices = [idx for idx, flag in enumerate(capped_h_flags) if flag and species_copy[idx] == "H"]
         self.optimize_capped_h_geometry_only(species_copy, coords_copy, capped_h_indices)
-        self._relieve_cap_clashes(species_copy, coords_copy, capped_h_indices)
+        self._relieve_cap_clashes(species_copy, coords_copy, capped_h_indices,
+                                  capped_h_flags=capped_h_flags)
 
         species_copy, coords_copy, capped_h_indices = self.fix_odd_electron_multiplicity(
             species_copy, coords_copy, capped_h_indices, label=label
@@ -5309,6 +5445,12 @@ class COFFragmenter(BaseFragmenter):
         self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+        # Caps on neighbouring cut sites are placed independently and can be
+        # aimed into the same pocket, so they are separated here - before any
+        # second layer is built, so the layer is duplicated from a monomer that
+        # is already clear of itself.
+        self._relieve_cap_clashes(species, coords, capped_h_indices,
+                                  capped_h_flags=capped_h_flags)
         _label = str(output_path or 'cof_fragment')
 
         # Global layered-COF rule for Path J: if a face-to-face layer spacing is
@@ -6882,6 +7024,12 @@ class COFFragmenter(BaseFragmenter):
         self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
         self.optimize_capped_h_geometry_only(species, coords, capped_h_indices)
+        # Caps on neighbouring cut sites are placed independently and can be
+        # aimed into the same pocket, so they are separated here - before any
+        # second layer is built, so the layer is duplicated from a monomer that
+        # is already clear of itself.
+        self._relieve_cap_clashes(species, coords, capped_h_indices,
+                                  capped_h_flags=capped_h_flags)
         _label = str(output_path or 'cof_fragment')
 
         # Global layered-COF rule for the Path A/B/C/D branch, mirroring the
