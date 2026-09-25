@@ -198,6 +198,26 @@ class COF:
         # that ring. Pyridine-type ring N (one per ring) and fused imidazoles
         # do not match, and neither does a pyrazine whose nitrogen carries a
         # substituent.
+        # Six-membered heteroatom linkage rings: two aromatic units fused
+        # through a ring whose only heteroatoms are a pair of bridges. A
+        # pyrazine (two N, para) joins the sheets of 662 and 663; an oxazine
+        # (one N, one O, meta) joins the triketone node of 1050, 1051 and 1052
+        # to their linker. In both the ring IS the linkage - it is what the
+        # condensation forms - yet every one of its bonds lies inside a ring,
+        # so nothing here touched them and those structures came out as a patch
+        # of sheet with no node or linker at all.
+        #
+        # Both bridges are severed from both of their carbons, which leaves
+        # each heteroatom alone and the two carbon units separate; the
+        # carry-over below then gives each unit its own copy of the heteroatoms
+        # it was bonded to, so both blocks show their linkage environment, as
+        # for every other linkage type here.
+        #
+        # The test: a six-ring holding exactly two heteroatoms, at least one of
+        # them nitrogen, each with exactly two heavy neighbours, both carbons,
+        # both in that ring. Pyridine-type ring N (one per ring), triazines
+        # (three) and 1,4-dioxin (no nitrogen, and it has its own rule) do not
+        # match, and neither does a bridge carrying a substituent.
         pyrazine_bonds = {}
         pyrazine_bridge_atoms = set()
 
@@ -205,8 +225,9 @@ class COF:
             return [nb for nb in undirected_graph.neighbors(idx)
                     if self.structure[nb].specie.symbol != 'H']
 
-        def _is_bridge_n(idx):
-            if self.structure[idx].specie.symbol != 'N':
+        def _is_ring_bridge(idx):
+            """Two heavy neighbours, both carbon: a bare N or O bridge."""
+            if self.structure[idx].specie.symbol not in ('N', 'O'):
                 return None
             heavy = _heavy_nbrs_of(idx)
             if len(heavy) != 2:
@@ -215,48 +236,53 @@ class COF:
                 return None
             return heavy
 
-        # Walk the ring by hand rather than through a cycle basis: a basis is
+        # Walk the rings by hand rather than through a cycle basis: a basis is
         # free to return one big cycle instead of the six-rings it is made of,
-        # and the pyrazines of 662 come back inside a sixteen-membered cycle.
-        for _n1 in list(undirected_graph.nodes()):
-            _pair1 = _is_bridge_n(_n1)
-            if _pair1 is None:
-                continue
-            _cA, _cB = _pair1
-            found = None
-            for _cA2 in _heavy_nbrs_of(_cA):
-                if _cA2 == _n1 or self.structure[_cA2].specie.symbol != 'C':
+        # and 662's pyrazines come back inside a sixteen-membered one.
+        _bridges = [i for i in undirected_graph.nodes()
+                    if _is_ring_bridge(i) is not None]
+        for _h1 in _bridges:
+            _pair1 = _is_ring_bridge(_h1)
+            for _h2 in _bridges:
+                if _h2 <= _h1:
                     continue
-                for _n2 in _heavy_nbrs_of(_cA2):
-                    if _n2 == _cA or _n2 == _n1:
-                        continue
-                    _pair2 = _is_bridge_n(_n2)
-                    if _pair2 is None:
-                        continue
-                    _other = [c for c in _pair2 if c != _cA2]
-                    if len(_other) != 1:
-                        continue
-                    _cB2 = _other[0]
-                    if _cB2 == _cB or not undirected_graph.has_edge(_cB2, _cB):
-                        continue
-                    found = (_n2, _cA2, _cB2)
-                    break
-                if found:
-                    break
-            if not found:
-                continue
-            _n2 = found[0]
-            # All four bonds of one pyrazine carry the same linkage id, keyed
-            # on its two nitrogens. Without that they count as four separate
-            # linkages, and a linker sitting between two pyrazines scores four
-            # - over the three that mark a node - so 662 came back as five
-            # nodes and no linker at all.
-            _tag = ('pyrazine', frozenset((_n1, _n2)))
-            for _n in (_n1, _n2):
-                pyrazine_bridge_atoms.add(_n)
-                for nb in _heavy_nbrs_of(_n):
-                    if self.structure[nb].specie.symbol == 'C':
-                        pyrazine_bonds[frozenset((_n, nb))] = _tag
+                if (self.structure[_h1].specie.symbol == 'O'
+                        and self.structure[_h2].specie.symbol == 'O'):
+                    continue
+                _pair2 = _is_ring_bridge(_h2)
+                # The four carbons must close a six-ring through the two
+                # bridges: either they pair up across the ring (para, as in a
+                # pyrazine) or the two bridges share one carbon and the far
+                # carbons are joined through a third (meta, as in 1050).
+                _shared = set(_pair1) & set(_pair2)
+                closes = False
+                if not _shared:
+                    a1, b1 = _pair1
+                    for x, y in ((_pair2[0], _pair2[1]), (_pair2[1], _pair2[0])):
+                        if (undirected_graph.has_edge(a1, x)
+                                and undirected_graph.has_edge(b1, y)):
+                            closes = True
+                            break
+                elif len(_shared) == 1:
+                    f1 = [c for c in _pair1 if c not in _shared][0]
+                    f2 = [c for c in _pair2 if c not in _shared][0]
+                    if f1 != f2:
+                        for mid in _heavy_nbrs_of(f1):
+                            if (mid not in (_h1, _h2)
+                                    and self.structure[mid].specie.symbol == 'C'
+                                    and undirected_graph.has_edge(mid, f2)):
+                                closes = True
+                                break
+                if not closes:
+                    continue
+                kinds = sorted(self.structure[h].specie.symbol for h in (_h1, _h2))
+                name = 'pyrazine' if kinds == ['N', 'N'] else 'oxazine'
+                _tag = (name, frozenset((_h1, _h2)))
+                for _h in (_h1, _h2):
+                    pyrazine_bridge_atoms.add(_h)
+                    for nb in _heavy_nbrs_of(_h):
+                        if self.structure[nb].specie.symbol == 'C':
+                            pyrazine_bonds[frozenset((_h, nb))] = _tag
 
         # Nitrogen-nitrogen linkages: azine (Ar-CH=N-N=CH-Ar), acylhydrazone
         # (Ar-CH=N-NH-CO-Ar), azo and hydrazo (Ar-N=N-Ar, Ar-NH-NH-Ar). In all
@@ -314,7 +340,8 @@ class COF:
             if bond_pair == {'B', 'O'}:
                 edges_to_remove.append((u, v))
                 linkage_of[frozenset((u, v))] = ('boroxine', frozenset((u, v)))
-            elif bond_pair == {'C', 'N'} and frozenset((u, v)) in pyrazine_bonds:
+            elif (bond_pair in ({'C', 'N'}, {'C', 'O'})
+                  and frozenset((u, v)) in pyrazine_bonds):
                 edges_to_remove.append((u, v))
                 linkage_of[frozenset((u, v))] = pyrazine_bonds[frozenset((u, v))]
             elif bond_pair == {'C', 'N'}:

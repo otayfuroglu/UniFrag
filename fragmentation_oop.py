@@ -605,6 +605,42 @@ class BaseFragmenter:
                 if score(alt) > score(candidate):
                     candidate = alt
 
+            if self._oh_azimuth_search:
+                # Both of the in-plane choices can be bad. A hydroxyl capping
+                # the geminal C(=N)(O) of 1050's node points its hydrogen
+                # straight at the imine nitrogen, 1.42 A away. Sweep the cone
+                # instead and keep whichever azimuth clears everything else
+                # best, scoring by the nearest atom of any element rather than
+                # hydrogens first.
+                e_q = np.cross(e_a, e_p)
+                nq = np.linalg.norm(e_q)
+                if nq > 1e-12:
+                    e_q = e_q / nq
+
+                    def clearance(pos):
+                        best = float("inf")
+                        for k, spk in enumerate(species):
+                            if k in {hidx, parent_o}:
+                                continue
+                            best = min(best, float(np.linalg.norm(
+                                pos - np.asarray(coords[k], dtype=float))))
+                        return best
+
+                    best_pos, best_gap = candidate, clearance(candidate)
+                    for phi in range(0, 360, 30):
+                        r = np.deg2rad(phi)
+                        d_vec = (np.cos(target_angle) * e_a
+                                 + np.sin(target_angle)
+                                 * (np.cos(r) * e_p + np.sin(r) * e_q))
+                        nd = np.linalg.norm(d_vec)
+                        if nd < 1e-12:
+                            continue
+                        pos = opos + (d_vec / nd) * oh_len
+                        gap = clearance(pos)
+                        if gap > best_gap:
+                            best_pos, best_gap = pos, gap
+                    candidate = best_pos
+
             coords[hidx] = candidate
 
     def enforce_single_molecule(self, species, coords, flags=None):
@@ -785,6 +821,9 @@ class BaseFragmenter:
     _parity_add_eligible_elements = ("O", "N")
     _parity_strict_add_geometry = True
     _parity_add_validate = False
+    # Sweep a capped hydroxyl around its cone for the roomiest azimuth. Off
+    # here, so MOF and macromolecule keep the two-candidate choice.
+    _oh_azimuth_search = False
     # Last-resort parity hydrogen with every clearance demand switched off. It
     # always "succeeds", so it can leave a hydrogen bonded to two atoms at
     # once; kept for MOF and macromolecule, where it has always run.
@@ -3527,6 +3566,7 @@ class COFFragmenter(BaseFragmenter):
     _parity_add_eligible_elements = ("O", "N", "C")
     _parity_strict_add_geometry = False
     _parity_add_validate = True
+    _oh_azimuth_search = True
     # When no site can take the parity hydrogen with real clearance, leave the
     # fragment open-shell and let the quarantine hold it. Forcing the hydrogen
     # in regardless put one 0.94 A from a carbon in 232's node: a fragment that
