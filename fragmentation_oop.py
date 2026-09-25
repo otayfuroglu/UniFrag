@@ -3932,10 +3932,16 @@ class COFFragmenter(BaseFragmenter):
         left with one hydrogen missing. An H at 1.2 A from its neighbour is
         tight but still a better model than a valence hole.
         """
-        for mhh in (1.5, 1.2, 1.0):
+        # The heavy-atom clearance travels with the hydrogen clearance. Its
+        # default of 0.9 A lets a cap land closer to a carbon than a C-H bond
+        # is long: 215 and 409 both had capping hydrogens sitting 0.98-1.13 A
+        # from a second carbon, bonded to two atoms at once, even though
+        # neither parent has an over-coordinated atom of its own.
+        for mhh, mheavy in ((1.5, 1.6), (1.2, 1.4), (1.0, 1.2)):
             before = len(species)
             self.place_capping_h(parent_idx, base_vec, bl, species, coords,
-                                 min_hh=mhh, capped_h_flags=capped_h_flags)
+                                 min_hh=mhh, min_heavy=mheavy,
+                                 capped_h_flags=capped_h_flags)
             if len(species) > before:
                 return True
         return False
