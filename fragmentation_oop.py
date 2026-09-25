@@ -3286,6 +3286,61 @@ class COFFragmenter(BaseFragmenter):
         def rotation_angle(R):
             return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
 
+        _crystal_contact_cache = {}
+
+        def crystal_contact(delta):
+            """Closest contact the CRYSTAL itself makes across this interlayer
+            shift, counting in-plane images.
+
+            A flat 2.4 A floor on the dimer's closest contact assumes any
+            tighter approach is an artefact of duplicating a finite patch. It
+            is not always: 131 stacks at 3.60 A with aliphatic hydrogens
+            reaching 0.9 A out of the layer, so the crystal's own layers touch
+            at 1.86 A. Refusing the dimer there does not avoid a clash, it just
+            refuses to model the material. So the floor only applies to
+            contacts the crystal does not already have.
+            """
+            key = tuple(np.round(delta, 3))
+            if key in _crystal_contact_cache:
+                return _crystal_contact_cache[key]
+            try:
+                base = np.asarray(struct.cart_coords, dtype=float)
+                # In-plane images only: the shift itself carries the stacking.
+                axes = sorted(
+                    range(3),
+                    key=lambda k: abs(float(np.dot(lat[k] / np.linalg.norm(lat[k]),
+                                                   normal))),
+                )[:2]
+                images = []
+                for ia in (-1, 0, 1):
+                    for ib in (-1, 0, 1):
+                        images.append(base + ia * lat[axes[0]] + ib * lat[axes[1]])
+                other = np.vstack(images) + delta
+                dmat = np.linalg.norm(base[:, None, :] - other[None, :, :], axis=-1)
+                # Only NON-BONDED approaches count. A short axis along which
+                # the framework is covalently bonded is not a stacking axis at
+                # all - its "layers" touch at a bond length - and duplicating
+                # across it would copy material that is already connected.
+                syms = [
+                    (sp.specie.symbol if hasattr(sp, "specie")
+                     else max(sp.species.items(), key=lambda kv: kv[1])[0].symbol)
+                    for sp in struct
+                ]
+                other_syms = syms * (len(other) // len(base))
+                order = np.argsort(dmat, axis=None)
+                i0, j0 = np.unravel_index(order[0], dmat.shape)
+                if self.is_valid_bond(syms[i0], other_syms[j0], float(dmat[i0, j0])):
+                    # The framework is BONDED across this shift, so it is not a
+                    # stacking direction at all and the copy would duplicate
+                    # material that is already connected. No allowance.
+                    _crystal_contact_cache[key] = 0.0
+                    return 0.0
+                best = float(dmat[i0, j0])
+            except Exception:
+                best = 0.0
+            _crystal_contact_cache[key] = best
+            return best
+
         def evaluate(R, t, local=False):
             """Score one candidate. `local=True` means the rotation is applied
             about the transformed block's OWN centroid, so the same operation
@@ -3313,7 +3368,11 @@ class COFFragmenter(BaseFragmenter):
                 np.linalg.norm(pts[:, None, :] - moved[None, :, :], axis=-1).min()
             )
             if contact < 2.4:
-                return None
+                # Below the usual bar, accept only what the crystal itself
+                # already does across this same shift.
+                allowed = crystal_contact(delta)
+                if allowed <= 0.0 or contact < allowed - 0.05:
+                    return None
             # Prefer, in order: the closest layer, then the SMALLEST rotation -
             # the primitive screw is the true adjacent-layer relationship, and
             # without this tie-break different fragments of one structure can
@@ -3387,6 +3446,11 @@ class COFFragmenter(BaseFragmenter):
             return None
         candidates.sort(key=lambda x: x[:3])
         _, angle, neg_contact, R, t, sep, lateral, local = candidates[0]
+        # Remember how close this stacking actually is, so the node and linker
+        # blocks are judged against the same bar as the assembled fragment
+        # rather than a flat 2.4 A they can never meet in a structure whose own
+        # layers touch more closely than that.
+        self._partner_contact = -neg_contact
         if np.allclose(R, eye):
             kind = "lattice translation"
         else:
@@ -3477,7 +3541,7 @@ class COFFragmenter(BaseFragmenter):
         return [row for row in moved]
 
     @staticmethod
-    def _dimerize_block(partner, sp, co, label=""):
+    def _dimerize_block(partner, sp, co, label="", floor=2.4):
         """Stack a second layer onto ONE building block, or leave it a monomer.
 
         The assembled fragment is only dimerised after passing a measured
@@ -3492,9 +3556,9 @@ class COFFragmenter(BaseFragmenter):
         contact = float(
             np.min(np.linalg.norm(a[:, None, :] - b[None, :, :], axis=-1))
         )
-        if contact < 2.4:
+        if contact < floor:
             print(f"  -> COF dimer skipped for '{label}': stacked copy would "
-                  f"clash at {contact:.2f} A (< 2.40); emitting the monomer.")
+                  f"clash at {contact:.2f} A (< {floor:.2f}); emitting the monomer.")
             return list(sp), [np.asarray(c, dtype=float) for c in co]
         return list(sp) + list(sp), [np.asarray(c, dtype=float) for c in co] + moved
 
@@ -7511,6 +7575,11 @@ def _process_cof_file(args_tuple):
             extracted_linkers_snapshot = list(getattr(frag, "extracted_linkers", []) or [])
             extracted_nodes_snapshot = list(getattr(frag, "extracted_nodes", []) or [])
             partner_op_snapshot = getattr(frag, "partner_op", None)
+            # Judge a block's stacked copy against the contact the assembled
+            # fragment was accepted at, never tighter than the usual 2.4 A bar.
+            _block_dimer_floor = min(
+                2.4, float(getattr(frag, "_partner_contact", 2.4) or 2.4)
+            )
             min_atoms = "N/A"
             min_formula = "N/A"
             res_min = None
@@ -7542,7 +7611,7 @@ def _process_cof_file(args_tuple):
                     if partner_op_snapshot is not None:
                         lsp_final, lco_final = COFFragmenter._dimerize_block(
                             partner_op_snapshot, lsp, lco,
-                            label=f"{base}FragCofOnlyLinker")
+                            label=f"{base}FragCofOnlyLinker", floor=_block_dimer_floor)
                     else:
                         lsp_final = list(lsp)
                         lco_final = [np.array(c) for c in lco]
@@ -7559,7 +7628,7 @@ def _process_cof_file(args_tuple):
                     if partner_op_snapshot is not None:
                         nsp_final, nco_final = COFFragmenter._dimerize_block(
                             partner_op_snapshot, nsp, nco,
-                            label=f"{base}FragCofOnlyNode")
+                            label=f"{base}FragCofOnlyNode", floor=_block_dimer_floor)
                     else:
                         nsp_final = list(nsp)
                         nco_final = [np.array(c) for c in nco]
