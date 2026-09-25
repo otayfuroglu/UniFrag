@@ -98,9 +98,17 @@ def analyse(fr):
         if sp[i]!="H" and len(heavy)==1:
             j=heavy[0]
             d=float(np.linalg.norm(co[i]-co[j]))
-            order=_F._terminal_bond_order(sp[i], sp[j], d, scale)
-            deficit=tgt-order
-            if nh != deficit:
+            # A bond within 0.02 A of a bond-order cutoff cannot be called
+            # from its length alone, and the fragmenter measures its scale on
+            # the parent while this script measures it on the fragment, so the
+            # two can land on opposite sides of the line. Accept any hydrogen
+            # count that a bond order in that window would justify, and flag
+            # only what is wrong however the bond is read.
+            orders={_F._terminal_bond_order(sp[i], sp[j], d+off, scale)
+                    for off in (-0.02, 0.0, 0.02)}
+            allowed={tgt-o for o in orders}
+            if nh not in allowed:
+                deficit=tgt-_F._terminal_bond_order(sp[i], sp[j], d, scale)
                 bad_term.append((i, sp[i], f"H={nh} need={deficit}"))
     out["over_coord"]=over
     out["bad_terminal"]=bad_term

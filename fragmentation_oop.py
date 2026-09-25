@@ -290,6 +290,15 @@ class BaseFragmenter:
                 return True
         return False
 
+    def _oxygen_protonated(self, idx, species, coords):
+        """Hook: is this oxygen already carrying a hydrogen?
+
+        The base answer is the historical 1.5 A radius test, which also sees a
+        hydrogen belonging to a neighbouring oxygen. COFFragmenter overrides
+        it; see that docstring.
+        """
+        return self.oxygen_already_protonated(idx, species, coords)
+
     def refine_h_geometry_with_rdkit(self, species, coords, capped_h_indices=None, max_iters=300):
         if not species or "H" not in species:
             return
@@ -776,6 +785,10 @@ class BaseFragmenter:
     _parity_add_eligible_elements = ("O", "N")
     _parity_strict_add_geometry = True
     _parity_add_validate = False
+    # Last-resort parity hydrogen with every clearance demand switched off. It
+    # always "succeeds", so it can leave a hydrogen bonded to two atoms at
+    # once; kept for MOF and macromolecule, where it has always run.
+    _parity_add_allow_unvalidated = True
 
     def _can_accept_extra_h(self, idx, species, coords):
         """Hook: may this heavy atom take one more H? The base answer is yes,
@@ -786,10 +799,23 @@ class BaseFragmenter:
         """No-op for MOFs. COFFragmenter overrides it; see that docstring."""
         return species, coords, capped_h_indices
 
+    def _recap_after_dedupe(self, species, coords, capped_h_indices):
+        """Hook: re-cap sites exposed when a duplicate atom was dropped.
+
+        No-op here, so MOF and macromolecule output is unchanged.
+        COFFragmenter overrides it; see that docstring.
+        """
+        return species, coords, capped_h_indices
+
     def fix_odd_electron_multiplicity(self, species, coords, capped_h_indices, label):
+        _n_before_dedupe = len(species)
         species, coords, capped_h_indices = self._dedupe_superimposed_atoms(
             species, coords, capped_h_indices, label=label
         )
+        if len(species) != _n_before_dedupe:
+            species, coords, capped_h_indices = self._recap_after_dedupe(
+                species, coords, capped_h_indices
+            )
         _ATOMIC_NUMBERS = {
             "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
             "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17,
@@ -941,7 +967,7 @@ class BaseFragmenter:
                           f"to achieve even electron count for '{label}' "
                           f"(clearance {nearest:.2f} A).")
                     return species, coords, capped_h_indices
-        if add_candidates:
+        if add_candidates and self._parity_add_allow_unvalidated:
             add_candidates.sort(key=lambda x: x[0], reverse=True)
             score, target_idx, group, heavy_nbs = add_candidates[0]
             target_sym = species[target_idx]
@@ -1029,7 +1055,7 @@ class BaseFragmenter:
             pos = np.array(coords[i], dtype=float)
             if self._carries_hydrogen(i, species, coords):
                 continue
-            if sp == "O" and self.oxygen_already_protonated(i, species, coords):
+            if sp == "O" and self._oxygen_protonated(i, species, coords):
                 continue
 
             heavy_neighbors = []
@@ -3501,6 +3527,12 @@ class COFFragmenter(BaseFragmenter):
     _parity_add_eligible_elements = ("O", "N", "C")
     _parity_strict_add_geometry = False
     _parity_add_validate = True
+    # When no site can take the parity hydrogen with real clearance, leave the
+    # fragment open-shell and let the quarantine hold it. Forcing the hydrogen
+    # in regardless put one 0.94 A from a carbon in 232's node: a fragment that
+    # is visibly wrong is worse than one the quarantine keeps out of the
+    # collection.
+    _parity_add_allow_unvalidated = False
 
     def _can_accept_extra_h(self, idx, species, coords):
         """COF-only: only let an atom take another H if bond order leaves room.
@@ -3938,6 +3970,45 @@ class COFFragmenter(BaseFragmenter):
             if not (0.7 < bl < 1.3):
                 bl = self.cap_bond_length(species[parent])
             coords[h] = p + bl * direction
+
+    def _recap_after_dedupe(self, species, coords, capped_h_indices):
+        """COF-only: cap whatever the duplicate drop just exposed.
+
+        The superimposed-atom pass runs after all the capping, so an atom whose
+        partner it removes is left short and nothing comes back for it. 525's
+        minimized fragment ended with an -NH where the severed C-N calls for
+        -NH2, because the hydrogen that would have been its second cap was one
+        of the three duplicates dropped a step earlier.
+        """
+        flags = [False] * len(species)
+        for i in capped_h_indices:
+            if 0 <= i < len(species):
+                flags[i] = True
+        self._cap_severed_double_bond_sites(species, coords, flags)
+        self._cap_open_oxygens(species, coords, flags)
+        new_idx = [i for i, f in enumerate(flags) if f and species[i] == "H"]
+        return species, coords, new_idx
+
+    def _oxygen_protonated(self, idx, species, coords):
+        """COF-only: only a hydrogen actually bonded to this oxygen counts.
+
+        The base test takes any hydrogen within 1.5 A as proof, which is fine
+        for a carboxylate, where the two oxygens sit 2.2 A apart, but wrong for
+        a ketal. 256 has carbons carrying two oxygens 2.47 A apart: capping the
+        first put its hydrogen about 1.5 A from the second, so the second was
+        read as protonated and left bare. Four oxygens in its fragment and two
+        in its linker came out that way.
+        """
+        if species[idx] != "O":
+            return False
+        opos = np.asarray(coords[idx], dtype=float)
+        for j, spj in enumerate(species):
+            if spj != "H":
+                continue
+            d = float(np.linalg.norm(opos - np.asarray(coords[j], dtype=float)))
+            if self.is_valid_bond("O", "H", d):
+                return True
+        return False
 
     def _carries_hydrogen(self, idx, species, coords):
         """COF-only: ask this class's own bond perception, not a fixed cutoff.
@@ -4716,7 +4787,7 @@ class COFFragmenter(BaseFragmenter):
                 sp = species[i]
                 if sp not in target_valence:
                     continue
-                if sp == "O" and self.oxygen_already_protonated(i, species, coords):
+                if sp == "O" and self._oxygen_protonated(i, species, coords):
                     continue
                 deficit = max(0, target_valence[sp] - len(hadj.get(i, [])))
                 if sp == "B":
@@ -4983,7 +5054,7 @@ class COFFragmenter(BaseFragmenter):
                 sp = species[i]
                 if sp not in target_valence:
                     continue
-                if sp == "O" and self.oxygen_already_protonated(i, species, coords):
+                if sp == "O" and self._oxygen_protonated(i, species, coords):
                     continue
                 # Score bond order, not neighbour count. A ketone oxygen has a
                 # single heavy neighbour and is already complete; counting
@@ -6065,7 +6136,7 @@ class COFFragmenter(BaseFragmenter):
                 continue
             if species[li] == "H":
                 continue
-            if species[li] == "O" and self.oxygen_already_protonated(li, species, coords):
+            if species[li] == "O" and self._oxygen_protonated(li, species, coords):
                 continue
 
             # Primary direction: opposite of vectors to kept neighbors.
@@ -6094,7 +6165,7 @@ class COFFragmenter(BaseFragmenter):
                 n_cap = min(n_broken, deficit)
 
                 # oxygen special-case: avoid protonating already protonated O
-                if sp == "O" and self.oxygen_already_protonated(li, species, coords):
+                if sp == "O" and self._oxygen_protonated(li, species, coords):
                     n_cap = 0
 
                 for _ in range(n_cap):
