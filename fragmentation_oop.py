@@ -1,4 +1,5 @@
 import argparse
+import itertools
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -6171,64 +6172,127 @@ class COFFragmenter(BaseFragmenter):
                 path_mode = "C"
                 print(f"  -> COF Path C (Tetra-C node). Node candidates: {len(c4_nodes)}")
             else:
-                # Path D for porphyrinic COFs (e.g., COF-366): detect N4 core.
+                # Path D for porphyrinic COFs (e.g., COF-366): detect the N4 core.
+                #
+                # A porphyrin core is a specific object - four nitrogens about
+                # 2.05 A from a common centre, roughly coplanar, the pocket
+                # that would hold a metal. The rule here used to be "four or
+                # more nitrogens within six BONDS of each other", which is a
+                # statement about graph proximity that any nitrogen-rich sheet
+                # satisfies: across this collection it called 317 structures
+                # porphyrinic where only 31 have an N4 core at all. 187's
+                # triazine framework matched it, and because the whole sheet
+                # came back as one core the structure was emitted as a single
+                # 466-atom blob. Geometry is what distinguishes a porphyrin,
+                # so geometry is what is tested.
+                heavy_ok = lambda x: sc_sym[x] != "H"
                 n_atoms = [i for i in range(len(supercell)) if sc_sym[i] == "N"]
                 porph_cores = []
-                if n_atoms:
-                    # N-N graph by heavy-atom shortest-path proximity.
-                    n_adj = {i: set() for i in n_atoms}
-                    heavy_ok = lambda x: sc_sym[x] != "H"
-                    for ni in n_atoms:
-                        q = deque([(ni, 0)])
-                        seen = {ni}
-                        while q:
-                            u, dep = q.popleft()
-                            if dep >= 6:
-                                continue
-                            for v in graph[u]:
-                                if v in seen or (not heavy_ok(v)):
-                                    continue
-                                seen.add(v)
-                                if sc_sym[v] == "N" and v != ni:
-                                    n_adj[ni].add(v)
-                                q.append((v, dep + 1))
+                if len(n_atoms) >= 4:
+                    _lat = supercell.lattice
+                    _frac = {i: np.asarray(supercell[i].frac_coords, dtype=float)
+                             for i in n_atoms}
 
-                    # connected components on N-proximity graph
-                    n_vis = set()
-                    n_comps = []
-                    for ni in n_atoms:
-                        if ni in n_vis:
-                            continue
-                        q = deque([ni])
-                        n_vis.add(ni)
-                        comp = {ni}
-                        while q:
-                            u = q.popleft()
-                            for v in n_adj[u]:
-                                if v not in n_vis:
-                                    n_vis.add(v)
-                                    comp.add(v)
-                                    q.append(v)
-                        n_comps.append(comp)
+                    def _mi(i, j):
+                        """i -> j as a cartesian vector, nearest periodic image.
 
-                    for ncomp in n_comps:
-                        if len(ncomp) < 4:
+                        Raw supercell coordinates are not enough: a porphyrin
+                        that straddles a cell edge has its nitrogens in
+                        different images and they measure 30 A apart, which is
+                        why 28 and 807 - both genuinely porphyrinic - found no
+                        core until this was minimum-image.
+                        """
+                        df = _frac[j] - _frac[i]
+                        df -= np.round(df)
+                        return _lat.get_cartesian_coords(df)
+
+                    # Which molecule each atom belongs to. Geometry alone is not
+                    # enough: two nitrogens in one layer and the two stacked
+                    # 3.5 A above them form a flat rectangle whose corners are
+                    # all 2.1 A from its centre, so 187 produced 432 "cores"
+                    # spanning its layers. A porphyrin's four nitrogens sit in
+                    # ONE macrocycle, hence one bonded component.
+                    comp_of = {}
+                    _next_cid = 0
+                    for _seed in range(len(supercell)):
+                        if _seed in comp_of or not heavy_ok(_seed):
                             continue
-                        # porphyrin core atoms: within 2 bonds of N set (heavy only)
-                        core = set(ncomp)
-                        q = deque([(u, 0) for u in ncomp])
-                        seen = set(ncomp)
-                        while q:
-                            u, dep = q.popleft()
-                            if dep >= 2:
+                        comp_of[_seed] = _next_cid
+                        _stack = [_seed]
+                        while _stack:
+                            _u = _stack.pop()
+                            for _v in graph[_u]:
+                                if _v not in comp_of and heavy_ok(_v):
+                                    comp_of[_v] = _next_cid
+                                    _stack.append(_v)
+                        _next_cid += 1
+
+                    # A porphyrin's nitrogens are 2.9 A apart across the pocket
+                    # and 4.2 A on the diagonal, so 4.6 A bounds the whole core.
+                    near = {}
+                    for i in n_atoms:
+                        near[i] = [j for j in n_atoms
+                                   if j != i
+                                   and float(np.linalg.norm(_mi(i, j))) < 4.6]
+                    seen_quads = set()
+                    for i in n_atoms:
+                        pool = [j for j in near[i] if j > i]
+                        if len(pool) > 24:
+                            pool = sorted(pool,
+                                          key=lambda j: float(np.linalg.norm(_mi(i, j))))[:24]
+                        for trio in itertools.combinations(sorted(pool), 3):
+                            quad = (i,) + trio
+                            key = tuple(sorted(quad))
+                            if key in seen_quads:
                                 continue
-                            for v in graph[u]:
-                                if v in seen or (not heavy_ok(v)):
+                            if len({comp_of.get(k) for k in quad}) != 1:
+                                continue
+                            pts = np.array([np.zeros(3)] + [_mi(i, k) for k in trio])
+                            if any(float(np.linalg.norm(pts[a] - pts[b])) >= 4.6
+                                   for a, b in itertools.combinations(range(4), 2)):
+                                continue
+                            ctr = pts.mean(axis=0)
+                            radii = np.linalg.norm(pts - ctr, axis=1)
+                            if radii.min() < 1.85 or radii.max() > 2.35:
+                                continue
+                            # The smallest singular value is the out-of-plane
+                            # spread; a porphyrin's N4 pocket is flat.
+                            sv = np.linalg.svd(pts - ctr, compute_uv=False)
+                            if sv[2] > 0.12 * max(float(sv[0]), 1e-9):
+                                continue
+                            # Inside that molecule they must also be close along
+                            # the bonds: a porphyrin's opposite nitrogens are 8
+                            # bonds apart through the macrocycle, and nothing
+                            # further away belongs to one core.
+                            _reach = {quad[0]}
+                            _q = deque([(quad[0], 0)])
+                            while _q:
+                                _u, _d = _q.popleft()
+                                if _d >= 8:
                                     continue
-                                seen.add(v)
-                                core.add(v)
-                                q.append((v, dep + 1))
-                        porph_cores.append(core)
+                                for _v in graph[_u]:
+                                    if _v in _reach or not heavy_ok(_v):
+                                        continue
+                                    _reach.add(_v)
+                                    _q.append((_v, _d + 1))
+                            if not set(quad) <= _reach:
+                                continue
+                            seen_quads.add(key)
+                            # core atoms: the N4 plus everything within 2 bonds
+                            core = set(quad)
+                            _q = deque([(u, 0) for u in quad])
+                            _seen = set(quad)
+                            while _q:
+                                _u, _d = _q.popleft()
+                                if _d >= 2:
+                                    continue
+                                for _v in graph[_u]:
+                                    if _v in _seen or not heavy_ok(_v):
+                                        continue
+                                    _seen.add(_v)
+                                    core.add(_v)
+                                    _q.append((_v, _d + 1))
+                            porph_cores.append(core)
 
                 if porph_cores:
                     # pick core nearest supercell center
