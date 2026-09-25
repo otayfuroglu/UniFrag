@@ -3232,7 +3232,7 @@ class COFFragmenter(BaseFragmenter):
         self._length_scale_value = scale
         return scale
 
-    def _find_stacked_partner(self, struct, species, coords, label=""):
+    def _find_stacked_partner(self, struct, species, coords, label="", cap_flags=None):
         """Find the operation that places the neighbouring layer on this
         fragment, returning ``(R, t)`` in Cartesian coordinates such that the
         second layer is ``R @ x + t``, or None when the fragment is not part of
@@ -3254,6 +3254,20 @@ class COFFragmenter(BaseFragmenter):
             return None
         pts = np.asarray([np.asarray(c, dtype=float) for c in coords])
         centroid_all = pts.mean(axis=0)
+        # Capping hydrogens are this model's, not the material's. In the
+        # crystal those positions carry the framework continuing on; in a
+        # finite patch they are hydrogens sticking into the space the next
+        # layer occupies. 1234 stacks at 3.82 A with a real closest contact of
+        # 2.74 A, but its capping hydrogens meet at 1.35 A, and judging the
+        # stacking on them refused the bilayer. Measure the contact on the
+        # atoms the crystal actually has.
+        if cap_flags is not None and len(cap_flags) == len(coords):
+            probe_idx = [i for i in range(len(coords)) if not cap_flags[i]]
+            if len(probe_idx) < 5:
+                probe_idx = list(range(len(coords)))
+        else:
+            probe_idx = list(range(len(coords)))
+        probe = np.arange(len(coords))[probe_idx]
         hc = heavy.mean(axis=0)
         normal = np.linalg.svd(heavy - hc, full_matrices=False)[2][-1]
         lat = np.array(struct.lattice.matrix, dtype=float)
@@ -3365,7 +3379,8 @@ class COFFragmenter(BaseFragmenter):
             if lateral > 2.0:
                 return None
             contact = float(
-                np.linalg.norm(pts[:, None, :] - moved[None, :, :], axis=-1).min()
+                np.linalg.norm(pts[probe][:, None, :] - moved[probe][None, :, :],
+                               axis=-1).min()
             )
             if contact < 2.4:
                 # Below the usual bar, accept only what the crystal itself
@@ -3869,6 +3884,112 @@ class COFFragmenter(BaseFragmenter):
                 if not (0.7 < bl < 1.3):
                     bl = self.cap_bond_length(species[n_idx])
                 coords[h] = npos + bl * direction
+
+    def _relieve_cap_clashes(self, species, coords, capped_h_indices, min_gap=1.8):
+        """COF-only: swing a capping hydrogen away from whatever it is jammed
+        against, keeping its bond length and its angle to the anchor.
+
+        Stacking two layers brings each layer's caps up against the other's.
+        Those caps are this model's own atoms, so unlike the framework they can
+        be moved: 1234's bilayer has capping hydrogens meeting at 1.35 A while
+        the material's own closest contact is 2.74 A. Only hydrogens that are
+        genuinely too close are touched, and only when a better direction
+        exists.
+        """
+        if not capped_h_indices:
+            return
+        pos = [np.asarray(c, dtype=float) for c in coords]
+
+        def gap(idx, parent, probe=None):
+            p = probe if probe is not None else pos[idx]
+            best = float("inf")
+            for j in range(len(species)):
+                if j == idx or j == parent:
+                    continue
+                best = min(best, float(np.linalg.norm(p - pos[j])))
+            return best
+
+        moved = 0
+        for h in capped_h_indices:
+            if not (0 <= h < len(species)) or species[h] != "H":
+                continue
+            parent, best_d = None, float("inf")
+            for j, spj in enumerate(species):
+                if spj == "H" or j == h:
+                    continue
+                d = float(np.linalg.norm(pos[h] - pos[j]))
+                if self.is_valid_bond(spj, "H", d) and d < best_d:
+                    parent, best_d = j, d
+            if parent is None:
+                continue
+            here = gap(h, parent)
+            if here >= min_gap:
+                continue
+            anchors = [
+                j for j, spj in enumerate(species)
+                if spj != "H" and j != parent
+                and self.is_valid_bond(species[parent], spj,
+                                       float(np.linalg.norm(pos[parent] - pos[j])))
+            ]
+            if not anchors:
+                continue
+            w = pos[parent] - pos[anchors[0]]
+            nw = np.linalg.norm(w)
+            if nw < 1e-9:
+                continue
+            w = w / nw
+            v = pos[h] - pos[parent]
+            bl = float(np.linalg.norm(v))
+            if bl < 1e-9:
+                continue
+            cos_t = float(np.dot(v / bl, w))
+            sin_t = float(np.sqrt(max(0.0, 1.0 - cos_t * cos_t)))
+            e1, e2 = self._orthonormal_basis(w)
+            best_pos, best_gap = None, here
+            for phi in range(0, 360, 20):
+                r = np.deg2rad(phi)
+                d_vec = cos_t * w + sin_t * (np.cos(r) * e1 + np.sin(r) * e2)
+                cand = pos[parent] + bl * d_vec
+                g = gap(h, parent, cand)
+                if g > best_gap + 1e-6:
+                    best_pos, best_gap = cand, g
+            # Improving a hopeless site is not worth it: a hydrogen that still
+            # cannot clear 1.2 A anywhere on its cone is left where it was, so
+            # this pass never turns one bad contact into a different one.
+            if best_gap < 1.2:
+                best_pos = None
+            if best_pos is not None:
+                coords[h] = best_pos
+                pos[h] = best_pos
+                moved += 1
+        # A pair of caps from the two layers can land on top of each other,
+        # and no azimuth helps because each is the other's obstacle. One of
+        # them is redundant: drop it and let the parity repair that follows
+        # settle the electron count.
+        hydrogens = [i for i, sp in enumerate(species) if sp == "H"]
+        caps = set(capped_h_indices)
+        drop = set()
+        for h in hydrogens:
+            if h in drop:
+                continue
+            for g in hydrogens:
+                if g <= h or g in drop:
+                    continue
+                if float(np.linalg.norm(pos[h] - pos[g])) < 0.9:
+                    # Prefer to drop a cap over a hydrogen the parent had.
+                    drop.add(g if g in caps or h not in caps else h)
+        if drop:
+            keep = [i for i in range(len(species)) if i not in drop]
+            species[:] = [species[i] for i in keep]
+            coords[:] = [coords[i] for i in keep]
+            remap = {old_i: new_i for new_i, old_i in enumerate(keep)}
+            capped_h_indices[:] = [remap[i] for i in capped_h_indices if i in remap]
+            print(f"  -> COF caps: dropped {len(drop)} capping H that the two "
+                  f"layers put on top of each other.")
+
+        if moved:
+            print(f"  -> COF caps: swung {moved} capping H clear of an "
+                  f"interlayer contact.")
 
     def _fix_terminal_cap_geometry(self, species, coords, capped_h_indices):
         """COF-only: give a cap on a TERMINAL sp2 atom its 120 degree angle.
@@ -4375,6 +4496,7 @@ class COFFragmenter(BaseFragmenter):
 
         capped_h_indices = [idx for idx, flag in enumerate(capped_h_flags) if flag and species_copy[idx] == "H"]
         self.optimize_capped_h_geometry_only(species_copy, coords_copy, capped_h_indices)
+        self._relieve_cap_clashes(species_copy, coords_copy, capped_h_indices)
 
         species_copy, coords_copy, capped_h_indices = self.fix_odd_electron_multiplicity(
             species_copy, coords_copy, capped_h_indices, label=label
@@ -5197,7 +5319,9 @@ class COFFragmenter(BaseFragmenter):
         stack_axis = int(np.argmin(abc))
         stack_len = float(abc[stack_axis])
         if layer_mode != "monomer" and len(species) > 0:
-            partner = self._find_stacked_partner(struct, species, coords, label=" (Path J)")
+            partner = self._find_stacked_partner(
+                struct, species, coords, label=" (Path J)",
+                cap_flags=list(capped_h_flags))
             if partner is not None:
                 self.partner_op = partner
                 self.partner_vec = partner[1] if np.allclose(partner[0], np.eye(3)) else None
@@ -5210,6 +5334,7 @@ class COFFragmenter(BaseFragmenter):
                 capped_h_indices = list(capped_h_indices) + [
                     i + len(base_species) for i in capped_h_indices
                 ]
+                self._relieve_cap_clashes(species, coords, capped_h_indices)
 
         # Parity is checked on the FINAL system, after any second layer has
         # been added. A monomer with an odd electron count doubles to an even
@@ -6773,7 +6898,8 @@ class COFFragmenter(BaseFragmenter):
         # even electron count preserved by construction.
         layer_mode = getattr(self, "layer_mode", "auto")
         if layer_mode != "monomer" and not dimer_already_built and len(species) > 0:
-            partner = self._find_stacked_partner(struct, species, coords)
+            partner = self._find_stacked_partner(
+                struct, species, coords, cap_flags=list(capped_h_flags))
             if partner is not None:
                 self.partner_op = partner
                 self.partner_vec = partner[1] if np.allclose(partner[0], np.eye(3)) else None
@@ -6784,6 +6910,7 @@ class COFFragmenter(BaseFragmenter):
                 capped_h_indices = list(capped_h_indices) + [
                     i + len(base_species) for i in capped_h_indices
                 ]
+                self._relieve_cap_clashes(species, coords, capped_h_indices)
 
         # Parity is checked on the FINAL system, after any second layer has
         # been added. A monomer with an odd electron count doubles to an even

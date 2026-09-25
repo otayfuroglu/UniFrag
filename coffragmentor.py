@@ -198,6 +198,47 @@ class COF:
         # that ring. Pyridine-type ring N (one per ring) and fused imidazoles
         # do not match, and neither does a pyrazine whose nitrogen carries a
         # substituent.
+        def _is_nitrile_carbon(idx):
+            """A carbon whose only other neighbour is a terminal nitrogen."""
+            if self.structure[idx].specie.symbol != 'C':
+                return False
+            heavy = [nb for nb in undirected_graph.neighbors(idx)
+                     if self.structure[nb].specie.symbol != 'H']
+            if len(heavy) != 2:
+                return False
+            ns = [nb for nb in heavy
+                  if self.structure[nb].specie.symbol == 'N']
+            if len(ns) != 1:
+                return False
+            return len([nb for nb in undirected_graph.neighbors(ns[0])
+                        if self.structure[nb].specie.symbol != 'H']) == 1
+
+        def _vinylene_side(x, partner):
+            """One end of an Ar-CH=CH-Ar or Ar-CH=C(CN)-Ar bridge.
+
+            Exactly one aryl attachment, and whatever else the carbon carries
+            must be a hydrogen or a nitrile. The plain rule below demanded a
+            hydrogen on both alkene carbons, which is right for a Knoevenagel
+            vinylene but not for the cyanovinylene of an sp2-carbon COF: 1234's
+            alkene carries a nitrile on one side, so nothing matched and the
+            structure fell through to the biaryl fallback, which cut its
+            triphenylbenzene node into a bare central ring.
+            """
+            heavy = [nb for nb in undirected_graph.neighbors(x)
+                     if self.structure[nb].specie.symbol != 'H' and nb != partner]
+            if not heavy or len(heavy) > 2:
+                return False
+            aryl = nitrile = 0
+            for nb in heavy:
+                if _is_nitrile_carbon(nb):
+                    nitrile += 1
+                elif (self.structure[nb].specie.symbol == 'C'
+                      and heavy_degree(nb) >= 3):
+                    aryl += 1
+                else:
+                    return False
+            return aryl == 1 and nitrile <= 1
+
         # Six-membered heteroatom linkage rings: two aromatic units fused
         # through a ring whose only heteroatoms are a pair of bridges. A
         # pyrazine (two N, para) joins the sheets of 662 and 663; an oxazine
@@ -380,10 +421,8 @@ class COF:
                 # whole periodic networks, and the caller drops to its crudest
                 # fallback path.
                 if (
-                    heavy_degree(u) == 2
-                    and heavy_degree(v) == 2
-                    and h_count(u) == 1
-                    and h_count(v) == 1
+                    _vinylene_side(u, v)
+                    and _vinylene_side(v, u)
                     and bond_length(u, v) <= 1.42
                     and not in_small_ring(u, v)
                 ):
