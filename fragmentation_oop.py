@@ -1,6 +1,6 @@
 import argparse
 import itertools
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +35,17 @@ _EXTXYZ_Z = {
 def _electron_count(species):
     """Total electron count of a neutral fragment. Odd means an open shell."""
     return sum(_EXTXYZ_Z.get(s, 6) for s in species)
+
+
+def _ligand_electron_count(species):
+    """Electron count of the non-metal atoms: the parity a COF must keep even.
+
+    In an M(II) macrocycle (porphyrin2-, Pc2-, salen2-) the metal's two donated
+    electrons leave ligand parity unchanged, so a closed-shell ligand has an
+    even count here. An odd total that remains belongs to the metal (Cu(II)
+    d9, Co(II) d7) and is a spin state for the QM setup, not a defect.
+    """
+    return sum(_EXTXYZ_Z.get(s, 6) for s in species if s not in COFFragmenter.METALS)
 
 
 def _write_extxyz(filepath, species, coords, label, extra="", capped_h=None):
@@ -862,6 +873,11 @@ class BaseFragmenter:
         reproducing the previous behaviour; COFFragmenter checks bond order."""
         return True
 
+    def _heteroatom_parity_repair(self, species, coords, capped_h_indices, label):
+        """Hook: fix odd parity on a functional-group N/O first. None = not
+        handled here. No-op for MOF and macromolecule; COFFragmenter overrides."""
+        return None
+
     def _dedupe_superimposed_atoms(self, species, coords, capped_h_indices, label=""):
         """No-op for MOFs. COFFragmenter overrides it; see that docstring."""
         return species, coords, capped_h_indices
@@ -895,10 +911,15 @@ class BaseFragmenter:
             "Lu": 71, "Hf": 72, "Ta": 73, "W": 74, "Re": 75, "Os": 76, "Ir": 77, "Pt": 78,
             "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82, "Bi": 83
         }
-        z_sum = sum(_ATOMIC_NUMBERS.get(s, 6) for s in species)
+        z_sum = sum(_ATOMIC_NUMBERS.get(s, 6) for s in species
+                    if not (self._PARITY_IGNORES_METALS and s in self.METALS))
         if z_sum % 2 == 0:
             return species, coords, capped_h_indices
-            
+
+        repaired = self._heteroatom_parity_repair(species, coords, capped_h_indices, label)
+        if repaired is not None:
+            return repaired
+
         n = len(species)
         coords_arr = np.array(coords, dtype=float)
         
@@ -1178,11 +1199,20 @@ class BaseFragmenter:
         )
         return FragmentResult(species=species_copy, coords=coords_copy)
 
+    # MOF linkers are organic by definition, so metals are stripped from
+    # exported blocks. COFFragmenter overrides: a macrocycle metal (ZnPc,
+    # CoPor) belongs to its building block.
+    _KEEP_METALS_IN_BLOCKS = False
+    # MOF parity counts every atom (unchanged). COFFragmenter counts only the
+    # non-metal atoms; see _ligand_electron_count.
+    _PARITY_IGNORES_METALS = False
+
     def _clean_linker_molecule(self, species, coords, orig_indices=None):
         species = [str(s) for s in species]
         coords = [np.array(c, dtype=float) for c in coords]
-        
-        org_idx = [i for i, s in enumerate(species) if s not in self.METALS]
+
+        org_idx = [i for i, s in enumerate(species)
+                   if self._KEEP_METALS_IN_BLOCKS or s not in self.METALS]
         if not org_idx:
             return [], []
             
@@ -3109,6 +3139,81 @@ class COFFragmenter(BaseFragmenter):
         "I": 1.39,
     }
 
+    # Metal centres of metallo-COF macrocycles (metallophthalocyanine,
+    # metalloporphyrin, salen-type, etc.). Without this, COV_RAD.get(metal,
+    # 0.77) falls back to a carbon-like radius: a real M-N coordination bond
+    # (e.g. Zn-N in a ZnN4 phthalocyanine core, ~1.98-2.01 A) then exceeds the
+    # covalent-radius-sum cutoff and is silently dropped from the bond graph.
+    # For any metallo-COF whose framework has no cleavable node/linker
+    # linkage (no imine/boroxine/dioxin/benzoxazole cut site for
+    # coffragmentor.py to find, e.g. a phthalocyanine sheet where the
+    # macrocycle itself IS the repeat unit), that graph is all Path A-D in
+    # this file has to work with - a disconnected metal atom is then invisible
+    # to every BFS here and is silently deleted from the output entirely,
+    # defeating the point of a "metallo"-COF fragment. Path J
+    # (coffragmentor.py) is unaffected; it resolves its own bonding.
+    METALS = {
+        "Li", "Na", "K", "Rb", "Cs",
+        "Mg", "Ca", "Sr", "Ba",
+        "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+        "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
+        "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+    }
+    _KEEP_METALS_IN_BLOCKS = True
+    _PARITY_IGNORES_METALS = True
+
+    def _strip_discrete_guests(self, struct, label=""):
+        """Remove molecules that are not part of the periodic framework.
+
+        A counter-ion or pore guest is a finite molecule: walking its bonds
+        never reaches another image of itself, while every framework
+        component (3D net, or a 2D layer) does. 93 is a cationic Co network
+        with BF4- in its pores and no recognised linkage; the fallback took
+        the lone boron as its B/O "node" and returned BF4- as the fragment.
+        coffragmentor already drops such pieces (no severed bond); this does
+        the same for the paths that build their own graph. Nothing is removed
+        when no component is periodic (a molecular model).
+        """
+        n = len(struct)
+        sym = [s.specie.symbol if s.is_ordered else
+               max(s.species.items(), key=lambda kv: kv[1])[0].symbol for s in struct]
+        nbrs = [[] for _ in range(n)]
+        for i, ns in enumerate(struct.get_all_neighbors(2.6)):
+            for nb in ns:
+                if self.is_valid_bond(sym[i], sym[nb.index], float(nb.nn_distance)):
+                    nbrs[i].append((nb.index, tuple(int(round(x)) for x in nb.image)))
+        offset, comps = {}, []
+        for seed in range(n):
+            if seed in offset:
+                continue
+            offset[seed] = (0, 0, 0)
+            members, periodic, q = [seed], False, deque([seed])
+            while q:
+                u = q.popleft()
+                for v, img in nbrs[u]:
+                    ov = tuple(a + b for a, b in zip(offset[u], img))
+                    if v not in offset:
+                        offset[v] = ov
+                        members.append(v)
+                        q.append(v)
+                    elif offset[v] != ov:
+                        periodic = True
+            comps.append((members, periodic))
+        if not any(p for _, p in comps):
+            return struct
+        drop = [i for members, p in comps if not p for i in members]
+        if not drop:
+            return struct
+        formulas = Counter(
+            "".join(f"{el}{c if c > 1 else ''}" for el, c in sorted(Counter(sym[i] for i in m).items()))
+            for m, p in comps if not p)
+        clean = struct.copy()
+        clean.remove_sites(sorted(drop))
+        print(f"  -> COF guests removed{label}: "
+              + ", ".join(f"{k} x{v}" for k, v in formulas.items())
+              + " (discrete molecules/ions, not part of the periodic framework).")
+        return clean
+
     def __init__(self, radius=6.0, layer_mode="auto"):
         super().__init__(radius=radius)
         allowed = {"auto", "monomer", "dimer"}
@@ -3124,6 +3229,14 @@ class COFFragmenter(BaseFragmenter):
     def is_valid_bond(self, s1, s2, dist):
         if s1 == "H" and s2 == "H":
             return dist < 0.9
+        if s1 in self.METALS or s2 in self.METALS:
+            # Mirror MOFFragmenter's metal-bond convention: a metal-carbon or
+            # metal-hydrogen contact this close is coincidental proximity, not
+            # a coordination bond (Decision 2026-07-09); coordination bonds to
+            # N/O/S/etc. run longer than a covalent-radius sum would allow.
+            if "C" in (s1, s2) or "H" in (s1, s2):
+                return False
+            return dist < 2.6
         cutoff = 1.25 * (self._rad(s1) + self._rad(s2))
         cutoff = min(2.2, max(1.1, cutoff))
         return dist <= cutoff
@@ -3162,10 +3275,20 @@ class COFFragmenter(BaseFragmenter):
             for a in range(len(heavy)):
                 for b in range(a + 1, len(heavy)):
                     sa, sb = heavy[a][1], heavy[b][1]
-                    cutoff = min(2.2, max(1.1, 1.25 * (
-                        COFFragmenter.COV_RAD.get(sa, 0.77)
-                        + COFFragmenter.COV_RAD.get(sb, 0.77)
-                    )))
+                    if sa in COFFragmenter.METALS or sb in COFFragmenter.METALS:
+                        # Same metal-bond convention as is_valid_bond: a bare
+                        # covalent-radius sum misses real M-N/M-O coordination
+                        # bonds (e.g. Zn-N ~2.0 A), which would otherwise cut a
+                        # metallo-COF's macrocycle metal out of its own
+                        # topology hash.
+                        if sa == "C" or sb == "C":
+                            continue
+                        cutoff = 2.6
+                    else:
+                        cutoff = min(2.2, max(1.1, 1.25 * (
+                            COFFragmenter.COV_RAD.get(sa, 0.77)
+                            + COFFragmenter.COV_RAD.get(sb, 0.77)
+                        )))
                     if float(np.linalg.norm(pts[a] - pts[b])) <= cutoff:
                         g.add_edge(a, b)
             topo = nx.weisfeiler_lehman_graph_hash(g, node_attr="specie")
@@ -3694,6 +3817,174 @@ class COFFragmenter(BaseFragmenter):
             return False
         return self._local_valence_used(idx, species, coords) < target
 
+    def _heteroatom_parity_repair(self, species, coords, capped_h_indices, label):
+        """COF-only: pair the odd electron on a functional-group N/O.
+
+        The generic repair could only reach carbon on conjugated patches: the
+        bond-order gate reads delocalised bonds by length, so a phthalocyanine
+        meso aza-N (two 1.33 A C-N) scores valence 4 and a C=O scores 2, and
+        both were refused. The H then went onto a ring carbon, making an sp3
+        CH2 whose added H is necessarily out of the ring plane (823, 824).
+        On a conjugated patch an H atom added to - or removed from - any
+        conjugated site pairs the electron, so the functional groups are
+        tried first because their result stays planar:
+          A. add H, in plane, to a pyridinic ring N (two C neighbours, no H,
+             not on a metal; rings up to 16 atoms) -> pyrrole-type N-H; to a
+             terminal =N-H cap on an sp2 carbon (a cut imine end) -> -NH2; or
+             to a carbonyl O on an sp2 carbon -> enol/phenol O-H;
+          B. remove a cap H this model placed on a conjugated N (two heavy
+             neighbours, that one H) or on an O of an sp2 C or N (a capped
+             nitro O-H goes back to -NO2).
+        Excluded, left to the generic path: acyclic imine/azine N with no H
+        (the linkage nitrogen), metal-bound N, removing H from -NH2 or =N-H
+        caps (leaves a nitrene-like end), parent hydrogens, and anything not
+        attached to an sp2 atom. Assumes the
+        unpaired electron lives in the one conjugated system - true for the
+        fused/aromatic patches measured, not verified per fragment.
+        """
+        n = len(species)
+        pos = [np.asarray(c, dtype=float) for c in coords]
+        metals = self.METALS
+        adj = [[j for j in range(n) if j != i and self.is_valid_bond(
+                    species[i], species[j], float(np.linalg.norm(pos[i] - pos[j])))]
+               for i in range(n)]
+
+        def heavy(i):
+            return [j for j in adj[i] if species[j] != "H" and species[j] not in metals]
+
+        def hyd(i):
+            return [j for j in adj[i] if species[j] == "H"]
+
+        def on_metal(i):
+            return any(species[j] in metals for j in adj[i])
+
+        def sp2_carbon(j):
+            return species[j] == "C" and len([k for k in adj[j] if species[k] not in metals]) == 3
+
+        def sp2_nitrogen(j):
+            return species[j] == "N" and not hyd(j) and len(heavy(j)) == 3
+
+        # Up to 16-membered: a phthalocyanine meso aza-N sits only in the
+        # 16-atom inner macrocycle. Larger pore-sized cycles are not rings here.
+        def in_ring(i, a, b, max_bonds=15):
+            seen, q = {i, a}, deque([(a, 0)])
+            while q:
+                u, d = q.popleft()
+                if u == b:
+                    return True
+                if d >= max_bonds:
+                    continue
+                for v in heavy(u):
+                    if v not in seen:
+                        seen.add(v)
+                        q.append((v, d + 1))
+            return False
+
+        def clearance(p_new, parent):
+            return min((float(np.linalg.norm(p_new - pos[j]))
+                        for j in range(n) if j != parent), default=float("inf"))
+
+        def only_parent_bonded(p_new, parent):
+            return all(j == parent or not self.is_valid_bond(
+                species[j], "H", float(np.linalg.norm(p_new - pos[j]))) for j in range(n))
+
+        # Tier A: candidate positions, all in the plane of the parent's sp2 frame.
+        add_sites = []
+        for i, sp in enumerate(species):
+            if sp not in ("N", "O") or on_metal(i):
+                continue
+            hv = heavy(i)
+            if sp == "N" and len(hv) == 1 and len(hyd(i)) == 1 and sp2_carbon(hv[0]):
+                # Terminal =N-H cap (a cut imine end) -> -NH2, second H in the
+                # plane the C-N-H already defines.
+                h0 = hyd(i)[0]
+                uc = pos[hv[0]] - pos[i]
+                uh = pos[h0] - pos[i]
+                uc, uh = uc / np.linalg.norm(uc), uh / np.linalg.norm(uh)
+                d = -(uc + uh)
+                if np.linalg.norm(d) < 1e-6:
+                    continue
+                d = d / np.linalg.norm(d)
+                add_sites.append(("imine-NH", i, [pos[i] + self.cap_bond_length("N") * d]))
+                continue
+            if hyd(i):
+                continue
+            if sp == "N" and len(hv) == 2 and all(species[j] == "C" for j in hv) \
+                    and any(sp2_carbon(j) for j in hv) and in_ring(i, hv[0], hv[1]):
+                u0 = pos[hv[0]] - pos[i]
+                u1 = pos[hv[1]] - pos[i]
+                u0, u1 = u0 / np.linalg.norm(u0), u1 / np.linalg.norm(u1)
+                bis, nrm = -(u0 + u1), np.cross(u0, u1)
+                if np.linalg.norm(bis) < 1e-6 or np.linalg.norm(nrm) < 1e-6:
+                    continue
+                bis, nrm = bis / np.linalg.norm(bis), nrm / np.linalg.norm(nrm)
+                side = np.cross(nrm, bis)
+                bl = self.cap_bond_length("N")
+                cands = [pos[i] + bl * (np.cos(np.deg2rad(t)) * bis + np.sin(np.deg2rad(t)) * side)
+                         for t in range(-20, 21, 5)]
+                add_sites.append(("ring-N", i, cands))
+            elif sp == "O" and len(hv) == 1 and sp2_carbon(hv[0]):
+                c = hv[0]
+                others = [k for k in adj[c] if k != i and species[k] not in metals]
+                if len(others) != 2:
+                    continue
+                ax = pos[i] - pos[c]
+                ax = ax / np.linalg.norm(ax)
+                nrm = np.cross(pos[others[0]] - pos[c], pos[others[1]] - pos[c])
+                if np.linalg.norm(nrm) < 1e-6:
+                    continue
+                w = np.cross(nrm / np.linalg.norm(nrm), ax)
+                w = w / np.linalg.norm(w)
+                bl = self.cap_bond_length("O")
+                t = np.deg2rad(180.0 - 109.5)
+                cands = [pos[i] + bl * (np.cos(t) * ax + sgn * np.sin(t) * w) for sgn in (1.0, -1.0)]
+                add_sites.append(("carbonyl-O", i, cands))
+
+        for floor in (1.8, 1.5):
+            best = None
+            for kind, i, cands in add_sites:
+                for p_new in cands:
+                    if not only_parent_bonded(p_new, i):
+                        continue
+                    g = clearance(p_new, i)
+                    if g >= floor and (best is None or g > best[0]):
+                        best = (g, kind, i, p_new)
+            if best is not None:
+                g, kind, i, p_new = best
+                species = list(species) + ["H"]
+                coords = list(coords) + [np.array(p_new, dtype=float)]
+                capped_h_indices = list(capped_h_indices) + [len(species) - 1]
+                print(f"QM-Fix [{kind}]: Added H to {species[i]}[{i}] in its ring plane "
+                      f"to achieve even electron count for '{label}' (clearance {g:.2f} A).")
+                return species, coords, capped_h_indices
+
+        # Tier B: take back one of this model's own caps on a conjugated N/O.
+        caps = set(capped_h_indices)
+        for want in ("N", "O"):
+            for h in sorted(caps):
+                if not (0 <= h < n) or species[h] != "H":
+                    continue
+                par = [j for j in adj[h] if species[j] != "H"]
+                if len(par) != 1 or species[par[0]] != want or on_metal(par[0]):
+                    continue
+                p = par[0]
+                hv = heavy(p)
+                # O may hang off an sp2 N too: a capped nitro O (N-O-H) goes
+                # back to a proper -NO2.
+                if len(hyd(p)) != 1 or not any(
+                        sp2_carbon(j) or (want == "O" and sp2_nitrogen(j)) for j in hv):
+                    continue
+                if (want == "N" and len(hv) != 2) or (want == "O" and len(hv) != 1):
+                    continue
+                keep = [k for k in range(n) if k != h]
+                species = [species[k] for k in keep]
+                coords = [coords[k] for k in keep]
+                capped_h_indices = [k - 1 if k > h else k for k in capped_h_indices if k != h]
+                print(f"QM-Fix [cap-{want}H]: Removed capping H from {want}[{p}] "
+                      f"to achieve even electron count for '{label}'.")
+                return species, coords, capped_h_indices
+        return None
+
     def _skip_saturated_h_cap(self, idx, species, coords):
         """COF-only: never cap an atom whose valence is already satisfied.
 
@@ -3713,6 +4004,20 @@ class COFFragmenter(BaseFragmenter):
         target = {"C": 4, "N": 3, "O": 2}.get(species[idx])
         if target is None:
             return False
+        if species[idx] == "C":
+            # A linear, H-free carbon with two heavy neighbours is sp (C#C or
+            # C=C=C) and complete, however the model draws its lengths: 610's
+            # Ar-C#C-Ar has a 1.26 A triple, read as double, and every alkyne
+            # carbon was given an extra H.
+            pos = np.array(coords[idx], dtype=float)
+            nb = [j for j, spj in enumerate(species) if j != idx and self.is_valid_bond(
+                "C", spj, float(np.linalg.norm(pos - np.array(coords[j], dtype=float))))]
+            if len(nb) == 2 and all(species[j] != "H" for j in nb):
+                u = np.array(coords[nb[0]], dtype=float) - pos
+                v = np.array(coords[nb[1]], dtype=float) - pos
+                cosang = float(np.dot(u, v)) / (np.linalg.norm(u) * np.linalg.norm(v))
+                if cosang <= np.cos(np.deg2rad(165.0)):
+                    return True
         return self._local_valence_used(idx, species, coords) >= target
 
     def _heavy_neighbours(self, idx, species, coords):
@@ -3777,6 +4082,30 @@ class COFFragmenter(BaseFragmenter):
         if ang < 165.0:
             return None
         return n_idx if idx == c_idx else c_idx
+
+    def _severed_alkyne_terminus(self, t_idx, anchor_idx, species, coords):
+        """COF-only: is this bare carbon the end of a cut C#C?
+
+        True when its one heavy neighbour is a carbon with exactly two heavy
+        neighbours, no H, a linear (>= 165 deg) frame, and a bond <= 1.30 A.
+        Judged from geometry because idealised entries draw C#C anywhere up to
+        1.26 A; 1.30 A keeps a cumulene C=C=C (~1.31) out.
+        """
+        if species[t_idx] != "C" or species[anchor_idx] != "C":
+            return False
+        pos = lambda k: np.array(coords[k], dtype=float)
+        if float(np.linalg.norm(pos(t_idx) - pos(anchor_idx))) > 1.30:
+            return False
+        a_nb = [j for j, spj in enumerate(species) if j != anchor_idx
+                and self.is_valid_bond("C", spj, float(np.linalg.norm(pos(anchor_idx) - pos(j))))]
+        a_heavy = [j for j in a_nb if species[j] != "H"]
+        if len(a_heavy) != 2 or len(a_nb) != 2 or t_idx not in a_heavy:
+            return False
+        other = a_heavy[0] if a_heavy[1] == t_idx else a_heavy[1]
+        u = pos(t_idx) - pos(anchor_idx)
+        v = pos(other) - pos(anchor_idx)
+        ang = np.degrees(np.arccos(np.clip(float(np.dot(u, v)) / (np.linalg.norm(u) * np.linalg.norm(v)), -1.0, 1.0)))
+        return ang >= 165.0
 
     def _severed_alkene_terminus(self, t_idx, anchor_idx, species, coords):
         """COF-only: is this bare carbon the far half of a severed C=C?
@@ -3890,6 +4219,7 @@ class COFFragmenter(BaseFragmenter):
         target_valence = {"C": 4, "N": 3}
         heavy_idx = [i for i, sp in enumerate(species) if sp in target_valence]
         planarize_targets = []
+        alkyne_extra_h = []
         for i in heavy_idx:
             if i >= len(species):
                 continue
@@ -3918,6 +4248,28 @@ class COFFragmenter(BaseFragmenter):
             # ~1.28 A vs aromatic C-N ~1.38 A and amine C-N ~1.47 A), so use it
             # to charge the anchor its true bond order.
             anchor_d = float(np.linalg.norm(pos - np.array(coords[anchor], dtype=float)))
+            if sp == "C" and self._severed_alkyne_terminus(i, anchor, species, coords):
+                # Cut alkyne end: exactly one H, on the C#C axis. The bond is
+                # read from geometry, not length - 610 draws its C#C at 1.26 A,
+                # past the triple cutoff, and got =CH2 - and the sp2 cleanup
+                # below would bend the H to 120 degrees (271, 272, 259).
+                axis = pos - np.array(coords[anchor], dtype=float)
+                axis = axis / np.linalg.norm(axis)
+                on_axis = pos + self.cap_bond_length("C") * axis
+                my_h = [j for j, spj in enumerate(species) if spj == "H" and j != i
+                        and self.is_valid_bond("C", "H", float(np.linalg.norm(pos - np.array(coords[j], dtype=float))))]
+                if not my_h:
+                    species.append("H")
+                    coords.append(on_axis)
+                    if capped_h_flags is not None:
+                        capped_h_flags.append(True)
+                else:
+                    keep_h = next((j for j in my_h if not (capped_h_flags and capped_h_flags[j])), my_h[0])
+                    if capped_h_flags and capped_h_flags[keep_h]:
+                        coords[keep_h] = on_axis
+                    alkyne_extra_h.extend(j for j in my_h if j != keep_h
+                                          and capped_h_flags and capped_h_flags[j])
+                continue
             if self._severed_alkene_terminus(i, anchor, species, coords):
                 # The far half of a cut vinylene bridge: two hydrogens, giving
                 # the planar =CH2 the carry-over exists to preserve.
@@ -3968,6 +4320,14 @@ class COFFragmenter(BaseFragmenter):
 
         if planarize_targets:
             self._planarize_conjugated_caps(species, coords, planarize_targets)
+
+        if alkyne_extra_h:
+            gone = set(alkyne_extra_h)
+            keep = [k for k in range(len(species)) if k not in gone]
+            species[:] = [species[k] for k in keep]
+            coords[:] = [coords[k] for k in keep]
+            if capped_h_flags is not None:
+                capped_h_flags[:] = [capped_h_flags[k] for k in keep]
 
     def _planarize_conjugated_caps(self, species, coords, targets):
         """COF-only: force capping H on a terminal sp2 atom back into the plane
@@ -4164,6 +4524,37 @@ class COFFragmenter(BaseFragmenter):
                 gem_h = [j for j in geminal if species[j] == "H"]
                 gem_now = min((float(np.linalg.norm(pos[h] - pos[j]))
                                for j in gem_h), default=float("inf"))
+                # An sp2 C-H / N-H cap belongs in its ring plane (Decision
+                # 2026-05-12). Swinging it round the cone below tips it out of
+                # plane: 823's bay-region caps went 54 degrees out and 1.6 A
+                # from their own ring neighbour to clear a 1.74 A H...H contact
+                # that a small in-plane splay resolves. So splay in plane
+                # first, and fall back to the cone only when that still leaves
+                # a genuine collision (< 1.2 A).
+                if (species[parent] in ("C", "N") and len(anchors) == 2
+                        and not gem_h):
+                    u0 = pos[anchors[0]] - pos[parent]
+                    u1 = pos[anchors[1]] - pos[parent]
+                    u0, u1 = u0 / np.linalg.norm(u0), u1 / np.linalg.norm(u1)
+                    nrm = np.cross(u0, u1)
+                    bis = -(u0 + u1)
+                    if np.linalg.norm(nrm) > 1e-6 and np.linalg.norm(bis) > 1e-6:
+                        nrm, bis = nrm / np.linalg.norm(nrm), bis / np.linalg.norm(bis)
+                        side = np.cross(nrm, bis)
+                        plane_pos, plane_gap = None, -1.0
+                        for th in range(-20, 21, 2):
+                            r = np.deg2rad(th)
+                            cand = pos[parent] + bl * (np.cos(r) * bis + np.sin(r) * side)
+                            g = gap(h, parent, cand, ignore=geminal)
+                            if g > plane_gap + 1e-6:
+                                plane_pos, plane_gap = cand, g
+                        if plane_gap >= 1.2:
+                            if plane_pos is not None and plane_gap > here + 1e-6:
+                                coords[h] = plane_pos
+                                pos[h] = plane_pos
+                                moved += 1
+                                moved_this_pass += 1
+                            continue
                 cos_t = float(np.dot(v / bl, w))
                 sin_t = float(np.sqrt(max(0.0, 1.0 - cos_t * cos_t)))
                 e1, e2 = self._orthonormal_basis(w)
@@ -4206,6 +4597,13 @@ class COFFragmenter(BaseFragmenter):
                 if g <= h or g in drop:
                     continue
                 if float(np.linalg.norm(pos[h] - pos[g])) < 0.9:
+                    if h not in caps and g not in caps:
+                        # Two parent hydrogens: the crystal's own geometry,
+                        # never ours to delete. Idealised models (78, 843) put
+                        # bay H of neighbouring rings 0.5-0.7 A apart, and
+                        # dropping one left its carbon bare. True duplicates of
+                        # one parent H are removed by _dedupe_superimposed_atoms.
+                        continue
                     # Prefer to drop a cap over a hydrogen the parent had.
                     drop.add(g if g in caps or h not in caps else h)
         if drop:
@@ -4277,6 +4675,9 @@ class COFFragmenter(BaseFragmenter):
             if len(heavy) != 1:
                 continue
             anchor, anchor_d = heavy[0]
+            if species[parent] == "C" and self._severed_alkyne_terminus(parent, anchor, species, coords):
+                # sp, not sp2: the C#C-H cap stays on the triple-bond axis.
+                continue
             order = self._terminal_bond_order(
                 species[parent], species[anchor], anchor_d, self._length_scale()
             )
@@ -4522,72 +4923,94 @@ class COFFragmenter(BaseFragmenter):
                 return True
         return False
 
-    def _drop_clipped_ring_heteroatoms(self, species, coords, capped_h_flags=None):
-        """COF-only: remove ring heteroatoms the fragment boundary cut through.
+    def _drop_clipped_ring_stubs(self, species, coords, capped_h_flags=None):
+        """COF-only: remove ring atoms the fragment boundary left hanging.
 
-        Carving a patch out of a fused sheet has to break rings, and a ring
-        carbon left at that edge is fine - it becomes an ordinary aromatic C-H.
-        A ring NITROGEN left there is not: 663 came back with five -C=N-H
-        stubs and 662 with two, a group neither parent contains anywhere.
-        Dropping the stub and letting the carbon take the hydrogen instead
-        gives that edge the same chemistry as the rest of the patch.
+        Carving a patch out of a fused sheet has to break rings. A ring carbon
+        that keeps two ring neighbours is fine - it becomes an ordinary
+        aromatic C-H. A ring atom left with ONE heavy neighbour is a stub:
+        a ring NITROGEN there came back as -C=N-H (663 had five, 662 two), and
+        a ring CARBON there came back as a methyl - 823's fused ZnPc sheet had
+        twelve -CH3 on its edge, a group no fully sp2 parent contains. Dropping
+        the stub and letting its neighbour take the hydrogen instead gives
+        that edge the same aromatic chemistry as the rest of the patch.
 
         Membership is decided on the periodic parent, so only genuine ring
-        bridges qualify. A nitrogen severed by a linkage rule - an imine, an
-        azine - sits outside every ring and is untouched, and so is a nitrile
-        or an amine, terminal in the parent to begin with.
+        atoms qualify. Excluded: a nitrogen severed by a linkage rule (imine,
+        azine) sits outside every ring, and a nitrile, amine, methyl or
+        methoxy is terminal in the parent to begin with - all untouched. A
+        carbon stub is only dropped when its remaining neighbour is itself a
+        parent ring atom, so a ring carbon clipped down to its exocyclic
+        substituent is left alone rather than orphaning that substituent.
+        Repeats until stable, since removing one stub can expose another.
+
+        Returns the original indices of the atoms kept, in order, or None when
+        nothing was dropped - callers holding index maps into this fragment
+        must remap them.
         """
         if getattr(self, "_had_linkage_cuts", False):
-            # Linkage-derived blocks carry their partner heteroatom by design.
-            return
+            # Linkage-derived blocks carry their partner atoms by design.
+            return None
         struct = getattr(self, "_parent_struct", None)
         if struct is None or not species:
-            return
-        ring_hetero = self._parent_ring_heteroatoms(struct)
-        if not ring_hetero:
-            return
+            return None
+        ring_sites = self._parent_ring_sites(struct, ("C", "N", "O", "S"))
+        if not ring_sites:
+            return None
 
-        pos = [np.asarray(c, dtype=float) for c in coords]
+        n_hetero = n_carbon = 0
+        orig = list(range(len(species)))
+        while True:
+            pos = [np.asarray(c, dtype=float) for c in coords]
 
-        def heavy_count(i):
-            n = 0
-            for j, spj in enumerate(species):
-                if j == i or spj == "H":
+            def heavy_nbrs(i):
+                return [j for j, spj in enumerate(species)
+                        if j != i and spj != "H"
+                        and self.is_valid_bond(species[i], spj,
+                                               float(np.linalg.norm(pos[i] - pos[j])))]
+
+            drop = set()
+            for i, sp in enumerate(species):
+                if sp not in ("C", "N", "O", "S"):
                     continue
-                if self.is_valid_bond(species[i], spj,
-                                      float(np.linalg.norm(pos[i] - pos[j]))):
-                    n += 1
-            return n
+                hv = heavy_nbrs(i)
+                if len(hv) > 1:
+                    continue
+                if not self._is_parent_ring_site(struct, pos[i], ring_sites):
+                    continue
+                if sp == "C":
+                    if len(hv) != 1 or not self._is_parent_ring_site(
+                            struct, pos[hv[0]], ring_sites):
+                        continue
+                    n_carbon += 1
+                else:
+                    n_hetero += 1
+                drop.add(i)
+                for j, spj in enumerate(species):
+                    if spj == "H" and self.is_valid_bond(
+                        sp, "H", float(np.linalg.norm(pos[i] - pos[j]))
+                    ):
+                        drop.add(j)
+            if not drop:
+                break
 
-        drop = set()
-        for i, sp in enumerate(species):
-            if sp not in ("N", "O", "S") or heavy_count(i) > 1:
-                continue
-            if not self._is_parent_ring_heteroatom(struct, pos[i], ring_hetero):
-                continue
-            drop.add(i)
-            for j, spj in enumerate(species):
-                if spj == "H" and self.is_valid_bond(
-                    sp, "H", float(np.linalg.norm(pos[i] - pos[j]))
-                ):
-                    drop.add(j)
-        if not drop:
-            return
+            keep = [i for i in range(len(species)) if i not in drop]
+            species[:] = [species[i] for i in keep]
+            coords[:] = [coords[i] for i in keep]
+            if capped_h_flags is not None:
+                capped_h_flags[:] = [capped_h_flags[i] for i in keep]
+            orig = [orig[i] for i in keep]
 
-        keep = [i for i in range(len(species)) if i not in drop]
-        kept_species = [species[i] for i in keep]
-        kept_coords = [coords[i] for i in keep]
-        kept_flags = ([capped_h_flags[i] for i in keep]
-                      if capped_h_flags is not None else None)
-        species[:] = kept_species
-        coords[:] = kept_coords
-        if capped_h_flags is not None:
-            capped_h_flags[:] = kept_flags
-        print(f"  -> COF edge: dropped {len(drop)} clipped ring heteroatom(s) "
-              f"(and their H); the carbons take capping H instead.")
+        if n_hetero:
+            print(f"  -> COF edge: dropped {n_hetero} clipped ring heteroatom(s) "
+                  f"(and their H); the carbons take capping H instead.")
+        if n_carbon:
+            print(f"  -> COF edge: dropped {n_carbon} clipped ring carbon stub(s) "
+                  f"(would have been -CH3); their neighbours take capping H instead.")
+        return orig if (n_hetero or n_carbon) else None
 
-    def _parent_ring_heteroatoms(self, struct, max_ring=8):
-        """Fractional coordinates of every N/O/S that bridges a ring.
+    def _parent_ring_sites(self, struct, elements, max_ring=8):
+        """Fractional coordinates of every atom of `elements` that sits in a ring.
 
         Computed on the periodic parent, where nothing is missing a neighbour,
         and returned as wrapped fractional coordinates so a supercell atom can
@@ -4616,7 +5039,7 @@ class COFFragmenter(BaseFragmenter):
 
         ring_sites = set()
         for i, heavy in nbrs.items():
-            if sym(i) not in ("N", "O", "S") or len(heavy) < 2:
+            if sym(i) not in elements or len(heavy) < 2:
                 continue
             found = False
             for a in range(len(heavy)):
@@ -4648,15 +5071,15 @@ class COFFragmenter(BaseFragmenter):
         }
 
     @staticmethod
-    def _is_parent_ring_heteroatom(struct, cart, ring_hetero, tol=0.02):
+    def _is_parent_ring_site(struct, cart, ring_sites, tol=0.02):
         """Does this Cartesian position sit on one of those parent sites?"""
-        if not ring_hetero:
+        if not ring_sites:
             return False
         f = np.mod(np.asarray(struct.lattice.get_fractional_coords(cart), dtype=float), 1.0)
         key = tuple(np.round(f, 2))
-        if key in ring_hetero:
+        if key in ring_sites:
             return True
-        for other in ring_hetero:
+        for other in ring_sites:
             d = np.abs(f - np.asarray(other))
             d = np.minimum(d, 1.0 - d)
             if float(np.max(d)) < tol:
@@ -4693,6 +5116,18 @@ class COFFragmenter(BaseFragmenter):
         if n < 2:
             return species, coords, capped_h_indices
         co = np.asarray(coords, dtype=float)
+
+        def h_anchor(k):
+            # Nearest heavy atom within an X-H bond, or None.
+            best, best_d = None, 1.3
+            for m in range(n):
+                if species[m] == "H" or m == k:
+                    continue
+                d = float(np.linalg.norm(co[k] - co[m]))
+                if d < best_d:
+                    best, best_d = m, d
+            return best
+
         # Heavy atoms first, so a heavy/H overlap always keeps the heavy atom.
         order = sorted(range(n), key=lambda i: (species[i] == "H", i))
         dropped = set()
@@ -4704,6 +5139,15 @@ class COFFragmenter(BaseFragmenter):
                     continue
                 limit = tol if species[i] == species[j] else 0.50
                 if float(np.linalg.norm(co[i] - co[j])) < limit:
+                    if species[i] == species[j] == "H":
+                        # Two H on DIFFERENT carbons are two atoms, however
+                        # close the model draws them (78/843 bay H at 0.5-0.7
+                        # A); a duplicate sits on the same, or a duplicated,
+                        # heavy atom.
+                        ai, aj = h_anchor(i), h_anchor(j)
+                        if (ai is not None and aj is not None and ai != aj
+                                and float(np.linalg.norm(co[ai] - co[aj])) >= tol):
+                            continue
                     dropped.add(j)
         if not dropped:
             return species, coords, capped_h_indices
@@ -4726,7 +5170,7 @@ class COFFragmenter(BaseFragmenter):
         coords_copy = [np.array(c, dtype=float) for c in coords]
         capped_h_flags = [False] * len(species_copy)
 
-        self._drop_clipped_ring_heteroatoms(species_copy, coords_copy, capped_h_flags)
+        self._drop_clipped_ring_stubs(species_copy, coords_copy, capped_h_flags)
         self._cap_severed_double_bond_sites(species_copy, coords_copy, capped_h_flags)
         self._cap_open_oxygens(species_copy, coords_copy, capped_h_flags)
 
@@ -5385,7 +5829,12 @@ class COFFragmenter(BaseFragmenter):
         # node, and everything below - image scoring, arm coverage, the merge -
         # works unchanged on that pool.
         single_block = not linkers
-        partners = linkers if linkers else nodes
+        # Other nodes are always candidates too: in 893 the Ni-porphyrin node
+        # is imine-bonded to organic NODES, while the small linkers hang off
+        # those, so a linkers-only pool found nothing and Path J gave up (the
+        # fallback then lost the Ni). A node that is not bonded to the chosen
+        # one scores zero attachments below and is never picked.
+        partners = linkers + nodes
         if single_block:
             print("  -> COF single building block: the node bonds to copies of "
                   "itself, so its partner is another node.")
@@ -5567,7 +6016,7 @@ class COFFragmenter(BaseFragmenter):
                     self._place_capping_h_relaxing(i, base, self.cap_bond_length(sp), species, coords, capped_h_flags=capped_h_flags)
 
         # Keep helper heavy atoms fixed; only adjust capped H atoms.
-        self._drop_clipped_ring_heteroatoms(species, coords, capped_h_flags)
+        self._drop_clipped_ring_stubs(species, coords, capped_h_flags)
         self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
@@ -5661,6 +6110,10 @@ class COFFragmenter(BaseFragmenter):
         combined = self._try_cof_graph_node_linker_fragment(cif_path, output_path, minimize=minimize)
         if combined is not None:
             return combined
+        # Guests are dropped here only: this path builds its own graph and has
+        # no raw-CIF index bookkeeping. Path J (coffragmentor) keeps the raw
+        # structure because its block indices point into it.
+        struct = self._strip_discrete_guests(struct)
         print("Creating supercell...")
         self._parent_struct = struct
         self._length_scale_value = None
@@ -6308,15 +6761,23 @@ class COFFragmenter(BaseFragmenter):
                     print(f"  -> COF Path D (Porphyrin core). N-rich cores: {len(porph_cores)}")
                 else:
                     node_atoms = set()
+                    # Centre on a metal when there is one: in a metallo-COF
+                    # whose metal is its node (93's Co(terpyridine)2, bound by
+                    # coordination rather than any COF linkage) the nearest
+                    # heavy atom is an arbitrary ring carbon and the sphere
+                    # missed the Co entirely.
+                    _metal_sites = [i for i in range(len(supercell)) if sc_sym[i] in self.METALS]
+                    metal_center_mode = bool(_metal_sites) and center_idx < 0
                     if center_idx >= 0:
                         sc_center_idx = center_idx
                     else:
                         sc_center_idx = min(
-                            (i for i in range(len(supercell)) if sc_sym[i] != "H"),
+                            _metal_sites or (i for i in range(len(supercell)) if sc_sym[i] != "H"),
                             key=lambda i: np.linalg.norm(supercell[i].coords - ctr),
                         )
                     core_nodes = {sc_center_idx}
-                    print("  -> COF Path A (Fallback single-center mode).")
+                    print("  -> COF Path A (Fallback single-center mode"
+                          + (f", centred on {sc_sym[sc_center_idx]}" if _metal_sites else "") + ").")
                     print("Warning: Rare fallback COF topology detected (e.g., COF-505-like helix).")
                     print("  -> This topology is not implemented yet in UniFrag.")
         unwrapped = [None] * len(supercell)
@@ -6546,6 +7007,54 @@ class COFFragmenter(BaseFragmenter):
         except Exception:
             pass
 
+        # Metal-centred fallback: the metal is the node, so keep it with every
+        # donor atom and the smallest ring through each donor (93: the whole
+        # Co(terpyridine)2 unit). The ring motif above allows no metal and
+        # would drop it. Bonds leaving this set are capped as usual below.
+        if locals().get("metal_center_mode", False):
+            single_block_keep_heavy = None
+            m = sc_center_idx
+            heavy_org = lambda x: sc_sym[x] != "H" and sc_sym[x] not in self.METALS
+
+            def _smallest_ring_through(d, max_size=8):
+                best = set()
+                nbs = [x for x in graph[d] if heavy_org(x)]
+                for a, b in itertools.combinations(nbs, 2):
+                    prev, q = {a: None}, deque([a])
+                    while q and b not in prev:
+                        u = q.popleft()
+                        for w in graph[u]:
+                            if w not in prev and w != d and heavy_org(w):
+                                prev[w] = u
+                                q.append(w)
+                    if b not in prev:
+                        continue
+                    path, u = [], b
+                    while u is not None:
+                        path.append(u)
+                        u = prev[u]
+                    if len(path) + 1 <= max_size and (not best or len(path) + 1 < len(best)):
+                        best = set(path) | {d}
+                return best
+
+            final = {m}
+            for d in graph[m]:
+                if heavy_org(d):
+                    final.add(d)
+                    ring = _smallest_ring_through(d)
+                    # No small ring (93's outer pyridines are open in the CIF):
+                    # keep the donor's own neighbours so it is not a stub.
+                    final |= ring or {x for x in graph[d] if heavy_org(x)}
+            final |= {h for u in list(final) for h in graph[u] if sc_sym[h] == "H"}
+            broken = []
+            for u in list(final):
+                for v in graph[u]:
+                    if v in final or sc_sym[v] == "H":
+                        continue
+                    broken.append((u, np.array(unwrapped[v]) - np.array(unwrapped[u])))
+            print(f"  -> COF metal-centred node: {sc_sym[m]} + {sum(1 for d in graph[m] if heavy_org(d))} "
+                  f"donor atoms and their rings ({sum(1 for i in final if sc_sym[i] != 'H')} heavy atoms).")
+
         # For single-building-block COFs, construct the actual fragment directly
         # from extracted block(s), then proceed with standard edge capping.
         if single_block_keep_heavy:
@@ -6736,7 +7245,13 @@ class COFFragmenter(BaseFragmenter):
 
         # COF fragments can leave terminal O atoms without a broken heavy-atom
         # edge marker; cap those O sites with H before geometry refinement.
-        self._drop_clipped_ring_heteroatoms(species, coords, capped_h_flags)
+        kept_orig = self._drop_clipped_ring_stubs(species, coords, capped_h_flags)
+        if kept_orig is not None:
+            # The minimize trim below finds the core through `local`; stale
+            # indices after a drop made it trim straight through 823's ZnPc
+            # macrocycle.
+            new_pos = {old: new for new, old in enumerate(kept_orig)}
+            local = {gi: new_pos[li] for gi, li in local.items() if li in new_pos}
         self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
 
@@ -7211,7 +7726,7 @@ class COFFragmenter(BaseFragmenter):
                 capped_h_flags = base_flags + base_flags
                 dimer_already_built = True
 
-        self._drop_clipped_ring_heteroatoms(species, coords, capped_h_flags)
+        self._drop_clipped_ring_stubs(species, coords, capped_h_flags)
         self._cap_severed_double_bond_sites(species, coords, capped_h_flags)
         self._cap_open_oxygens(species, coords, capped_h_flags)
         capped_h_indices = [i for i, is_cap in enumerate(capped_h_flags) if is_cap and species[i] == "H"]
@@ -8599,7 +9114,7 @@ def main():
 
             clean_frags, odd_frags = [], []
             for species, coords, frag_name, capped_h in new_extxyz_frags:
-                z = _electron_count(species)
+                z = _ligand_electron_count(species)
                 if z % 2:
                     odd_frags.append((species, coords, frag_name, capped_h, z))
                 else:

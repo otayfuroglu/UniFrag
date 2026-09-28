@@ -729,6 +729,13 @@ class COF:
             # Skip if it's the whole unfragmented structure or a single atom
             if len(comp_indices) == len(self.structure) or len(comp_indices) <= 1:
                 continue
+            # Also skip what a ring-linkage cut leaves of its bridge: the N/O
+            # alone, or with its own H (1038's dihydropyrazine N-H). Both
+            # blocks already carry a copy; kept, it posed as a two-atom
+            # "linker" and hid the real partner block from the assembly.
+            if all(i in pyrazine_bridge_atoms or self.structure[i].specie.symbol == 'H'
+                   for i in comp_indices):
+                continue
             
             # Determine connection points based on the number of attachment atoms
             # (atoms in this component that have bonds that were cut)
@@ -814,9 +821,20 @@ class COF:
                                 i_frac_unwrapped, self.structure[neighbor].frac_coords
                             )
                             nb_frac = self.structure[neighbor].frac_coords + image
-                            carried.append(
-                                (neighbor, self.structure.lattice.get_cartesian_coords(nb_frac))
-                            )
+                            nb_cart = self.structure.lattice.get_cartesian_coords(nb_frac)
+                            carried.append((neighbor, nb_cart))
+                            # A ring-linkage bridge may carry its own H (the
+                            # dihydropyrazine N-H of 1038/1039). Carry it with
+                            # the bridge, or reassembly returns a bare N.
+                            if neighbor in pyrazine_bridge_atoms:
+                                for _hh in original_undirected.neighbors(neighbor):
+                                    if self.structure[_hh].specie.symbol != 'H':
+                                        continue
+                                    _, _himg = self.structure.lattice.get_distance_and_image(
+                                        nb_frac, self.structure[_hh].frac_coords
+                                    )
+                                    carried.append((_hh, self.structure.lattice.get_cartesian_coords(
+                                        self.structure[_hh].frac_coords + _himg)))
 
             # A genuine node or linker is attached to the framework by at
             # least one severed bond. A component with none was already
