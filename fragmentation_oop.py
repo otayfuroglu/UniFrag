@@ -878,6 +878,27 @@ class BaseFragmenter:
         handled here. No-op for MOF and macromolecule; COFFragmenter overrides."""
         return None
 
+    def _can_remove_cap_h(self, h_idx, species, coords):
+        """Hook: may this capping hydrogen be stripped to fix odd-electron
+        parity? The base answer is yes, reproducing the previous behaviour;
+        COFFragmenter vetoes stripping a genuine single-cut cap.
+        """
+        return True
+
+    def _parent_cut_deficit(self, idx, species, coords, local_heavy_degree):
+        """Hook: how many capping H does a candidate O/N site in
+        `_cap_open_oxygens` actually need?
+
+        Returning None means "unknown - keep the previous fixed-one-H
+        behaviour", which is exactly what MOF and macromolecule fragmentation
+        have always done. COFFragmenter overrides it with
+        `target_valence - _local_valence_used(idx)`, so a site whose retained
+        bonds already satisfy it (a genuine carbonyl O) is left uncapped, and
+        a site short by more than one gets exactly that many H. The count is
+        read from the retained bonds' own lengths, which are the parent's.
+        """
+        return None
+
     def _dedupe_superimposed_atoms(self, species, coords, capped_h_indices, label=""):
         """No-op for MOFs. COFFragmenter overrides it; see that docstring."""
         return species, coords, capped_h_indices
@@ -969,7 +990,7 @@ class BaseFragmenter:
         removal_candidates = []
         for h_idx in capped_h_indices:
             score, group = self._classify_cap_removal_priority(h_idx, species, coords_arr)
-            if score > 0:
+            if score > 0 and self._can_remove_cap_h(h_idx, species, coords_arr):
                 removal_candidates.append((score, h_idx, group))
                 
         if removal_candidates and not (self._prefer_h_addition_for_parity and add_candidates):
@@ -1157,14 +1178,31 @@ class BaseFragmenter:
             if self._skip_saturated_h_cap(i, species, coords):
                 continue
 
+            n_caps = 1
             if sp == "O":
                 if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "B", "Si", "P", "S", "N"}:
                     continue
                 base = pos - np.array(coords[heavy_neighbors[0]], dtype=float)
+                # Valence-aware cap count: the shortfall between this
+                # element's target valence and what its retained bonds
+                # already use tells us exactly how many H are missing,
+                # rather than always guessing one. An atom whose retained
+                # bonds already satisfy it was never cut (e.g. a genuine
+                # carbonyl O) and is left uncapped.
+                deficit = self._parent_cut_deficit(i, species, coords, len(heavy_neighbors))
+                if deficit is not None:
+                    if deficit <= 0:
+                        continue
+                    n_caps = deficit
             elif sp == "N":
                 if len(heavy_neighbors) != 1 or species[heavy_neighbors[0]] not in {"C", "N"}:
                     continue
                 base = pos - np.array(coords[heavy_neighbors[0]], dtype=float)
+                deficit = self._parent_cut_deficit(i, species, coords, len(heavy_neighbors))
+                if deficit is not None:
+                    if deficit <= 0:
+                        continue
+                    n_caps = deficit
             else:
                 # Phenyl/aromatic edge C: two retained heavy neighbors but no H.
                 # Avoid carbonyl-like C by requiring C/N neighbors only.
@@ -1178,11 +1216,14 @@ class BaseFragmenter:
                 if np.linalg.norm(base) < 1e-12:
                     base = pos - np.mean([np.array(coords[nb], dtype=float) for nb in heavy_neighbors], axis=0)
 
-            placed = self._place_cap_h(i, base, self.cap_bond_length(sp),
-                                       species, coords, capped_h_flags)
-            if not placed and np.linalg.norm(base) > 1e-12:
-                self._place_cap_h(i, -base, self.cap_bond_length(sp),
-                                  species, coords, capped_h_flags)
+            for _ in range(n_caps):
+                placed = self._place_cap_h(i, base, self.cap_bond_length(sp),
+                                           species, coords, capped_h_flags)
+                if not placed and np.linalg.norm(base) > 1e-12:
+                    placed = self._place_cap_h(i, -base, self.cap_bond_length(sp),
+                                      species, coords, capped_h_flags)
+                if not placed:
+                    break
 
     def _make_qm_ready_linker(self, species, coords, label="only_linker"):
         species_copy = list(species)
@@ -3815,7 +3856,96 @@ class COFFragmenter(BaseFragmenter):
         target = {"C": 4, "N": 3, "O": 2}.get(species[idx])
         if target is None:
             return False
-        return self._local_valence_used(idx, species, coords) < target
+        if self._local_valence_used(idx, species, coords) >= target:
+            return False
+        # Parent-aware veto: global electron-count parity is not a per-atom
+        # signal, and the bond-order check above can be fooled by an atom
+        # that was never cut at all - e.g. a pyridine/triazine ring
+        # nitrogen's two aromatic bonds score under 3 exactly like a severed
+        # amine nitrogen's one bond does, so the parity repair would add a
+        # spurious H there just to balance the fragment's total electron
+        # count. Refuse whenever this atom's real degree in the periodic
+        # parent already equals its degree in the current fragment: nothing
+        # was severed here, so it is not a legitimate parity-repair site.
+        local_degree = self._fragment_heavy_degree(idx, species, coords)
+        real_degree = self._real_parent_heavy_degree(coords[idx])
+        if real_degree is not None and real_degree <= local_degree:
+            return False
+        # A second veto used to sit here, comparing the hydrogens already
+        # present against the SEVERED bonds' valence plus the parent's native
+        # H. It was removed: its clamp assumed the retained bond was worth a
+        # single valence, so on a site retaining a double bond it permitted
+        # one hydrogen too many, and together with the veto above it left
+        # some fragments with no legal repair site at all (795 lost every
+        # fragment it produces to quarantine). The bond-order check at the
+        # top of this method already refuses a saturated atom, and it reads
+        # the retained bond directly rather than inferring it.
+        return True
+
+    def _can_remove_cap_h(self, h_idx, species, coords):
+        """COF-only: refuse to strip a capping H its own atom still needs.
+
+        Global electron-count parity says nothing about WHICH cap is safe to
+        remove, so without this the highest-scoring candidate can be a
+        genuinely-cut site's only hydrogen - an aldimine Ar-CH=NH nitrogen
+        stripped back to the nitrene the capper exists to avoid, purely to
+        balance the fragment's total electron count somewhere else.
+
+        The test is the atom's own valence, not a degree special case: a
+        hydrogen may go only while the atom would still carry at least as
+        many as its retained bonds leave room for. An earlier version keyed
+        on `real_parent_degree - fragment_degree == 1 and h_count == 1`,
+        which protects a single-cut site but says nothing about a site that
+        lost two bonds and needs both its hydrogens.
+        """
+        target_of = {"C": 4, "N": 3, "O": 2}
+        h_pos = np.asarray(coords[h_idx], dtype=float)
+        parent_idx, best_d = None, 1.5
+        for j, spj in enumerate(species):
+            if spj == "H" or j == h_idx:
+                continue
+            d = float(np.linalg.norm(np.asarray(coords[j], dtype=float) - h_pos))
+            if d < best_d:
+                best_d, parent_idx = d, j
+        if parent_idx is None:
+            return True
+        target = target_of.get(species[parent_idx])
+        if target is None:
+            return True
+        p_pos = np.asarray(coords[parent_idx], dtype=float)
+        h_count = sum(
+            1 for j, spj in enumerate(species)
+            if spj == "H" and float(np.linalg.norm(np.asarray(coords[j], dtype=float) - p_pos)) < 1.3
+        )
+        # Valence the heavy bonds already consume, so the rest is what the
+        # hydrogens are there to fill.
+        heavy_used = self._local_valence_used(parent_idx, species, coords) - h_count
+        needed = max(0, target - heavy_used)
+        return h_count > needed
+
+    def _parent_cut_deficit(self, idx, species, coords, local_heavy_degree):
+        """COF-only: how many capping H a terminal O/N site in
+        `_cap_open_oxygens` needs - the valence its retained bond leaves
+        unfilled, not a difference of heavy-atom degrees.
+
+        Degree cannot answer this. It cannot tell 1050's carbonyl oxygen
+        (C=O 1.20 A, already complete) from 1049's hydroxyl oxygen whose
+        hydrogen the deposition simply omitted (C-O 1.34 A, one short):
+        both have parent degree 1 and fragment degree 1, so a
+        degree-difference rule skips both and 1049's six hydroxyls came back
+        as bare single-bonded oxygens. Nor does degree say how MANY hydrogens
+        a cut site wants - a nitrogen left holding one single C-N bond needs
+        two, and one left holding a C=N needs one.
+
+        Valence answers both at once, and needs no parent lookup: a heavy
+        atom's coordinates here ARE its parent coordinates (they are never
+        moved after the initial unwrap), so the retained bond's length - and
+        therefore its order - is the parent's own.
+        """
+        target = {"O": 2, "N": 3, "C": 4}.get(species[idx])
+        if target is None:
+            return None
+        return max(0, target - self._local_valence_used(idx, species, coords))
 
     def _heteroatom_parity_repair(self, species, coords, capped_h_indices, label):
         """COF-only: pair the odd electron on a functional-group N/O.
@@ -4287,6 +4417,15 @@ class COFFragmenter(BaseFragmenter):
                     sp, species[anchor], anchor_d, self._length_scale()
                 )
             deficit = target_valence[sp] - (anchor_order + h_count)
+            # NOTE: `anchor_order` is read from the retained bond's own length,
+            # which for a heavy atom is the parent's length - the coordinates
+            # are never moved after the unwrap. An earlier version replaced
+            # this with the SEVERED bond's order plus a clamp of
+            # `target_valence[sp] - 1`, on the theory that the retained bond
+            # never needs classifying. It does: the clamp charges the retained
+            # bond a single unit of valence, so a site retaining a double bond
+            # was capped one hydrogen too many - 1050's ring nitrogens came
+            # back as N(=C)(H)(H), four bonds on nitrogen.
             if deficit <= 0:
                 continue
             base = pos - np.array(coords[anchor], dtype=float)
@@ -5085,6 +5224,117 @@ class COFFragmenter(BaseFragmenter):
             if float(np.max(d)) < tol:
                 return True
         return False
+
+    def _parent_frac_coords(self):
+        """Cache this structure's parent fractional coordinates and symbols.
+
+        Mirrors the `_length_scale_value` caching pattern (computed once per
+        `self._parent_struct` identity, reused after that) since a single
+        capping/parity pass can query many atoms' real parent degree.
+        """
+        struct = getattr(self, "_parent_struct", None)
+        cached = getattr(self, "_parent_frac_coords_cache", None)
+        if cached is not None and cached[0] is struct:
+            return cached[1], cached[2]
+        fracs, syms = None, None
+        if struct is not None:
+            fracs = np.array([site.frac_coords for site in struct], dtype=float)
+
+            def _sym(site):
+                try:
+                    return site.specie.symbol
+                except Exception:
+                    return max(site.species.items(), key=lambda kv: kv[1])[0].symbol
+
+            syms = [_sym(site) for site in struct]
+        self._parent_frac_coords_cache = (struct, fracs, syms)
+        return fracs, syms
+
+    def _parent_index_for_position(self, cart_coord, tol=0.25):
+        """Map a fragment atom's unwrapped Cartesian coordinate back to the
+        site index it came from in the periodic parent structure.
+
+        Heavy-atom coordinates are never moved after the initial unwrap, so
+        `fragment_cart_coord == parent_cart_coord + lattice_vector` holds
+        exactly at capping time - the same invariant `_parent_ring_heteroatoms`
+        / `_is_parent_ring_heteroatom` already rely on for ring-membership
+        lookup. `tol` is a fractional-coordinate (Chebyshev) tolerance,
+        matching `_is_parent_ring_heteroatom`'s own convention. Returns None
+        when `self._parent_struct` is unset or no parent site matches closely
+        enough (e.g. this position is itself a capping hydrogen with no
+        periodic image of its own).
+        """
+        struct = getattr(self, "_parent_struct", None)
+        if struct is None:
+            return None
+        fracs, _syms = self._parent_frac_coords()
+        if fracs is None or len(fracs) == 0:
+            return None
+        f = np.mod(struct.lattice.get_fractional_coords(np.asarray(cart_coord, dtype=float)), 1.0)
+        delta = fracs - f
+        delta -= np.round(delta)
+        # Compare in ANGSTROM, not in fractional units. A fixed fractional
+        # tolerance is a different physical distance on every axis of every
+        # structure: 0.02 was 0.065 A along 1050's 3.29 A stacking axis but
+        # 0.55 A along its 27.29 A in-plane axis, and up to 0.97 A across the
+        # outlier set - wide enough to match a neighbouring site.
+        cart = delta @ np.asarray(struct.lattice.matrix, dtype=float)
+        dists = np.linalg.norm(cart, axis=1)
+        idx = int(np.argmin(dists))
+        if float(dists[idx]) < tol:
+            return idx
+        return None
+
+    def _real_parent_heavy_degree(self, cart_coord, tol=0.25, bond_r=2.4):
+        """True heavy-atom coordination number of the parent-structure site
+        this fragment atom came from - its degree in the infinite periodic
+        framework, before any bond was cut for fragmentation.
+
+        This is the ground truth `_cap_open_oxygens`, `_cap_severed_double_
+        bond_sites` and the parity-repair add/remove logic were missing:
+        each only ever reasons from the fragment's own local connectivity,
+        so none of them can tell a naturally low-coordinate atom (real degree
+        == fragment degree, nothing was cut here) from a genuine cut site
+        (real degree > fragment degree; the difference is exactly the number
+        of severed bonds). Returns None when this position has no parent
+        match (e.g. a capping hydrogen) or `self._parent_struct` is unset, so
+        every caller can cleanly fall back to its previous, parent-unaware
+        behaviour.
+        """
+        struct = getattr(self, "_parent_struct", None)
+        if struct is None:
+            return None
+        pidx = self._parent_index_for_position(cart_coord, tol=tol)
+        if pidx is None:
+            return None
+        _fracs, syms = self._parent_frac_coords()
+        sym_i = syms[pidx]
+        if sym_i == "H":
+            return None
+        count = 0
+        for nb in struct.get_neighbors(struct[pidx], bond_r):
+            j = int(nb.index)
+            sym_j = syms[j]
+            if sym_j == "H":
+                continue
+            if self.is_valid_bond(sym_i, sym_j, float(nb.nn_distance)):
+                count += 1
+        return count
+
+    def _fragment_heavy_degree(self, idx, species, coords):
+        """Heavy-atom coordination number of atom `idx` in the CURRENT
+        fragment's own local connectivity - the counterpart to
+        `_real_parent_heavy_degree` needed to compute a real-vs-local gap."""
+        sp = species[idx]
+        pos = np.asarray(coords[idx], dtype=float)
+        count = 0
+        for j, spj in enumerate(species):
+            if j == idx or spj == "H":
+                continue
+            d = float(np.linalg.norm(pos - np.asarray(coords[j], dtype=float)))
+            if self.is_valid_bond(sp, spj, d):
+                count += 1
+        return count
 
     def _dedupe_superimposed_atoms(self, species, coords, capped_h_indices, label="", tol=0.85):
         """Drop atoms that sit on top of another atom.
