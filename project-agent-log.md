@@ -2501,3 +2501,11 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - `runUniFrag/check_cof_fragments.py`: reads `charge=` (absent = 0), exempts N+(C)4 from `over_coordinated` via the imported helper, judges `odd_electron` on `zsum - charge`.
 - Validation: see the decision entry - 8 N+ fragments changed, 147 byte-identical over 48 COFs, MOF unchanged apart from the ABAYIO/ABAYOU ownership swap.
 - Follow-up: other formal-charge motifs (pyridinium, imidazolium, spiroborate) are unhandled. Checking the swap needed a geometry comparison because the MOF content-multiset test counts it as a difference; a regression script that ignores ownership of a shared linker would save re-deriving this each time.
+
+## [2026-09-29] Full 884 validation of the quaternary N+ parity fix (no code change)
+- ARF smp job 6424004 at `cfc564a`, same 884 CIFs and script as job 6423477 (`b4e6976`), output `/arf/scratch/otayfuroglu/unifrag_884_v3`. 7.5 min on 64 cores.
+- MUST: all passed. Pre-scan 37 (same list), timeout 1 (913), frames 1649, `over_coordinated` 8 -> 0, `bad_terminal_caps` 64 -> 56, clashing 9, odd 0, multi_piece 0, odd-electron quarantine 23 (all identical).
+- Exactly 8 frames changed content: `FragCof`/`FragCofMin` of 1062, 671, 673, 674, the only frames tagged `charge=1`. The 8 fewer bad caps are those same fragments - the spurious carbonyl C-OH was also counted as a mis-capped oxygen (the pre-run prediction that bad caps would stay at 64 was wrong). No new bad caps. 1610 frames byte-identical.
+- 31 frames changed owner, not content: for 17 duplicate-parent pairs (106/107, 1147/1148, ...) the duplicate filter kept the other copy, decided by which worker finishes first. None of the 62 frames contains an N+, so the fix cannot reach them.
+- Pre-existing, found through the swap, not fixed: two "duplicate" pairs differ in hydrogen count - `554FragCofMin` C36H38N8O6 vs `550FragCofMin` C36H36N8O6, and `639FragCof` C36H30N12O12 vs `640FragCof` C36H24N12O12. The duplicate key appears not to compare hydrogens, so which formula enters the collection depends on run order. Follow-up: include H in the key or make the duplicate choice deterministic, and check which parent of each pair is mis-hydrogenated.
+
