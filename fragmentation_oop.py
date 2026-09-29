@@ -3269,7 +3269,21 @@ class COFFragmenter(BaseFragmenter):
 
     def is_valid_bond(self, s1, s2, dist):
         if s1 == "H" and s2 == "H":
-            return dist < 0.9
+            # Two hydrogens are never bonded to each other in a COF. The only
+            # species with a real H-H bond is molecular H2 (0.74 A), which is
+            # not part of any framework and would reach a fragment only as a
+            # guest - and discrete guests are stripped before fragmentation.
+            # A short H...H is therefore always the crystal's own geometry:
+            # idealised CoRE-COF models draw overlapping C-H/N-H hydrogens,
+            # 130 pairs closer than 0.9 A across 18 of the 884 structures,
+            # down to 0.051 A in 1210 - and in every one of those 130 pairs
+            # both hydrogens carry their own heavy-atom neighbour within
+            # 1.3 A, so not one is an H2. Reading them as a bond made those
+            # hydrogens look two-coordinate: 525 reported 24 over-coordinated
+            # H purely because its parent CIF places two H 0.684 A apart.
+            # Excluded: this changes nothing about H bonded to a heavy atom,
+            # and nothing about metal-H, which is already refused below.
+            return False
         if s1 in self.METALS or s2 in self.METALS:
             # Mirror MOFFragmenter's metal-bond convention: a metal-carbon or
             # metal-hydrogen contact this close is coincidental proximity, not
