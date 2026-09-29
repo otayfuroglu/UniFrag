@@ -3296,6 +3296,148 @@ class COFFragmenter(BaseFragmenter):
         cutoff = min(2.2, max(1.1, cutoff))
         return dist <= cutoff
 
+    # ------------------------------------------------------------------
+    # Parent pre-scan
+    # ------------------------------------------------------------------
+    # A deposited model that is already broken cannot yield a valid fragment,
+    # and the damage is silently inherited: 1106's three-coordinate oxygen
+    # reaches every fragment cut from it, and 284's superimposed sites become
+    # carbons with five and six bonds. Rejecting the PARENT is both cheaper
+    # and more honest than quarantining each fragment afterwards.
+    #
+    # Thresholds are set from the 884-structure HCNO collection, not chosen
+    # a priori; the per-rule counts are in project-decisions.md.
+    _PRESCAN_MIN_NONBONDED = 0.90   # two atoms this close are superimposed sites
+    _PRESCAN_MAX_CC = 1.80          # a real C-C never exceeds ~1.65 A
+    _PRESCAN_VALENCE = {"H": 1, "B": 3, "C": 4, "N": 3, "O": 2, "F": 1,
+                        "Si": 4, "P": 3, "S": 2, "Cl": 1, "Br": 1, "I": 1}
+
+    def prescan_parent(self, struct, max_report=6):
+        """Return a list of (rule, detail) defects in the PARENT structure.
+
+        An empty list means the parent is fit to fragment. Bond perception is
+        this class's own `is_valid_bond`, so the pre-scan and the fragmenter
+        can never disagree about what is bonded.
+
+        The rules reject only geometry that no chemistry can produce:
+
+        1. `close-contact`  - two atoms closer than 0.90 A that are NOT bonded.
+           Below that there is no bond between any pair of elements here, so
+           the pair is a superimposed site. This is deliberately the same 0.90
+           floor the fragment-level contact check uses.
+        2. `over-coordinated` - more sigma bonds than the element permits. A
+           nitrogen with four CARBON neighbours all at 1.40-1.60 A is exempt:
+           that is a real quaternary ammonium (1062, 165, 671-674), and the
+           only consequence is that its fragments are cationic.
+        3. `isolated-atom`  - an atom with no bond at all. Always a stray H in
+           this collection; pore solvent is a molecule, so it is not caught.
+        4. `bare-carbon`    - a carbon with at most one heavy neighbour and no
+           hydrogen, i.e. three unexplained valences: atoms are missing.
+        5. `stretched-CC`   - a C-C longer than 1.80 A that perception still
+           calls a bond. A single C-C tops out near 1.65 A even when strained.
+        6. `peroxide-OO`    - an O-O bond. Peroxides do not occur in these
+           frameworks; in 1106/1107 the depositor's own bond list carries the
+           O-O together with an oxygen holding three bonds. N-N is NOT tested,
+           because azine, azo and hydrazone linkages are legitimate.
+
+        Deliberately NOT a rule: an odd electron count in the cell. It flags 25
+        structures, only 6 of which any other rule catches, and a radical
+        framework is a chemistry question rather than a modelling error.
+        """
+        sym = [site.specie.symbol for site in struct]
+        n = len(sym)
+        if n == 0:
+            return [("empty", "structure has no sites")]
+        try:
+            nbrs = struct.get_all_neighbors(3.0)
+        except Exception as exc:                      # pragma: no cover
+            return [("prescan-failed", f"neighbour search failed: {exc}")]
+
+        deg = [0] * n
+        heavy_deg = [0] * n
+        h_count = [0] * n
+        bonded = [[] for _ in range(n)]
+        close, stretched, peroxide = [], [], []
+
+        for i in range(n):
+            for nb in nbrs[i]:
+                j = int(nb.index)
+                if j < i:
+                    continue
+                d = float(nb.nn_distance)
+                a, b = sym[i], sym[j]
+                if self.is_valid_bond(a, b, d):
+                    deg[i] += 1
+                    deg[j] += 1
+                    bonded[i].append((j, d))
+                    bonded[j].append((i, d))
+                    if b == "H":
+                        h_count[i] += 1
+                    else:
+                        heavy_deg[i] += 1
+                    if a == "H":
+                        h_count[j] += 1
+                    else:
+                        heavy_deg[j] += 1
+                    if a == "C" and b == "C" and d > self._PRESCAN_MAX_CC:
+                        stretched.append((i, j, d))
+                    elif a == "O" and b == "O":
+                        peroxide.append((i, j, d))
+                elif d < self._PRESCAN_MIN_NONBONDED:
+                    close.append((i, j, d))
+
+        def _quaternary_ammonium(idx):
+            if sym[idx] != "N" or deg[idx] != 4:
+                return False
+            return all(sym[j] == "C" and 1.40 < d < 1.60 for j, d in bonded[idx])
+
+        over = [
+            (i, sym[i], deg[i]) for i in range(n)
+            if sym[i] in self._PRESCAN_VALENCE
+            and deg[i] > self._PRESCAN_VALENCE[sym[i]]
+            and not _quaternary_ammonium(i)
+        ]
+        isolated = [i for i in range(n) if deg[i] == 0]
+        bare_c = [
+            i for i in range(n)
+            if sym[i] == "C" and heavy_deg[i] <= 1 and h_count[i] == 0
+        ]
+
+        def _fmt_pairs(pairs):
+            return ", ".join(
+                f"{sym[i]}{i}-{sym[j]}{j} {d:.3f}A" for i, j, d in pairs[:max_report]
+            ) + (f" (+{len(pairs) - max_report} more)" if len(pairs) > max_report else "")
+
+        def _fmt_atoms(items):
+            return ", ".join(str(x) for x in items[:max_report]) + (
+                f" (+{len(items) - max_report} more)" if len(items) > max_report else "")
+
+        violations = []
+        if close:
+            violations.append(("close-contact",
+                               f"{len(close)} non-bonded pair(s) under "
+                               f"{self._PRESCAN_MIN_NONBONDED:.2f} A: {_fmt_pairs(close)}"))
+        if over:
+            violations.append(("over-coordinated",
+                               f"{len(over)} atom(s) beyond valence: "
+                               + _fmt_atoms([f"{e}{i} has {d} bonds" for i, e, d in over])))
+        if isolated:
+            violations.append(("isolated-atom",
+                               f"{len(isolated)} atom(s) with no bond: "
+                               + _fmt_atoms([f"{sym[i]}{i}" for i in isolated])))
+        if bare_c:
+            violations.append(("bare-carbon",
+                               f"{len(bare_c)} carbon(s) with <=1 heavy neighbour and no H: "
+                               + _fmt_atoms([f"C{i}" for i in bare_c])))
+        if stretched:
+            violations.append(("stretched-CC",
+                               f"{len(stretched)} C-C bond(s) over "
+                               f"{self._PRESCAN_MAX_CC:.2f} A: {_fmt_pairs(stretched)}"))
+        if peroxide:
+            violations.append(("peroxide-OO",
+                               f"{len(peroxide)} O-O bond(s): {_fmt_pairs(peroxide)}"))
+        return violations
+
     @staticmethod
     def _chemical_identity_key(species, coords, decimals=1):
         """COF duplicate key: heavy-atom formula PLUS bond-graph topology.
@@ -8811,6 +8953,41 @@ def _process_cof_file(args_tuple):
     try:
         with _timeout_context(timeout):
             frag = COFFragmenter(radius=radius, layer_mode=layer_mode)
+
+            # Pre-scan the PARENT before fragmenting it. A model that is
+            # already broken cannot produce a valid fragment, and the defect
+            # is otherwise inherited by every fragment cut from it.
+            try:
+                from pymatgen.core import Structure as _PmgStructure
+                _parent = _PmgStructure.from_file(cif_path)
+                _defects = frag.prescan_parent(_parent)
+            except Exception as _pre_err:
+                print(f"[{base}] Pre-scan skipped: {_pre_err}")
+                _defects = []
+            if _defects:
+                reason = "; ".join(f"{rule}: {detail}" for rule, detail in _defects)
+                print(f"[{base}] PRE-SCAN REJECTED - {reason}")
+                try:
+                    import shutil
+                    dest_dir = os.path.join(os.path.dirname(cif_path),
+                                            "prescan_quarantine")
+                    os.makedirs(dest_dir, exist_ok=True)
+                    shutil.move(cif_path, os.path.join(dest_dir, os.path.basename(cif_path)))
+                    with open(os.path.join(dest_dir, "prescan_report.csv"), "a") as fh:
+                        fh.write('"{}","{}","{}"\n'.format(
+                            os.path.basename(cif_path),
+                            ";".join(rule for rule, _ in _defects),
+                            reason.replace('"', "'")))
+                except Exception as move_err:
+                    print(f"[{base}] Failed to quarantine rejected file: {move_err}")
+                return {
+                    "cif": os.path.basename(cif_path),
+                    "norm_atoms": "PRESCAN", "norm_formula": "PRESCAN",
+                    "min_atoms": "PRESCAN", "min_formula": "PRESCAN",
+                    "norm_res": None, "min_res": None,
+                    "only_linker_res": [],
+                }
+
             res = frag.extract(cif_path, center_idx=center, output_path=None, minimize=False)
             norm_atoms = len(res.species) if res else 0
             norm_formula = _get_formula(res.species) if res else "N/A"
