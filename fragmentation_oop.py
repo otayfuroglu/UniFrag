@@ -873,6 +873,16 @@ class BaseFragmenter:
         reproducing the previous behaviour; COFFragmenter checks bond order."""
         return True
 
+    def prescan_parent(self, struct, max_report=6):
+        """Hook: reject a parent whose own geometry cannot yield a valid
+        fragment. Returns a list of (rule, detail); empty means fit to
+        fragment. No-op here, so a subclass that has not opted in is
+        unaffected. COFFragmenter and MOFFragmenter override it with their
+        own rules and their own thresholds - the two are NOT interchangeable
+        (see project-decisions.md for the per-collection measurements).
+        """
+        return []
+
     def _heteroatom_parity_repair(self, species, coords, capped_h_indices, label):
         """Hook: fix odd parity on a functional-group N/O first. None = not
         handled here. No-op for MOF and macromolecule; COFFragmenter overrides."""
@@ -1560,6 +1570,164 @@ class MOFFragmenter(BaseFragmenter):
         if s1_str in self.LARGE_NON_METALS or s2_str in self.LARGE_NON_METALS:
             return dist < 2.2
         return dist < 1.8
+
+    # ------------------------------------------------------------------
+    # Parent pre-scan (MOF)
+    # ------------------------------------------------------------------
+    # Same idea as the COF pre-scan, different rules. Thresholds measured over
+    # the 5226-structure cr_cifs_noduplicated collection; the COF numbers do
+    # NOT transfer, and three of them would be actively wrong here:
+    #
+    #  * the neutral-organic valence table flags ordinary oxoanion chemistry.
+    #    Sulfonate S, phosphonate P, perchlorate Cl and quaternary N were 193
+    #    "defects" in a 396-structure pilot, 11.9% of it. Using each element's
+    #    MAXIMUM common valence drops that to 1.0%.
+    #  * "peroxide O-O" is meaningless with this bond model: the O-O contacts
+    #    run to 1.79 A, which is just the generic `dist < 1.8` rule firing.
+    #    Only a genuinely overlapping pair (< 1.20 A) means anything.
+    #  * an isolated ATOM is normal in a MOF. Across the collection those are
+    #    598 O, 222 Cl, 191 I, 54 Br, 40 F - halide counter-ions and water
+    #    oxygens whose hydrogens the refinement never located. Rejecting them
+    #    would throw away 238 sound structures, so only an isolated HYDROGEN
+    #    counts, which is the same defect the COF rule catches.
+    #
+    # Metals are exempt from every coordination test, and never counted toward
+    # a ligand's valence: a bridging mu-O carries two metals plus its carbon
+    # and is perfectly ordinary. Metals are identified from the periodic table,
+    # NOT from self.METALS, so a structure is never blamed for containing an
+    # element this fragmenter happens not to support (Cd, Eu, Ag, Tb, Gd, In,
+    # La, U and others are 39.7% of the collection and fail later with "No
+    # metal found" - a capability gap, not a broken parent).
+    _MOF_PRESCAN_MIN_NONBONDED = 0.90
+    _MOF_PRESCAN_MAX_CC = 1.80
+    _MOF_PRESCAN_MAX_OO = 1.20
+    # Maximum common valence, not the neutral-organic one.
+    # P is 6, not 5: PF6- is a standard counter-ion and AFEJOK carries three
+    # of them. S stays at 6 (sulfate); AFOYIE's sulfur with SEVEN oxygens at
+    # 1.44-1.52 A is a genuine disorder artifact and is caught.
+    _MOF_PRESCAN_VALENCE = {"H": 1, "B": 4, "C": 4, "N": 4, "O": 2, "F": 1,
+                            "Si": 6, "P": 6, "S": 6, "Cl": 4, "Br": 4, "I": 4}
+
+    @staticmethod
+    def _is_metal_element(symbol):
+        try:
+            from pymatgen.core.periodic_table import Element
+            el = Element(symbol)
+            return bool(el.is_metal or el.is_metalloid
+                        or el.is_lanthanoid or el.is_actinoid)
+        except Exception:
+            return False
+
+    def prescan_parent(self, struct, max_report=6):
+        """Return a list of (rule, detail) defects in a MOF parent structure."""
+        sym = []
+        for site in struct:
+            try:
+                sym.append(site.specie.symbol)
+            except Exception:
+                sym.append(max(site.species.items(), key=lambda kv: kv[1])[0].symbol)
+        n = len(sym)
+        if n == 0:
+            return [("empty", "structure has no sites")]
+        try:
+            nbrs = struct.get_all_neighbors(3.2)
+        except Exception as exc:                      # pragma: no cover
+            return [("prescan-failed", f"neighbour search failed: {exc}")]
+
+        metal = [self._is_metal_element(s) for s in sym]
+        deg = [0] * n
+        ligand_deg = [0] * n     # bonds to NON-metals only
+        heavy_deg = [0] * n
+        h_count = [0] * n
+        close, stretched, overlap_oo = [], [], []
+
+        for i in range(n):
+            for nb in nbrs[i]:
+                j = int(nb.index)
+                if j < i:
+                    continue
+                d = float(nb.nn_distance)
+                a, b = sym[i], sym[j]
+                # Two hydrogens are never bonded to each other, and neither
+                # are two fluorines: the only F-F bond is F2 gas, and ATAYEB's
+                # "F-F at 1.657 A" is two CF3 fluorines that the generic
+                # dist < 1.8 rule mistakes for a bond, which then made each F
+                # look two-coordinate. MOFFragmenter.is_valid_bond still says
+                # otherwise and is deliberately left alone, so the exception is
+                # made here. Other halogen pairs are NOT excluded - triiodide
+                # is a real counter-ion.
+                _phantom = (a == b) and a in ("H", "F")
+                bonded = not _phantom and self.is_valid_bond(a, b, d)
+                if bonded:
+                    deg[i] += 1
+                    deg[j] += 1
+                    if not metal[j]:
+                        ligand_deg[i] += 1
+                    if not metal[i]:
+                        ligand_deg[j] += 1
+                    if b == "H":
+                        h_count[i] += 1
+                    else:
+                        heavy_deg[i] += 1
+                    if a == "H":
+                        h_count[j] += 1
+                    else:
+                        heavy_deg[j] += 1
+                    if a == "C" and b == "C" and d > self._MOF_PRESCAN_MAX_CC:
+                        stretched.append((i, j, d))
+                    elif a == "O" and b == "O" and d < self._MOF_PRESCAN_MAX_OO:
+                        overlap_oo.append((i, j, d))
+                elif d < self._MOF_PRESCAN_MIN_NONBONDED:
+                    close.append((i, j, d))
+
+        over = [
+            (i, sym[i], ligand_deg[i]) for i in range(n)
+            if not metal[i]
+            and sym[i] in self._MOF_PRESCAN_VALENCE
+            and ligand_deg[i] > self._MOF_PRESCAN_VALENCE[sym[i]]
+        ]
+        lone_h = [i for i in range(n) if sym[i] == "H" and deg[i] == 0]
+        bare_c = [
+            i for i in range(n)
+            if sym[i] == "C" and not metal[i]
+            and heavy_deg[i] <= 1 and h_count[i] == 0
+        ]
+
+        def _pairs(items):
+            return ", ".join(f"{sym[i]}{i}-{sym[j]}{j} {d:.3f}A"
+                             for i, j, d in items[:max_report]) + (
+                f" (+{len(items) - max_report} more)" if len(items) > max_report else "")
+
+        def _atoms(items):
+            return ", ".join(str(x) for x in items[:max_report]) + (
+                f" (+{len(items) - max_report} more)" if len(items) > max_report else "")
+
+        violations = []
+        if close:
+            violations.append(("close-contact",
+                               f"{len(close)} non-bonded pair(s) under "
+                               f"{self._MOF_PRESCAN_MIN_NONBONDED:.2f} A: {_pairs(close)}"))
+        if over:
+            violations.append(("over-coordinated",
+                               f"{len(over)} ligand atom(s) beyond max valence: "
+                               + _atoms([f"{e}{i} has {d} non-metal bonds" for i, e, d in over])))
+        if lone_h:
+            violations.append(("isolated-hydrogen",
+                               f"{len(lone_h)} hydrogen(s) with no bond: "
+                               + _atoms([f"H{i}" for i in lone_h])))
+        if bare_c:
+            violations.append(("bare-carbon",
+                               f"{len(bare_c)} carbon(s) with <=1 heavy neighbour and no H: "
+                               + _atoms([f"C{i}" for i in bare_c])))
+        if overlap_oo:
+            violations.append(("overlapping-oxygens",
+                               f"{len(overlap_oo)} O-O pair(s) under "
+                               f"{self._MOF_PRESCAN_MAX_OO:.2f} A: {_pairs(overlap_oo)}"))
+        if stretched:
+            violations.append(("stretched-CC",
+                               f"{len(stretched)} C-C bond(s) over "
+                               f"{self._MOF_PRESCAN_MAX_CC:.2f} A: {_pairs(stretched)}"))
+        return violations
 
     @staticmethod
     def _safe_name(text):
@@ -9166,6 +9334,39 @@ def _process_mof_file(args_tuple):
     try:
         with _timeout_context(timeout):
             frag = MOFFragmenter(radius=radius)
+
+            # Pre-scan the PARENT before fragmenting it, same as the COF path.
+            try:
+                from pymatgen.core import Structure as _PmgStructure
+                _parent = _PmgStructure.from_file(cif_path)
+                _defects = frag.prescan_parent(_parent)
+            except Exception as _pre_err:
+                print(f"[{base}] Pre-scan skipped: {_pre_err}")
+                _defects = []
+            if _defects:
+                reason = "; ".join(f"{rule}: {detail}" for rule, detail in _defects)
+                print(f"[{base}] PRE-SCAN REJECTED - {reason}")
+                try:
+                    import shutil
+                    dest_dir = os.path.join(os.path.dirname(cif_path),
+                                            "prescan_quarantine")
+                    os.makedirs(dest_dir, exist_ok=True)
+                    shutil.move(cif_path, os.path.join(dest_dir, os.path.basename(cif_path)))
+                    with open(os.path.join(dest_dir, "prescan_report.csv"), "a") as fh:
+                        fh.write('"{}","{}","{}"\n'.format(
+                            os.path.basename(cif_path),
+                            ";".join(rule for rule, _ in _defects),
+                            reason.replace('"', "'")))
+                except Exception as move_err:
+                    print(f"[{base}] Failed to quarantine rejected file: {move_err}")
+                return {
+                    "cif": os.path.basename(cif_path),
+                    "norm_atoms": "PRESCAN", "norm_formula": "PRESCAN",
+                    "min_atoms": "PRESCAN", "min_formula": "PRESCAN",
+                    "norm_res": None, "min_res": None,
+                    "only_linker_res": [], "only_node_res": [],
+                }
+
             res = frag.extract(cif_path, center_idx=center, nmetals=nmetals,
                                output_path=out_norm, minimize=False)
             
