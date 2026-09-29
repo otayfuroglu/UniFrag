@@ -48,7 +48,48 @@ def _ligand_electron_count(species):
     return sum(_EXTXYZ_Z.get(s, 6) for s in species if s not in COFFragmenter.METALS)
 
 
-def _write_extxyz(filepath, species, coords, label, extra="", capped_h=None):
+def _quaternary_ammonium_count(species, coords):
+    """Number of quaternary ammonium nitrogens, N+(C)4, in a fragment.
+
+    One definition, shared by the COF parity repair, the COF quarantine and
+    the fragment checker, and the same criterion as the exemption in
+    COFFragmenter.prescan_parent (which applies it to the periodic parent's
+    perceived bonds): a nitrogen with exactly four neighbours
+    within bonding range, all of them carbon, all at single-bond length
+    (1.40-1.60 A). That is a formal N+, so a fragment carrying k of them is a
+    cation of charge +k - not a neutral molecule that happens to be odd.
+
+    1062, 671, 673 and 674 are cationic frameworks deposited with no
+    counter-ions at all (three N+ per cell, pure H/C/N/O). Their fragments were
+    correctly odd when counted as neutral, and the parity repair "fixed" them
+    by putting a hydrogen on a carbonyl oxygen, turning C=O into a C-OH the
+    crystal does not have.
+
+    Excluded on purpose: a nitrogen with any H or non-carbon neighbour, or
+    with a neighbour outside 1.40-1.60 A. 1210's "four-coordinate" nitrogen
+    carries two hydrogens superimposed at 0.989 A and is an artifact, not a
+    cation.
+    """
+    co = np.asarray(coords, dtype=float)
+    return sum(1 for i in range(len(species))
+               if _is_quaternary_ammonium(i, species, co))
+
+
+def _is_quaternary_ammonium(idx, species, coords):
+    """Is atom `idx` a quaternary ammonium nitrogen? See
+    `_quaternary_ammonium_count` for the definition and what it excludes."""
+    if species[idx] != "N":
+        return False
+    co = np.asarray(coords, dtype=float)
+    d = np.linalg.norm(co - co[idx], axis=1)
+    near = [j for j in range(len(species)) if j != idx and d[j] < 1.75]
+    return len(near) == 4 and all(
+        species[j] == "C" and 1.40 < d[j] < 1.60 for j in near
+    )
+
+
+def _write_extxyz(filepath, species, coords, label, extra="", capped_h=None,
+                  charge=None):
     """
     Writes a molecular fragment to an ExtXYZ file.
     Does not require any external library (like ASE) to ensure zero-dependency robustness.
@@ -63,6 +104,11 @@ def _write_extxyz(filepath, species, coords, label, extra="", capped_h=None):
     # report has to tell them apart before it decides what a contact means.
     if capped_h is not None:
         suffix += ' capped_h="' + " ".join(str(int(i)) for i in sorted(set(capped_h))) + '"'
+    # Net formal charge, written only when it is nonzero so that every neutral
+    # fragment stays byte-identical. Absent means neutral. A consumer running
+    # QM on a charged fragment must use this, not assume 0.
+    if charge:
+        suffix += f" charge={int(charge)}"
     with open(filepath, "a") as f:
         f.write(f"{len(species)}\n")
         f.write(f"Properties=species:S:1:pos:R:3 label={label}{suffix} pbc=\"F F F\"\n")
@@ -129,12 +175,21 @@ def _parse_extxyz(filepath):
             val = comment.split('capped_h="', 1)[1].split('"', 1)[0]
             capped_h = [int(t) for t in val.split() if t.lstrip("-").isdigit()]
 
+        charge = None
+        for tok in comment.split():
+            if tok.startswith("charge="):
+                try:
+                    charge = int(tok.split("=", 1)[1])
+                except ValueError:
+                    pass
+
         if len(species) == n_atoms:
             frames.append({
                 "label": label,
                 "species": species,
                 "coords": coords,
-                "capped_h": capped_h
+                "capped_h": capped_h,
+                "charge": charge,
             })
         i += 2 + n_atoms
     return frames
@@ -204,12 +259,14 @@ def _update_extxyz_collection(extxyz_path, clean_base, new_fragments):
             # whole file to replace one structure must not strip the capped_h
             # list off every other frame in it.
             _write_extxyz(temp_path, f["species"], f["coords"], f["label"],
-                          capped_h=f.get("capped_h"))
+                          capped_h=f.get("capped_h"), charge=f.get("charge"))
 
         for frag in new_fragments:
             species, coords, label = frag[0], frag[1], frag[2]
             capped_h = frag[3] if len(frag) > 3 else None
-            _write_extxyz(temp_path, species, coords, label, capped_h=capped_h)
+            charge = frag[4] if len(frag) > 4 else None
+            _write_extxyz(temp_path, species, coords, label, capped_h=capped_h,
+                          charge=charge)
             
         if os.path.exists(temp_path):
             if os.path.exists(extxyz_path):
@@ -883,6 +940,15 @@ class BaseFragmenter:
         """
         return []
 
+    def _formal_charge(self, species, coords):
+        """Hook: net formal charge of a fragment, so the parity repair can
+        judge closed-shell on the real electron count (neutral count minus the
+        charge) rather than assuming every fragment is neutral. Zero here, so
+        MOF and macromolecule keep exactly their previous behaviour;
+        COFFragmenter counts quaternary ammonium N+.
+        """
+        return 0
+
     def _heteroatom_parity_repair(self, species, coords, capped_h_indices, label):
         """Hook: fix odd parity on a functional-group N/O first. None = not
         handled here. No-op for MOF and macromolecule; COFFragmenter overrides."""
@@ -944,7 +1010,10 @@ class BaseFragmenter:
         }
         z_sum = sum(_ATOMIC_NUMBERS.get(s, 6) for s in species
                     if not (self._PARITY_IGNORES_METALS and s in self.METALS))
-        if z_sum % 2 == 0:
+        # A cation of charge +k has k fewer electrons than its neutral count.
+        # Without this, a closed-shell quaternary-ammonium fragment reads as a
+        # radical and gets "repaired" by protonating a carbonyl oxygen.
+        if (z_sum - self._formal_charge(species, coords)) % 2 == 0:
             return species, coords, capped_h_indices
 
         repaired = self._heteroatom_parity_repair(species, coords, capped_h_indices, label)
@@ -4270,6 +4339,15 @@ class COFFragmenter(BaseFragmenter):
         if target is None:
             return None
         return max(0, target - self._local_valence_used(idx, species, coords))
+
+    def _formal_charge(self, species, coords):
+        """Quaternary ammonium N+ is the only formal charge counted.
+
+        Deliberately narrow. Other cationic or anionic groups a COF can carry -
+        N-alkylpyridinium, imidazolium, spiroborate B- - are not recognised, so
+        a fragment built around one would still be treated as neutral.
+        """
+        return _quaternary_ammonium_count(species, coords)
 
     def _heteroatom_parity_repair(self, species, coords, capped_h_indices, label):
         """COF-only: pair the odd electron on a functional-group N/O.
@@ -9923,11 +10001,15 @@ def main():
 
             clean_frags, odd_frags = [], []
             for species, coords, frag_name, capped_h in new_extxyz_frags:
-                z = _ligand_electron_count(species)
+                q = _quaternary_ammonium_count(species, coords)
+                # Real electron count of a charge +q cation. A closed-shell
+                # N+ fragment is odd when counted as neutral and must not be
+                # quarantined as a radical for it.
+                z = _ligand_electron_count(species) - q
                 if z % 2:
                     odd_frags.append((species, coords, frag_name, capped_h, z))
                 else:
-                    clean_frags.append((species, coords, frag_name, capped_h))
+                    clean_frags.append((species, coords, frag_name, capped_h, q))
             for _sp, _co, frag_name, _ch, z in odd_frags:
                 print(f"  -> QUARANTINED '{frag_name}': odd electron count "
                       f"(Z_sum={z}); held in fragments_quarantine.extxyz, "
@@ -9944,9 +10026,9 @@ def main():
             if is_dir:
                 with open(csv_path, "a") as f:
                     f.write(csv_row)
-                for species, coords, frag_name, capped_h in clean_frags:
+                for species, coords, frag_name, capped_h, q in clean_frags:
                     _write_extxyz(extxyz_path, species, coords, frag_name,
-                                  capped_h=capped_h)
+                                  capped_h=capped_h, charge=q)
                 for species, coords, frag_name, capped_h, z in odd_frags:
                     _write_extxyz(quarantine_path, species, coords, frag_name,
                                   extra=f"quarantine=odd_electron zsum={z}",

@@ -12,7 +12,7 @@ import numpy as np
 # Bond perception and bond-order tables are taken from UniFrag itself so this
 # report and the fragmenter can never disagree about what is bonded.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from fragmentation_oop import COFFragmenter
+from fragmentation_oop import COFFragmenter, _is_quaternary_ammonium
 _F = COFFragmenter()
 
 VALENCE = {"H":1,"B":3,"C":4,"N":3,"O":2,"F":1,"Si":4,"P":3,"S":2,"Cl":1,"Br":1,"I":1}
@@ -35,10 +35,14 @@ def read_extxyz(path):
                 sp.append(parts[0]); co.append([float(x) for x in parts[1:4]])
             m=re.search(r"label=(\S+)", comment)
             mc=re.search(r'capped_h="([^"]*)"', comment)
+            mq=re.search(r"(?:^|\s)charge=(-?\d+)", comment)
             frames.append({"label": m.group(1) if m else "?",
                            "species": sp, "coords": np.array(co),
                            "capped_h": ([int(t) for t in mc.group(1).split()]
-                                        if mc else None)})
+                                        if mc else None),
+                           # Absent means neutral: the fragmenter writes the
+                           # tag only for a nonzero formal charge.
+                           "charge": int(mq.group(1)) if mq else 0})
     return frames
 
 def bonds_of(sp, co):
@@ -62,14 +66,16 @@ def analyse(fr):
 
       over_coord  - an atom with MORE sigma bonds than its valence permits
                     (a carbon with 5 neighbours, a hydrogen with 2). No bond
-                    order needed; always a real bug.
+                    order needed. Quaternary ammonium N+(C)4 is exempt: four
+                    bonds is its real valence, and the fragment is a cation.
       bad_terminal- a heavy atom with exactly ONE heavy neighbour whose H count
                     does not match the valence deficit implied by that bond's
                     order. This is precisely the cut-site case UniFrag's own
                     _terminal_bond_order is defined for, so the test is sound.
     """
     sp, co = fr["species"], fr["coords"]
-    n=len(sp); out={"n":n}
+    charge = fr.get("charge", 0)
+    n=len(sp); out={"n":n, "charge":charge}
     adj = bonds_of(sp, co)
 
     # Same length scale the fragmenter uses, measured here on the fragment's
@@ -94,7 +100,10 @@ def analyse(fr):
         tgt=VALENCE.get(sp[i])
         if tgt is None: continue
         nbrs=adj[i]
-        if len(nbrs) > tgt:
+        # A quaternary ammonium N+(C)4 has four bonds legitimately. Same
+        # definition as the fragmenter's parity repair and the parent
+        # pre-scan, imported rather than restated, so the three cannot drift.
+        if len(nbrs) > tgt and not _is_quaternary_ammonium(i, sp, co):
             over.append((i, sp[i], len(nbrs)))
         heavy=[j for j in nbrs if sp[j]!="H"]
         nh=len(nbrs)-len(heavy)
@@ -133,7 +142,11 @@ def analyse(fr):
     out["bad_terminal"]=bad_term
 
     zsum=sum(Z.get(s,0) for s in sp)
-    out["zsum"]=zsum; out["odd_electron"]=(zsum % 2 == 1)
+    # Judge on the real electron count, using the charge the fragmenter
+    # RECORDED rather than re-deriving it here: a charged fragment written
+    # without its tag then shows up as odd, which is exactly the omission a
+    # QA report should catch.
+    out["zsum"]=zsum; out["odd_electron"]=((zsum - charge) % 2 == 1)
 
     # ---- close contacts ----
     # Two rules, both narrower than a blanket minimum-distance scan.
