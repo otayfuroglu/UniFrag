@@ -536,6 +536,40 @@ class COF:
                 for a in comp:
                     aryl_block[a] = (rep, size)
 
+            # A genuine 1,4-dioxin linkage is FUSED: each of its two C-C
+            # bridges is also an edge of an aromatic ring on its own side (the
+            # catechol-derived ring on one, the perfluoroarene-derived ring on
+            # the other), which is what makes severing the two C-O bonds
+            # separate two intact aryl units.
+            #
+            # The aryl_block test alone cannot see that. It partitions the
+            # framework by deleting every oxygen, so in a COF that is
+            # imine-linked AND has a dioxine-cored linker, deleting the oxygens
+            # cuts each linker core in half; the two sides then land in
+            # different components and the test passes for the wrong reason.
+            # 1106 was the case in point: its dioxine ring IS the linker core,
+            # decorated with imine arms and fused to nothing. Cutting its C-O
+            # bonds opened that ring, shattered the framework into sub-minimum
+            # pieces, and made the orphan guard unwind every real linkage cut,
+            # leaving node and linker glued together.
+            #
+            # The ring itself always closes a C-C bridge through its OWN two
+            # oxygens, so those are removed before the search; a path that
+            # survives is a second, fused ring. Element-agnostic on purpose:
+            # 110 and 1239 are genuine dioxin COFs whose far side is a pyrazine,
+            # so requiring an all-CARBON ring would reject them.
+            def _bridge_is_fused(u, v, o_one, o_two, max_len=6):
+                """Is the C-C bond u-v an edge of a ring other than this one?"""
+                probe = simple.copy()
+                probe.remove_nodes_from([o_one, o_two])
+                if not probe.has_edge(u, v):
+                    return False
+                probe.remove_edge(u, v)
+                try:
+                    return len(nx.shortest_path(probe, u, v)) <= max_len
+                except nx.NetworkXNoPath:
+                    return False
+
             seen_rings = set()
             for o1 in o_atoms:
                 c_nbs = [nb for nb in simple.neighbors(o1)
@@ -573,6 +607,10 @@ class COF:
                                 continue
                             if aryl_block[a][0] == aryl_block[c5][0]:
                                 continue  # both sides in one system: not a linkage
+                            if not (_bridge_is_fused(a, b, o1, o4)
+                                    and _bridge_is_fused(c5, c6, o1, o4)):
+                                continue  # not fused to two aryl rings: not a
+                                          # dioxin linkage, just a ring with O
                             seen_rings.add(ring_key)
                             # cut the O-C bonds on the smaller aryl side
                             if aryl_block[a][1] <= aryl_block[c5][1]:

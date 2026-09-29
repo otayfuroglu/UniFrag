@@ -2,6 +2,36 @@
 
 Durable implementation and architecture decisions for UniFrag. This file is the source of truth for decisions; keep entries concise, dated, and actionable.
 
+## Decision 2026-09-29: A Dioxin Linkage Must Be FUSED, Not Merely a Ring With Two Oxygens (COF)
+- Context: `1106` came back with node and linker both `C~30H~N6O6`-ish and neither containing its dioxine ring - two copies of the node, essentially. Tracing the real code path showed 30 cuts after the linkage rules (6 imine + 12 dioxin + duplicates) collapsing to **6 untagged C-O cuts** after the orphan guard, which ran 12 times and unwound every tagged linkage. The dioxin rule had fired on the linker's own core ring and opened it, shattering the framework into sub-`MIN_STRUT_HEAVY` pieces.
+- Root cause: the rule decides "two different aryl systems" by deleting **every oxygen** from the graph and taking connected components. In a COF that is imine-linked AND has a dioxine-cored linker, deleting the oxygens cuts each linker core in half, so the two sides land in different components and the test passes for the wrong reason.
+- Decision: add a fusion test. Each of the dioxine ring's two C-C bridges must also be an edge of a ring **other than that ring itself**; the ring's own two oxygens are removed before the search, because otherwise the dioxine closes every bridge through itself and the test is vacuous. Implemented as `_bridge_is_fused(u, v, o1, o4)` in `coffragmentor.py`.
+  - **Element-agnostic on purpose.** A first attempt required an all-CARBON ring and was wrong: `110` and `1239` are genuine dioxin COFs whose far side is a **pyrazine**, and that version took them from 48/96 cuts to zero, emitting no blocks at all. "Aryl" includes heteroaromatics.
+  - What it excludes: a six-ring holding two oxygens that is fused to nothing - a dioxine that IS the building-block core rather than the joint between two of them.
+- Consequences, measured on every structure the rule can reach: **6 genuine dioxin COFs unchanged** (109, 1095, 1096, 1097, 110, 1239 - all keep the `C18H6O6` HHTP node). `1179` 12 -> 8 cuts and `816` 9 -> 6 cuts, both with identical node/linker formulas: the spurious dioxin cuts are gone and the imine linkage now stands alone. `819` went from 3 untagged cuts and **no blocks at all** to a biaryl decomposition; its dioxine ring is geometrically degraded (C-O 1.584-1.662 A where a real one is ~1.43, one C-C bridge at 1.744 A belonging to no ring), so rejecting it is right. `1106`/`1107` also change, but both are rejected by the parent pre-scan and never reach the fragmenter.
+- Correction to an earlier claim in this log: a first scan using the all-carbon test reported 7 misfiring structures. Two of those (`110`, `1239`) were false positives of that test, not defects. The real count is **three** fixed: 1179, 816, 819.
+
+## Decision 2026-09-29: Parent Structures Are Pre-Scanned and Quarantined Before Fragmentation (COF only)
+- Context: a deposited model that is already broken cannot yield a valid fragment, and the damage is inherited silently - `1106`'s three-coordinate oxygen reaches every fragment cut from it, `284`'s superimposed sites become carbons with five and six bonds. Rejecting the PARENT is cheaper and more honest than quarantining each fragment afterwards.
+- Decision: `COFFragmenter.prescan_parent()` returns a list of `(rule, detail)` defects; a non-empty list moves the CIF to `prescan_quarantine/` with a `prescan_report.csv` naming the rules and the offending atoms, mirroring `timed_out_structures/`. Bond perception is the class's own `is_valid_bond`, so the pre-scan and the fragmenter can never disagree about what is bonded.
+- Rules and thresholds, all set from the 884-structure HCNO collection rather than a priori (counts are per-rule, union 37 = 4.2%):
+
+  | rule | threshold | structures |
+  |---|---|---|
+  | `close-contact` | non-bonded pair < 0.90 A | 18 |
+  | `over-coordinated` | degree > valence, quaternary N+ exempt | 11 |
+  | `isolated-atom` | zero bonds | 7 |
+  | `stretched-CC` | C-C > 1.80 A | 6 |
+  | `peroxide-OO` | any O-O bond | 2 |
+  | `bare-carbon` | <=1 heavy neighbour, no H | 1 |
+
+  - 0.90 A is deliberately the same floor the fragment-level contact check uses, so the two agree by construction. The closest-pair distribution is continuous from 0.051 A (1210) to 0.9, with no natural gap; 0.80 A would give 13 structures and 0.50 A would give 8.
+  - **Quaternary ammonium is exempt.** A nitrogen with four CARBON neighbours all at 1.40-1.60 A is real cationic chemistry (1062, 165, 671-674), and the only consequence is that its fragments are charged. Without the exemption rule 2 flags 17 structures instead of 11. `1210`'s four-coordinate N is a genuine artifact (C at 1.281, C at 1.413, two H at 0.989 A on top of each other) and is caught by `close-contact` anyway.
+  - `stretched-CC` at 1.80 A: 22 structures exceed 1.70 A but only 6 exceed 1.80 and **none** exceeds 1.90. 1.70 would sweep in `16.cif` with 80 such bonds, which reads as a uniformly loose model rather than a broken one.
+  - **N-N is deliberately not tested**: azine, azo and hydrazone linkages are legitimate and have their own rule. Only O-O is rejected.
+- Deliberately NOT a rule: an odd electron count in the cell. It flags 25 structures, only 6 of which any other rule catches, and a radical framework is a chemistry question rather than a modelling error.
+- **COF only, by construction.** `prescan_parent` lives on `COFFragmenter`; `BaseFragmenter`, `MOFFragmenter` and `MacromolFragmenter` do not have it, and only `_process_cof_file` calls it. Applying these thresholds to MOFs is not a flag flip: run against 12 CR MOFs they reject 8, every one a false positive - La, Ce, Pr, Nd, Sm and In centres read as `isolated-atom` because `COFFragmenter.is_valid_bond` does not know those metals, and four-coordinate S and N read as `over-coordinated` because the valence table is the neutral-organic one. A MOF pre-scan needs a metals-aware bond model, per-metal coordination limits, and thresholds re-measured on a MOF collection.
+
 ## Decision 2026-09-29: Two Hydrogens Are Never Bonded to Each Other (COF)
 - Context: `check_cof_fragments.py` reported a MUST failure - `525FragCof` and `525FragCofMin` each with three over-coordinated hydrogens. None of them was a capping hydrogen. The cause was bond perception: `COFFragmenter.is_valid_bond("H","H", d)` returned True for `d < 0.9`, and 525's **parent CIF** places two hydrogens 0.684 A apart, so a parent-parent contact the crystal itself draws was read as a covalent bond and made both hydrogens look two-coordinate. This is the same class of error the user corrected earlier for the close-contact check (measure only atoms UniFrag added; a contact between two parent atoms is the crystal's own geometry) - here it had migrated into the valence test.
 - Census over all 884 HCNO structures: **18 structures contain an H...H below 0.9 A, 130 pairs in total**, the closest 0.051 A (1210), then 0.149 (1116), 0.176 (657), 0.369 (1155), 0.389 (1152), 0.456 (832), 0.466 (1057), 0.493/0.515 (133/134), 0.684 (525). In **every one of those 130 pairs both hydrogens have their own heavy-atom neighbour within 1.3 A**, so not a single one is molecular H2. They are overlapping C-H/N-H hydrogens in idealised deposited models.
