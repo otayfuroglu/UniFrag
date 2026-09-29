@@ -9056,6 +9056,145 @@ class MacromolFragmenter(BaseFragmenter):
         capped_h_flags.append(True)
 
     # ------------------------------------------------------------------
+    # Parent pre-scan (macromolecule)
+    # ------------------------------------------------------------------
+    # Runs on the PDB as deposited, BEFORE PDBFixer, so it sees heavy atoms
+    # only. That rules out two of the checks the COF and MOF versions make:
+    # an X-ray PDB has no hydrogens at all, so `bare-carbon` would fire on
+    # every carbon, and `isolated-atom` would fire on every water oxygen.
+    # What is left are tests that need no hydrogen and that no chemistry can
+    # produce.
+    #
+    # `close-contact` earns its place here for a reason specific to this
+    # class: `_parse_pdb` ignores the altLoc column and keeps EVERY ATOM
+    # record, so a structure refined with alternate conformers yields two
+    # overlapping copies of each disordered atom, which then reach the
+    # fragment. Catching that at the parent is the conservative answer until
+    # the parser handles altLoc properly.
+    #
+    # THRESHOLDS ARE NOT CALIBRATED ON BIO DATA. Only two PDBs were available
+    # (`test_on_bio_mol`), and both are clean - zero violations on every rule.
+    # That shows the rules do not false-positive on good structures; it says
+    # nothing about their sensitivity. The values are carried over from the
+    # COF and MOF work, where they were measured, and are chosen to be
+    # principled rather than statistical: no pair of atoms bonds below 0.90 A,
+    # no C-C single bond reaches 1.80 A, no two oxygens sit 1.20 A apart.
+    _BIO_PRESCAN_MIN_NONBONDED = 0.90
+    _BIO_PRESCAN_MAX_CC = 1.80
+    _BIO_PRESCAN_MAX_OO = 1.20
+    # Selenium (selenomethionine) and arsenic (1BHL's CAS residue) appear in
+    # deposited structures, so both are given their common maximum valence.
+    _BIO_PRESCAN_VALENCE = {"H": 1, "B": 4, "C": 4, "N": 4, "O": 2, "F": 1,
+                            "Si": 4, "P": 5, "S": 6, "Se": 6, "As": 5,
+                            "Cl": 1, "Br": 1, "I": 1}
+
+    def prescan_parent(self, pdb_path, max_report=6):
+        """Return a list of (rule, detail) defects in a PDB parent.
+
+        Takes the PDB path rather than a parsed structure: the bio path has
+        no pymatgen Structure at this point, and the scan deliberately runs
+        before PDBFixer.
+        """
+        import numpy as _np
+        sym, xyz = [], []
+        try:
+            with open(pdb_path) as fh:
+                for line in fh:
+                    if line[:6].strip() not in ("ATOM", "HETATM"):
+                        continue
+                    element = line[76:78].strip() if len(line) >= 78 else ""
+                    if not element:
+                        element = "".join(c for c in line[12:16].strip()
+                                          if c.isalpha())[:1]
+                    element = element.capitalize()
+                    if element == "H":
+                        continue          # absent in X-ray; irrelevant here
+                    try:
+                        xyz.append([float(line[30:38]), float(line[38:46]),
+                                    float(line[46:54])])
+                    except ValueError:
+                        continue
+                    sym.append(element)
+        except Exception as exc:                      # pragma: no cover
+            return [("prescan-failed", f"could not read {pdb_path}: {exc}")]
+
+        n = len(sym)
+        if n == 0:
+            return [("empty", "no ATOM/HETATM records")]
+        coords = _np.asarray(xyz, dtype=float)
+
+        try:
+            from scipy.spatial import cKDTree
+            pairs = cKDTree(coords).query_pairs(3.0)
+        except Exception:                             # pragma: no cover
+            pairs = {(i, j) for i in range(n) for j in range(i + 1, n)
+                     if float(_np.linalg.norm(coords[i] - coords[j])) < 3.0}
+
+        deg = [0] * n
+        close, stretched, overlap_oo, duplicate = [], [], [], []
+        for i, j in pairs:
+            d = float(_np.linalg.norm(coords[i] - coords[j]))
+            a, b = sym[i], sym[j]
+            # Two heavy atoms of the SAME element this close are one atom
+            # modelled twice, not a bond - but is_valid_bond calls a 0.45 A
+            # C-C a bond, so without this test a duplicated carbon or nitrogen
+            # slips past every other rule (verified: injecting one at 0.45 A
+            # was missed until this was added). 0.85 A is the same figure
+            # COFFragmenter._dedupe_superimposed_atoms already uses for
+            # same-element duplicates.
+            if a == b and d < 0.85:
+                duplicate.append((i, j, d))
+                continue
+            if self.is_valid_bond(a, b, d):
+                deg[i] += 1
+                deg[j] += 1
+                if a == "C" and b == "C" and d > self._BIO_PRESCAN_MAX_CC:
+                    stretched.append((i, j, d))
+                elif a == "O" and b == "O" and d < self._BIO_PRESCAN_MAX_OO:
+                    overlap_oo.append((i, j, d))
+            elif d < self._BIO_PRESCAN_MIN_NONBONDED:
+                close.append((i, j, d))
+
+        over = [
+            (i, sym[i], deg[i]) for i in range(n)
+            if sym[i] in self._BIO_PRESCAN_VALENCE
+            and deg[i] > self._BIO_PRESCAN_VALENCE[sym[i]]
+        ]
+
+        def _pairs_txt(items):
+            return ", ".join(f"{sym[i]}{i}-{sym[j]}{j} {d:.3f}A"
+                             for i, j, d in items[:max_report]) + (
+                f" (+{len(items) - max_report} more)" if len(items) > max_report else "")
+
+        def _atoms_txt(items):
+            return ", ".join(str(x) for x in items[:max_report]) + (
+                f" (+{len(items) - max_report} more)" if len(items) > max_report else "")
+
+        violations = []
+        if duplicate:
+            violations.append(("duplicate-atom",
+                               f"{len(duplicate)} superimposed same-element heavy pair(s) "
+                               f"under 0.85 A: {_pairs_txt(duplicate)}"))
+        if close:
+            violations.append(("close-contact",
+                               f"{len(close)} non-bonded heavy pair(s) under "
+                               f"{self._BIO_PRESCAN_MIN_NONBONDED:.2f} A "
+                               f"(alternate conformers are kept, not merged): {_pairs_txt(close)}"))
+        if over:
+            violations.append(("over-coordinated",
+                               f"{len(over)} heavy atom(s) beyond max valence: "
+                               + _atoms_txt([f"{e}{i} has {d} bonds" for i, e, d in over])))
+        if overlap_oo:
+            violations.append(("overlapping-oxygens",
+                               f"{len(overlap_oo)} O-O pair(s) under "
+                               f"{self._BIO_PRESCAN_MAX_OO:.2f} A: {_pairs_txt(overlap_oo)}"))
+        if stretched:
+            violations.append(("stretched-CC",
+                               f"{len(stretched)} C-C bond(s) over "
+                               f"{self._BIO_PRESCAN_MAX_CC:.2f} A: {_pairs_txt(stretched)}"))
+        return violations
+
+    # ------------------------------------------------------------------
     # Bond validity (organic molecules only, no metals)
     # ------------------------------------------------------------------
 
@@ -9280,6 +9419,34 @@ def _process_bio_file(args_tuple):
         base = base[:-4]
     try:
         with _timeout_context(timeout):
+            frag_pre = MacromolFragmenter()
+            _defects = []
+            try:
+                _defects = frag_pre.prescan_parent(pdb_path)
+            except Exception as _pre_err:
+                print(f"[{base}] Pre-scan skipped: {_pre_err}")
+            if _defects:
+                reason = "; ".join(f"{rule}: {detail}" for rule, detail in _defects)
+                print(f"[{base}] PRE-SCAN REJECTED - {reason}")
+                try:
+                    import shutil
+                    dest_dir = os.path.join(os.path.dirname(pdb_path),
+                                            "prescan_quarantine")
+                    os.makedirs(dest_dir, exist_ok=True)
+                    shutil.move(pdb_path, os.path.join(dest_dir, os.path.basename(pdb_path)))
+                    with open(os.path.join(dest_dir, "prescan_report.csv"), "a") as fh:
+                        fh.write('"{}","{}","{}"\n'.format(
+                            os.path.basename(pdb_path),
+                            ";".join(rule for rule, _ in _defects),
+                            reason.replace('"', "'")))
+                except Exception as move_err:
+                    print(f"[{base}] Failed to quarantine rejected file: {move_err}")
+                return {
+                    "pdb": os.path.basename(pdb_path),
+                    "n_windows": "PRESCAN", "total_atoms": "PRESCAN",
+                    "results": [],
+                }
+
             frag = MacromolFragmenter(
                 window_size=window_size, stride=stride,
                 use_pdbfixer=use_pdbfixer, ph=ph,
