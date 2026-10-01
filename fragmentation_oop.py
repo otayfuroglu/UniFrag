@@ -1192,6 +1192,16 @@ class BaseFragmenter:
         """
         return False
 
+    def _parent_unfilled_sigma_sites(self, idx, species, coords):
+        """Hook: directions in which an N/O that lost a sigma bond to the cut
+        needs a capping hydrogen, read from the periodic parent.
+
+        None means "no parent knowledge - decide as before", which is what MOF
+        and macromolecule fragmentation have always done. COFFragmenter
+        overrides it; see that docstring.
+        """
+        return None
+
     def _carries_hydrogen(self, idx, species, coords):
         """Hook: does this heavy atom already have a hydrogen on it?
 
@@ -1220,6 +1230,13 @@ class BaseFragmenter:
                 continue
             sp = species[i]
             pos = np.array(coords[i], dtype=float)
+            if sp in {"N", "O"}:
+                sigma_dirs = self._parent_unfilled_sigma_sites(i, species, coords)
+                if sigma_dirs is not None:
+                    for vec in sigma_dirs:
+                        self._place_cap_h(i, vec, self.cap_bond_length(sp),
+                                          species, coords, capped_h_flags)
+                    continue
             if self._carries_hydrogen(i, species, coords):
                 continue
             if sp == "O" and self._oxygen_protonated(i, species, coords):
@@ -4284,6 +4301,9 @@ class COFFragmenter(BaseFragmenter):
         target = target_of.get(species[parent_idx])
         if target is None:
             return True
+        if (species[parent_idx] in ("N", "O")
+                and self._is_parent_cut_sigma_site(parent_idx, species, coords)):
+            return False
         p_pos = np.asarray(coords[parent_idx], dtype=float)
         h_count = sum(
             1 for j, spj in enumerate(species)
@@ -4318,6 +4338,113 @@ class COFFragmenter(BaseFragmenter):
         if target is None:
             return None
         return max(0, target - self._local_valence_used(idx, species, coords))
+
+    # Valence at which an N/O is fully sigma-bonded. Used only to recognise a
+    # parent atom whose every bond is single because it already has this many
+    # neighbours.
+    _SIGMA_FULL = {"N": 3, "O": 2}
+
+    def _parent_sigma_neighbours(self, idx, species, coords):
+        """COF-only: the bonded neighbours this N/O has in the periodic parent,
+        as (symbol, position in the fragment's frame), or None.
+
+        Only answered for an N or O that is sigma-complete in the parent
+        (3 neighbours for N, 2 for O, hydrogens included). Such an atom cannot
+        carry a double bond, so every bond it keeps is single whatever its
+        length says, and the neighbours it has lost are exactly the ones to
+        replace. Anything else - an imine N with two neighbours, a hydroxyl O
+        whose H the deposition omitted, a quaternary N+ - returns None and is
+        left to the length-based logic, whose answer it needs.
+
+        The fragment frame is the parent's plus one lattice vector, because
+        heavy atoms are never moved after the initial unwrap.
+        """
+        sp = species[idx]
+        full = self._SIGMA_FULL.get(sp)
+        struct = getattr(self, "_parent_struct", None)
+        if full is None or struct is None:
+            return None
+        pos = np.asarray(coords[idx], dtype=float)
+        pidx = self._parent_index_for_position(pos)
+        if pidx is None:
+            return None
+        _fracs, syms = self._parent_frac_coords()
+        if syms[pidx] != sp:
+            return None
+        shift = pos - np.asarray(struct[pidx].coords, dtype=float)
+        out = []
+        for nb in struct.get_neighbors(struct[pidx], 2.0):
+            sym_j = syms[int(nb.index)]
+            if self.is_valid_bond(sp, sym_j, float(nb.nn_distance)):
+                out.append((sym_j, np.asarray(nb.coords, dtype=float) + shift))
+        if len(out) != full:
+            return None
+        return out
+
+    @staticmethod
+    def _neighbour_present(sym, p, species, coords, tol=0.6):
+        """Is there an atom of the same class (H or heavy) within `tol` of `p`?
+        The class split matters: a capping H sits 0.4 A from the heavy atom it
+        replaces, and must not make the lost neighbour look retained."""
+        for j, spj in enumerate(species):
+            if (spj == "H") != (sym == "H"):
+                continue
+            if float(np.linalg.norm(np.asarray(coords[j], dtype=float) - p)) < tol:
+                return True
+        return False
+
+    def _parent_unfilled_sigma_sites(self, idx, species, coords):
+        """COF-only: where a capping H is missing on an N/O the cut left short.
+
+        `_cap_open_oxygens` skipped any N/O already carrying an H, and read the
+        retained bond's order from its length. A secondary arylamine Ar-NH-R
+        has its aryl C-N at 1.35 A - inside the 1.36 A C=N window - so once the
+        R side was cut the atom scored 2 + 1 = 3 and looked saturated, leaving
+        an N-H radical. 623FragCofMin carried four, 920FragCof six.
+
+        The parent settles it: an N with three neighbours (two for O) has only
+        single bonds, so the shortfall is simply parent neighbours minus the
+        bonded atoms it has now. Returns one unit vector per missing hydrogen,
+        pointing at where a lost neighbour sat, or None when the atom is not
+        sigma-complete in the parent (the previous logic then decides). An
+        empty list means the atom is whole, so the second pass over a capped
+        fragment adds nothing.
+        """
+        nbs = self._parent_sigma_neighbours(idx, species, coords)
+        if nbs is None:
+            return None
+        pos = np.asarray(coords[idx], dtype=float)
+        sp = species[idx]
+        have = sum(
+            1 for j, spj in enumerate(species)
+            if j != idx and self.is_valid_bond(sp, spj, float(np.linalg.norm(
+                pos - np.asarray(coords[j], dtype=float))))
+        )
+        short = len(nbs) - have
+        if short <= 0:
+            return []
+        # Heavy neighbours first: they are what a cut removes.
+        lost = sorted(
+            ((sym, p) for sym, p in nbs
+             if not self._neighbour_present(sym, p, species, coords)),
+            key=lambda sp_p: sp_p[0] == "H")
+        vecs = []
+        for _sym, p in lost[:short]:
+            v = p - pos
+            n = float(np.linalg.norm(v))
+            if n > 1e-9:
+                vecs.append(v / n)
+        return vecs
+
+    def _is_parent_cut_sigma_site(self, idx, species, coords):
+        """COF-only: is this N/O a sigma-complete parent atom that lost a heavy
+        neighbour to the cut? Its capping hydrogens then stand in for bonds the
+        parent really has, and parity repair must not strip them."""
+        nbs = self._parent_sigma_neighbours(idx, species, coords)
+        if nbs is None:
+            return False
+        return any(sym != "H" and not self._neighbour_present(sym, p, species, coords)
+                   for sym, p in nbs)
 
     def _heteroatom_parity_repair(self, species, coords, capped_h_indices, label):
         """COF-only: pair the odd electron on a functional-group N/O.
@@ -4470,6 +4597,11 @@ class COFFragmenter(BaseFragmenter):
                 if len(par) != 1 or species[par[0]] != want or on_metal(par[0]):
                     continue
                 p = par[0]
+                # A cap standing in for a sigma bond the parent really has is
+                # not this model's to take back: removing it leaves the radical
+                # the cap was placed to avoid.
+                if self._is_parent_cut_sigma_site(p, species, coords):
+                    continue
                 hv = heavy(p)
                 # O may hang off an sp2 N too: a capped nitro O (N-O-H) goes
                 # back to a proper -NO2.

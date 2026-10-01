@@ -219,6 +219,48 @@ def analyse(fr):
     out["pieces"]=pieces
     return out
 
+_PARENTS = {}
+
+def _parent_struct(run, stem):
+    """Parent CIF for `stem` from the run folder, cached; None when absent."""
+    if stem not in _PARENTS:
+        path = os.path.join(run, f"{stem}.cif")
+        try:
+            from pymatgen.core import Structure
+            _PARENTS[stem] = Structure.from_file(path) if os.path.exists(path) else None
+        except Exception:
+            _PARENTS[stem] = None
+    return _PARENTS[stem]
+
+def parent_justified(run, fr, i):
+    """Is this N/O's coordination exactly its parent's, with the parent atom
+    sigma-complete (3 neighbours for N, 2 for O)?
+
+    The bad_terminal test reads the bond order of the single retained heavy
+    bond from its length, which cannot separate an aryl C-N drawn at 1.33 A
+    from a ring C=N; a fragment-only check has no other evidence. When the
+    parent is available it does: a sigma-complete N or O has only single
+    bonds, so an atom that carries exactly the parent's neighbour count is
+    correctly capped whatever the length suggests. Anything else (no CIF, an
+    imine N with two parent neighbours, an H the parent does not have) is
+    left flagged.
+    """
+    m = re.match(r"(\d+)", fr["label"])
+    sp = fr["species"]
+    if not m or sp[i] not in ("N", "O"):
+        return False
+    struct = _parent_struct(run, m.group(1))
+    if struct is None:
+        return False
+    _F._parent_struct = struct
+    nbs = _F._parent_sigma_neighbours(i, sp, fr["coords"])
+    if nbs is None:
+        return False
+    co = fr["coords"]
+    have = sum(1 for j in range(len(sp)) if j != i
+               and _F.is_valid_bond(sp[i], sp[j], float(np.linalg.norm(co[i] - co[j]))))
+    return have == len(nbs)
+
 def main():
     run=sys.argv[1]
     n_input=None
@@ -277,7 +319,8 @@ def main():
         if a["odd_electron"]: odd.append((lab, a["zsum"]))
         # S3 valence
         if a["over_coord"]: overv.append((lab, a["over_coord"][:3]))
-        if a["bad_terminal"]: underv.append((lab, a["bad_terminal"][:3]))
+        bt = [t for t in a["bad_terminal"] if not parent_justified(run, fr, t[0])]
+        if bt: underv.append((lab, bt[:3]))
         # S4/S6 clash: an added atom sitting on top of something
         if a["min_nonbonded"] is not None:
             clashing.append((lab, round(a["min_nonbonded"],2),
