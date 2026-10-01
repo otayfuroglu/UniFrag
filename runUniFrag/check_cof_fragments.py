@@ -40,8 +40,7 @@ def read_extxyz(path):
                            "species": sp, "coords": np.array(co),
                            "capped_h": ([int(t) for t in mc.group(1).split()]
                                         if mc else None),
-                           # Absent means neutral: the fragmenter writes the
-                           # tag only for a nonzero formal charge.
+                           # Absent (older files) means neutral.
                            "charge": int(mq.group(1)) if mq else 0})
     return frames
 
@@ -67,7 +66,7 @@ def analyse(fr):
       over_coord  - an atom with MORE sigma bonds than its valence permits
                     (a carbon with 5 neighbours, a hydrogen with 2). No bond
                     order needed. Quaternary ammonium N+(C)4 is exempt: four
-                    bonds is its real valence, and the fragment is a cation.
+                    bonds is its real valence.
       bad_terminal- a heavy atom with exactly ONE heavy neighbour whose H count
                     does not match the valence deficit implied by that bond's
                     order. This is precisely the cut-site case UniFrag's own
@@ -100,9 +99,8 @@ def analyse(fr):
         tgt=VALENCE.get(sp[i])
         if tgt is None: continue
         nbrs=adj[i]
-        # A quaternary ammonium N+(C)4 has four bonds legitimately. Same
-        # definition as the fragmenter's parity repair and the parent
-        # pre-scan, imported rather than restated, so the three cannot drift.
+        # Same N+(C)4 definition as the fragmenter, imported rather than
+        # restated, so the two cannot drift.
         if len(nbrs) > tgt and not _is_quaternary_ammonium(i, sp, co):
             over.append((i, sp[i], len(nbrs)))
         heavy=[j for j in nbrs if sp[j]!="H"]
@@ -142,10 +140,8 @@ def analyse(fr):
     out["bad_terminal"]=bad_term
 
     zsum=sum(Z.get(s,0) for s in sp)
-    # Judge on the real electron count, using the charge the fragmenter
-    # RECORDED rather than re-deriving it here: a charged fragment written
-    # without its tag then shows up as odd, which is exactly the omission a
-    # QA report should catch.
+    # Judged at the charge the fragment RECORDS, so a tag that disagrees with
+    # the structure shows up here rather than as an ORCA failure.
     out["zsum"]=zsum; out["odd_electron"]=((zsum - charge) % 2 == 1)
 
     # ---- close contacts ----
