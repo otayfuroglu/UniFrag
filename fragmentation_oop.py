@@ -1,4 +1,6 @@
 import argparse
+import re
+import os
 import itertools
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -186,12 +188,69 @@ def _parse_extxyz(filepath):
     return frames
 
 
-def _load_seen_keys_from_extxyz(filepath, key_fn=None):
+def _natural_sort_key(path):
+    """Sort key that orders 9.cif < 106.cif < 1006.cif (numbers by value).
+
+    Input order decides which of two duplicate structures keeps the shared
+    fragment, so it is part of the output: with this, the lowest-numbered
+    structure wins, independent of how the files are listed on disk.
+    """
+    name = os.path.basename(path)
+    # The name itself breaks ties ("01.cif" vs "1.cif", "A1" vs "a1"), which
+    # would otherwise fall back to whatever order glob happened to return.
+    return ([int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)],
+            name)
+
+
+def _cof_collection_key(species, coords):
+    """Cross-structure duplicate key for the COF collection (H-aware).
+
+    See COFFragmenter._chemical_identity_key(include_h=True). Kept as one
+    module function so the flush, the quarantine release and the resume
+    loader can never disagree about what counts as the same fragment.
+    """
+    return COFFragmenter._chemical_identity_key(species, coords, include_h=True)
+
+
+def _clean_base_of(path):
+    """The stem every fragment label of this input file starts with: file name
+    without .cif/.pdb, with [ ] _ removed (the same rule the flush functions
+    use to build labels)."""
+    base = os.path.basename(path)
+    if base.lower().endswith((".cif", ".pdb")):
+        base = base[:-4]
+    return base.replace("[", "").replace("]", "").replace("_", "")
+
+
+def _label_belongs_to(label, clean_base):
+    """Was this collection frame written for the input file `clean_base`?
+
+    A bare prefix test is not enough: "1" is a prefix of "10FragCof" and
+    "1006FragCof", so re-running 1.cif in single-file mode used to delete the
+    fragments of 10, 100, 1006, ... as well. A label is the stem followed
+    directly by "Frag" (COF/MOF) or by "W" and a digit (bio windows).
+    """
+    if not label.startswith(clean_base):
+        return False
+    rest = label[len(clean_base):]
+    return rest.startswith("Frag") or (rest[:1] == "W" and rest[1:2].isdigit())
+
+
+def _load_seen_keys_from_extxyz(filepath, key_fn=None, exclude_base=None):
+    """Duplicate keys of every frame already in a collection.
+
+    `exclude_base` skips the frames of the file being (re)processed. Without
+    it, a single-file re-run finds its own previous fragments, discards every
+    new one as a duplicate of itself, and `_update_extxyz_collection` then
+    deletes the old ones too - the file vanishes from the collection.
+    """
     seen_keys = set()
     if key_fn is None:
         key_fn = MOFFragmenter._chemical_identity_key
     frames = _parse_extxyz(filepath)
     for frame in frames:
+        if exclude_base is not None and _label_belongs_to(frame["label"], exclude_base):
+            continue
         seen_keys.add(key_fn(frame["species"], frame["coords"]))
     return seen_keys
 
@@ -238,7 +297,8 @@ def _update_extxyz_collection(extxyz_path, clean_base, new_fragments):
     if os.path.exists(extxyz_path):
         existing_frames = _parse_extxyz(extxyz_path)
     
-    remaining_frames = [f for f in existing_frames if not f["label"].startswith(clean_base)]
+    remaining_frames = [f for f in existing_frames
+                        if not _label_belongs_to(f["label"], clean_base)]
     
     temp_path = extxyz_path + ".tmp"
     try:
@@ -3672,7 +3732,7 @@ class COFFragmenter(BaseFragmenter):
         return violations
 
     @staticmethod
-    def _chemical_identity_key(species, coords, decimals=1):
+    def _chemical_identity_key(species, coords, decimals=1, include_h=False):
         """COF duplicate key: heavy-atom formula PLUS bond-graph topology.
 
         The inherited MOF key is the heavy-atom formula alone. For COFs that is
@@ -3688,6 +3748,16 @@ class COFFragmenter(BaseFragmenter):
         avoids it. Connectivity can: this adds an element-labelled
         Weisfeiler-Lehman hash of the heavy-atom bond graph, which is invariant
         to coordinate noise but differs whenever the topology differs.
+
+        `include_h=True` is the key the collection uses ACROSS structures. The
+        formula then counts H, and every heavy atom is labelled with how many
+        H it carries, so two fragments match only if they are the same
+        molecule with the hydrogens in the same places. Without it, two parents
+        whose skeletons agree but whose H do not - 429 (C98H61N8) and 430
+        (C98H64N8), 637 (C36H28N12O12) and 638 (C36H18N12O12) - collapsed to
+        one, and which survived depended on worker finishing order. The
+        default (heavy atoms only) is kept for de-duplicating repeated blocks
+        WITHIN one structure, before capping.
         """
         species = [str(sp) for sp in species]
         heavy = [(i, sp) for i, sp in enumerate(species) if sp != "H"]
@@ -3696,12 +3766,25 @@ class COFFragmenter(BaseFragmenter):
         counts = tuple(sorted(
             (sp, sum(1 for _, s in heavy if s == sp)) for sp in {s for _, s in heavy}
         ))
+        h_on = [0] * len(heavy)
+        if include_h:
+            counts = counts + (("H", sum(1 for sp in species if sp == "H")),)
+            # Each H belongs to its nearest heavy atom (within 1.3 A).
+            hpos = [np.array(coords[i], dtype=float)
+                    for i, sp in enumerate(species) if sp == "H"]
+            if hpos:
+                hv = np.array([np.array(coords[i], dtype=float) for i, _ in heavy])
+                for hp in hpos:
+                    d = np.linalg.norm(hv - hp, axis=1)
+                    k = int(np.argmin(d))
+                    if float(d[k]) <= 1.3:
+                        h_on[k] += 1
         try:
             import networkx as nx
             pts = [np.array(coords[i], dtype=float) for i, _ in heavy]
             g = nx.Graph()
             for k, (_, sp) in enumerate(heavy):
-                g.add_node(k, specie=sp)
+                g.add_node(k, specie=f"{sp}H{h_on[k]}" if include_h else sp)
             for a in range(len(heavy)):
                 for b in range(a + 1, len(heavy)):
                     sa, sb = heavy[a][1], heavy[b][1]
@@ -9847,7 +9930,8 @@ def main():
         
         is_dir = os.path.isdir(args.input_path)
         if is_dir:
-            cif_files = sorted(glob.glob(os.path.join(args.input_path, "*.cif")))
+            cif_files = sorted(glob.glob(os.path.join(args.input_path, "*.cif")),
+                               key=_natural_sort_key)
             out_dir = args.input_path
         else:
             if not os.path.exists(args.input_path):
@@ -9900,7 +9984,9 @@ def main():
                     os.remove(extxyz_path)
         else:
             if os.path.exists(extxyz_path):
-                seen_keys = _load_seen_keys_from_extxyz(extxyz_path, _identity_key_fn)
+                seen_keys = _load_seen_keys_from_extxyz(
+                    extxyz_path, _identity_key_fn,
+                    exclude_base=_clean_base_of(args.input_path))
                 
         pool_args = [(cif, args.radius, args.center, args.nmetals, args.timeout) for cif in cif_files]
         
@@ -9967,7 +10053,10 @@ def main():
         if is_dir and args.nproc > 1:
             print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
             with multiprocessing.Pool(args.nproc) as pool:
-                for r in pool.imap_unordered(_process_mof_file, pool_args):
+                # imap, not imap_unordered: results are flushed in input order,
+                # so which of two duplicate structures keeps a shared fragment
+                # does not depend on which worker happens to finish first.
+                for r in pool.imap(_process_mof_file, pool_args):
                     _flush_mof_result(r, seen_keys, csv_path, extxyz_path, is_dir=True)
         else:
             for pa in pool_args:
@@ -9985,7 +10074,8 @@ def main():
 
         is_dir = os.path.isdir(args.input_path)
         if is_dir:
-            cif_files = sorted(glob.glob(os.path.join(args.input_path, "*.cif")))
+            cif_files = sorted(glob.glob(os.path.join(args.input_path, "*.cif")),
+                               key=_natural_sort_key)
             out_dir = args.input_path
         else:
             if not os.path.exists(args.input_path):
@@ -10006,11 +10096,7 @@ def main():
         quarantine_path = os.path.join(out_dir, "fragments_quarantine.extxyz")
         
         seen_keys = set()
-        _identity_key_fn = (
-            COFFragmenter._chemical_identity_key
-            if getattr(args, "kind", "mof") == "cof"
-            else MOFFragmenter._chemical_identity_key
-        )
+        _identity_key_fn = _cof_collection_key
         if is_dir:
             if os.path.exists(csv_path) and not args.overwrite:
                 # Load completed files from CSV
@@ -10041,27 +10127,29 @@ def main():
                     os.remove(extxyz_path)
         else:
             if os.path.exists(extxyz_path):
-                seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                seen_keys = _load_seen_keys_from_extxyz(
+                    extxyz_path, _identity_key_fn,
+                    exclude_base=_clean_base_of(args.input_path))
 
         pool_args = [(cif, args.radius, args.center, args.cof_layer, args.timeout) for cif in cif_files]
 
         def _flush_cof_result(r, seen_keys, csv_path, extxyz_path, is_dir):
-            # COF duplicate detection uses COFFragmenter's topology-aware key,
-            # not the MOF formula-only key (see COFFragmenter._chemical_identity_key).
+            # COF duplicate detection uses the H-aware, topology-aware collection
+            # key (see _cof_collection_key), not the MOF formula-only key.
             norm_dup = "no"
             min_dup = "no"
             if r['norm_res']:
-                ckey = COFFragmenter._chemical_identity_key(r['norm_res'].species, r['norm_res'].coords)
+                ckey = _cof_collection_key(r['norm_res'].species, r['norm_res'].coords)
                 if ckey in seen_keys: norm_dup = "yes"
             if r['min_res']:
-                ckey = COFFragmenter._chemical_identity_key(r['min_res'].species, r['min_res'].coords)
+                ckey = _cof_collection_key(r['min_res'].species, r['min_res'].coords)
                 if ckey in seen_keys: min_dup = "yes"
 
             new_extxyz_frags = []
             for key in ["norm_res", "min_res"]:
                 res_obj = r[key]
                 if res_obj:
-                    ckey = COFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    ckey = _cof_collection_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -10075,7 +10163,7 @@ def main():
 
             if r.get("only_linker_res"):
                 for idx, res_obj in enumerate(r["only_linker_res"]):
-                    ckey = COFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    ckey = _cof_collection_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -10089,7 +10177,7 @@ def main():
 
             if r.get("only_node_res"):
                 for idx, res_obj in enumerate(r["only_node_res"]):
-                    ckey = COFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    ckey = _cof_collection_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -10121,7 +10209,7 @@ def main():
                 # collection never received. 1049's node vanished exactly that
                 # way, suppressed by 1050's quarantined radical.
                 seen_keys.discard(
-                    COFFragmenter._chemical_identity_key(_sp, _co))
+                    _cof_collection_key(_sp, _co))
 
             if is_dir:
                 with open(csv_path, "a") as f:
@@ -10154,7 +10242,10 @@ def main():
         if is_dir and args.nproc > 1:
             print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
             with multiprocessing.Pool(args.nproc) as pool:
-                for r in pool.imap_unordered(_process_cof_file, pool_args):
+                # imap, not imap_unordered: results are flushed in input order,
+                # so which of two duplicate structures keeps a shared fragment
+                # does not depend on which worker happens to finish first.
+                for r in pool.imap(_process_cof_file, pool_args):
                     _flush_cof_result(r, seen_keys, csv_path, extxyz_path, is_dir=True)
         else:
             for pa in pool_args:
@@ -10176,7 +10267,8 @@ def main():
 
         is_dir = os.path.isdir(args.input_path)
         if is_dir:
-            pdb_files = sorted(glob.glob(os.path.join(args.input_path, "*.pdb")))
+            pdb_files = sorted(glob.glob(os.path.join(args.input_path, "*.pdb")),
+                               key=_natural_sort_key)
             out_dir = args.input_path
         else:
             if not os.path.exists(args.input_path):
@@ -10228,7 +10320,8 @@ def main():
                     os.remove(extxyz_path)
         else:
             if os.path.exists(extxyz_path):
-                seen_keys = _load_seen_keys_from_extxyz(extxyz_path)
+                seen_keys = _load_seen_keys_from_extxyz(
+                    extxyz_path, exclude_base=_clean_base_of(args.input_path))
 
         pool_args = [
             (pdb, args.window_size, args.stride, not args.no_pdbfixer, args.ph, args.chain, args.timeout)
@@ -10271,7 +10364,10 @@ def main():
         if is_dir and args.nproc > 1:
             print(f"Processing {len(pdb_files)} PDB files using {args.nproc} processes...")
             with multiprocessing.Pool(args.nproc) as pool:
-                for r in pool.imap_unordered(_process_bio_file, pool_args):
+                # imap, not imap_unordered: results are flushed in input order,
+                # so which of two duplicate structures keeps a shared fragment
+                # does not depend on which worker happens to finish first.
+                for r in pool.imap(_process_bio_file, pool_args):
                     _flush_bio_result(r, seen_keys, csv_path, extxyz_path, is_dir=True)
         else:
             for pa in pool_args:
