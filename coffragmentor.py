@@ -622,6 +622,90 @@ class COF:
                                 edges_to_remove.append((u, v))
                                 linkage_of[frozenset((u, v))] = tag
 
+        # An azo or hydrazo bridge (Ar-N=N-Ar, Ar-NH-NH-Ar) is a linkage only
+        # when nothing else links the two rings it joins. In an azo-coupled
+        # COF (1159, 1160) it is the only connection and stays cut. But an
+        # azo group is also a common linker CORE: COF-TpAzo is built from
+        # 4,4'-azodianiline, whose two amine ends form the beta-ketoenamine
+        # linkage, and cutting its N=N as well split every linker into two
+        # phenylenediamines. The test is local: if each aryl ring of the
+        # bridge also carries another severed linkage within four bonds
+        # (para-substitution puts the amine N exactly four bonds from the
+        # carbon bearing the azo N), the bridge lies inside one building block
+        # and is restored. It is restored too when one side is a dead end - a
+        # small group reaching no other linkage and no further framework,
+        # i.e. a pendant azobenzene (320), where cutting the N=N only chops
+        # a side phenyl off into a meaningless C6H5N "linker". In an
+        # azo-coupled framework (1159, 1160, 733 - whose phloroglucinol side
+        # carries an ortho OH and no other linkage) both sides lead on into
+        # the network, so the bridge stays cut.
+        # Azine and acylhydrazone bridges, whose flanking carbon is an imine
+        # or carbonyl carbon rather than an aryl ring, are not affected.
+        def _aryl_flank(n, other_n):
+            c = [nb for nb in _heavy_nbrs_of(n) if nb != other_n]
+            if len(c) != 1 or self.structure[c[0]].specie.symbol != 'C':
+                return None
+            c = c[0]
+            if heavy_degree(c) != 3:
+                return None
+            if any(self.structure[nb].specie.symbol == 'O' for nb in _heavy_nbrs_of(c)):
+                return None
+            return c
+
+        def _cut_end_within(start, ends, banned, max_bonds=4):
+            frontier, seen = {start}, {start} | set(banned)
+            for _ in range(max_bonds):
+                nxt = set()
+                for x in frontier:
+                    for y in _heavy_nbrs_of(x):
+                        if y in seen:
+                            continue
+                        if y in ends:
+                            return True
+                        seen.add(y)
+                        nxt.add(y)
+                frontier = nxt
+            return False
+
+        def _dead_end(start, banned, all_cut_ends, max_atoms=30):
+            # Heavy atoms reachable from `start` without crossing `banned`:
+            # a dead end if the walk stops small and meets no other cut.
+            seen, stack = {start} | set(banned), [start]
+            n = 1
+            while stack:
+                x = stack.pop()
+                for y in _heavy_nbrs_of(x):
+                    if y in seen:
+                        continue
+                    if y in all_cut_ends:
+                        return False
+                    seen.add(y)
+                    stack.append(y)
+                    n += 1
+                    if n > max_atoms:
+                        return False
+            return True
+
+        _other_cut_ends = {
+            a for (u, v) in edges_to_remove
+            if linkage_of.get(frozenset((u, v)), ('',))[0] != 'N-N bridge'
+            for a in (u, v)
+        }
+        _all_cut_ends = {a for e in edges_to_remove for a in e}
+        for _bond in list(azine_nn_bonds):
+            _n1, _n2 = tuple(_bond)
+            _c1, _c2 = _aryl_flank(_n1, _n2), _aryl_flank(_n2, _n1)
+            if _c1 is None or _c2 is None:
+                continue
+            _inside_linker = (_cut_end_within(_c1, _other_cut_ends, (_n1, _n2))
+                              and _cut_end_within(_c2, _other_cut_ends, (_n1, _n2)))
+            _pendant = (_dead_end(_c1, (_n1, _n2), _all_cut_ends)
+                        or _dead_end(_c2, (_n1, _n2), _all_cut_ends))
+            if _inside_linker or _pendant:
+                edges_to_remove[:] = [e for e in edges_to_remove
+                                      if frozenset(e) != _bond]
+                linkage_of.pop(_bond, None)
+
         # Biaryl fallback for all-hydrocarbon COFs. Frameworks such as 463.cif
         # (C48H30) are built purely from aromatic rings joined by direct
         # aryl-aryl C-C single bonds, so none of the linkage chemistries above

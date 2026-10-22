@@ -14,28 +14,49 @@ UniFrag is a Python framework designed to cleanly and robustly extract chemicall
 ## Installation
 Dependencies:
 ```bash
-pip install pymatgen numpy openbabel
+pip install pymatgen numpy scipy networkx rdkit moffragmentor
+# biological macromolecules (--kind bio) only:
 conda install -c conda-forge pdbfixer openmm
 ```
 
 ## Usage
-Simply run the Python script on your CIF file.
+The entry point is `fragmentation_oop.py`. Choose the structure class with `--kind` (`mof` is the default).
+
 ```bash
-python fragmenter.py <path_to_cif> --radius 4.0 --output my_fragment.xyz
+# A folder of structures (batch mode), in parallel
+python fragmentation_oop.py <folder_with_cifs> --kind cof --nproc 8
+
+# One structure: (re)processes it into the collection in its own folder
+python fragmentation_oop.py <path_to_cif> --kind mof --radius 4.0
 ```
 
+Results are written to the folder that holds the input (for a single file, its frames in the collection are replaced and the other structures' frames are kept):
+- `fragments_collection.extxyz` - all closed-shell fragments, one frame each. The comment line carries `label=`, `charge=` (0 for every fragment) and, where recorded, `capped_h=` (indices of the hydrogens UniFrag added).
+- `fragmentation_summary.csv` - one row per structure, with normal and minimized fragment sizes and whether each was a duplicate of an earlier one.
+- `fragments_quarantine.extxyz` - open-shell fragments the parity repair could not close; they are kept out of the collection.
+- `prescan_quarantine/` and `timed_out_structures/` - input files rejected by the parent pre-scan or stopped by `--timeout`.
+
+A folder run resumes where it stopped; pass `--overwrite` to start again from scratch.
+
 ### Arguments
-- `cif_path`: Path to your MOF `.cif` file.
+- `input_path`: A `.cif` file (`.pdb` for `--kind bio`), or a folder of them.
+- `--kind`: `mof`, `cof` or `bio` (default `mof`).
+- `--nproc`: Number of parallel processes in folder mode (default 1).
+- `--timeout`: Seconds allowed per structure before it is moved to `timed_out_structures/` (default 300; 0 disables).
+- `--overwrite`: In folder mode, discard previous results instead of resuming.
+- `--cof-layer`: For layered COFs, `auto`, `monomer` or `dimer` (default `auto`).
 - `--center`: The atomic index in the unit cell that acts as the physical origin. Leave it blank (or set to `-1`) and the script will automatically lock onto the most centralized metal atom to avoid periodic boundary wrapping.
 - `--radius`: The spatial sphere (in Ångströms) defining the central "core metals". **Radius = 4.0 Å is highly recommended** for MOF-74 analogues to consistently isolate precisely 3 core metal atoms. *Warning: Radii larger than 4.5 Å will trigger a structural warning as they may disrupt molecular symmetries depending on your specific MOF lattice.*
-- `--output`: Filepath to save the resulting `.xyz` fragment.
+- `--nmetals`: Number of core metals to target (MOF, default 3).
+
+A "minimized" fragment is produced automatically whenever the normal fragment exceeds 50 atoms. (`--output` and `--minimize` are still accepted on the command line but are currently not used.)
 
 ## Example
 If you want to extract a 4-linker, 3-Metal core out of an MOF-74 variant:
 ```bash
-python fragmenter.py example/MgMOF74_clean_fromCORE.cif --radius 4.0 --output Mg_cluster.xyz
+python fragmentation_oop.py example/MgMOF74_clean_fromCORE.cif --kind mof --radius 4.0
 ```
-This produces an `.xyz` trajectory containing 3 Mg atoms, 32 C atoms, 24 O atoms, and 23 capping/native Hydrogens!
+The fragments are written to `example/fragments_collection.extxyz`.
 
 ## Biological Macromolecules (MacromolFragmenter)
 

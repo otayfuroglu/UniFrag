@@ -34,6 +34,22 @@ _EXTXYZ_Z = {
 }
 
 
+# Atomic numbers for the parity repair and the open-shell quarantine. One
+# table, so the repair and the quarantine can never disagree about what is odd.
+_PARITY_Z = {
+    "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
+    "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17,
+    "Ar": 18, "K": 19, "Ca": 20, "Sc": 21, "Ti": 22, "V": 23, "Cr": 24, "Mn": 25,
+    "Fe": 26, "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30, "Ga": 31, "Ge": 32, "As": 33,
+    "Se": 34, "Br": 35, "Kr": 36, "Zr": 40, "Nb": 41, "Mo": 42, "Tc": 43, "Ru": 44,
+    "Rh": 45, "Pd": 46, "Ag": 47, "Cd": 48, "In": 49, "Sn": 50, "Sb": 51, "Te": 52,
+    "I": 53, "Xe": 54, "La": 57, "Ce": 58, "Pr": 59, "Nd": 60, "Pm": 61, "Sm": 62,
+    "Eu": 63, "Gd": 64, "Tb": 65, "Dy": 66, "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70,
+    "Lu": 71, "Hf": 72, "Ta": 73, "W": 74, "Re": 75, "Os": 76, "Ir": 77, "Pt": 78,
+    "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82, "Bi": 83
+}
+
+
 def _electron_count(species):
     """Total electron count of a neutral fragment. Odd means an open shell."""
     return sum(_EXTXYZ_Z.get(s, 6) for s in species)
@@ -200,6 +216,32 @@ def _natural_sort_key(path):
     # would otherwise fall back to whatever order glob happened to return.
     return ([int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)],
             name)
+
+
+# Two same-element atoms closer than this are one atom generated twice by
+# CIF symmetry expansion: an atom lying a few hundredths of an A off a
+# symmetry element is not merged by pymatgen's own (fractional) site
+# tolerance. IRMOF-10 in Fm-3m, whose fragments are clean, has such pairs at
+# 0.016 A (96 C, 96 H) and 0.052 A (96 H). Over all 5226 CR MOFs and 884
+# HCNO COFs the closest pairs of any kind are 1210's H-H at 0.051 A - the
+# same signature - and then 0.149 (1116), 0.176 (657), 0.18 (WILDUR Cl-Cl),
+# 0.37 ...: real disorder or defects, which stay rejected. The cut sits in
+# that gap.
+_SYMMETRY_DUPLICATE_TOL = 0.10
+
+
+def _merge_symmetry_duplicates(struct, tol=_SYMMETRY_DUPLICATE_TOL):
+    """Copy of `struct` with same-element sites closer than `tol` merged
+    (the higher index removed). Used only for judging a parent in the
+    pre-scan; the parent file and the fragmenter are untouched."""
+    i, j, _img, _d = struct.get_neighbor_list(tol)
+    drop = sorted({int(max(a, b)) for a, b in zip(i, j)
+                   if a != b and struct[int(a)].species == struct[int(b)].species})
+    if not drop:
+        return struct
+    merged = struct.copy()
+    merged.remove_sites(drop)
+    return merged
 
 
 def _cof_collection_key(species, coords):
@@ -1038,20 +1080,7 @@ class BaseFragmenter:
             species, coords, capped_h_indices = self._recap_after_dedupe(
                 species, coords, capped_h_indices
             )
-        _ATOMIC_NUMBERS = {
-            "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
-            "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17,
-            "Ar": 18, "K": 19, "Ca": 20, "Sc": 21, "Ti": 22, "V": 23, "Cr": 24, "Mn": 25,
-            "Fe": 26, "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30, "Ga": 31, "Ge": 32, "As": 33,
-            "Se": 34, "Br": 35, "Kr": 36, "Zr": 40, "Nb": 41, "Mo": 42, "Tc": 43, "Ru": 44,
-            "Rh": 45, "Pd": 46, "Ag": 47, "Cd": 48, "In": 49, "Sn": 50, "Sb": 51, "Te": 52,
-            "I": 53, "Xe": 54, "La": 57, "Ce": 58, "Pr": 59, "Nd": 60, "Pm": 61, "Sm": 62,
-            "Eu": 63, "Gd": 64, "Tb": 65, "Dy": 66, "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70,
-            "Lu": 71, "Hf": 72, "Ta": 73, "W": 74, "Re": 75, "Os": 76, "Ir": 77, "Pt": 78,
-            "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82, "Bi": 83
-        }
-        z_sum = sum(_ATOMIC_NUMBERS.get(s, 6) for s in species
-                    if not (self._PARITY_IGNORES_METALS and s in self.METALS))
+        z_sum = self._parity_z_sum(species)
         if z_sum % 2 == 0:
             return species, coords, capped_h_indices
 
@@ -1072,7 +1101,17 @@ class BaseFragmenter:
                 if species[j] == "H":
                     if d < 1.3:
                         h_nb.append(j)
-                elif d < 2.2:
+                elif species[j] in self.METALS:
+                    # Metal contacts keep the previous 2.2 A rule.
+                    if d < 2.2:
+                        heavy.append(j)
+                elif self.is_valid_bond(species[atom_idx], species[j], d):
+                    # Non-metal neighbours are BONDED neighbours. A flat 2.2 A
+                    # also caught the 1,3 atom across a five-membered ring:
+                    # NIFSED's 2-methylimidazolate N sees the far ring carbon
+                    # at 2.1985 A, so the N looked three-connected, no H could
+                    # be added, and the linker stayed a radical - while the
+                    # same linker in MECWEX (2.204 A) was repaired.
                     heavy.append(j)
             return heavy, h_nb
 
@@ -1373,7 +1412,8 @@ class BaseFragmenter:
         species_copy, coords_copy, capped_h_indices = self.fix_odd_electron_multiplicity(
             species_copy, coords_copy, capped_h_indices, label=label
         )
-        return FragmentResult(species=species_copy, coords=coords_copy)
+        return FragmentResult(species=species_copy, coords=coords_copy,
+                              capped_h=list(capped_h_indices))
 
     # MOF linkers are organic by definition, so metals are stripped from
     # exported blocks. COFFragmenter overrides: a macrocycle metal (ZnPc,
@@ -1382,6 +1422,13 @@ class BaseFragmenter:
     # MOF parity counts every atom (unchanged). COFFragmenter counts only the
     # non-metal atoms; see _ligand_electron_count.
     _PARITY_IGNORES_METALS = False
+
+    @classmethod
+    def _parity_z_sum(cls, species):
+        """Electron count the parity repair must make even for this class.
+        The MOF open-shell quarantine judges with the same number."""
+        return sum(_PARITY_Z.get(s, 6) for s in species
+                   if not (cls._PARITY_IGNORES_METALS and s in cls.METALS))
 
     def _clean_linker_molecule(self, species, coords, orig_indices=None):
         species = [str(s) for s in species]
@@ -1745,6 +1792,7 @@ class MOFFragmenter(BaseFragmenter):
 
     def prescan_parent(self, struct, max_report=6):
         """Return a list of (rule, detail) defects in a MOF parent structure."""
+        struct = _merge_symmetry_duplicates(struct)
         sym = []
         for site in struct:
             try:
@@ -2696,7 +2744,8 @@ class MOFFragmenter(BaseFragmenter):
             print(f"  -> Helper fragments available in mof_nodes_lib/ and mof_linkers_lib/.")
             print(f"Final size: {len(species)} atoms.")
             print(f"Saved: {output_path}")
-        return FragmentResult(species=species, coords=coords)
+        return FragmentResult(species=species, coords=coords,
+                              capped_h=list(capped_h_indices))
 
     def extract(self, mof_path, center_idx=-1, nmetals=3, output_path="fragment.xyz", minimize=False):
         self.extracted_linkers = []
@@ -2993,7 +3042,8 @@ class MOFFragmenter(BaseFragmenter):
             mol = Molecule(final_species, final_coords)
             mol.to(filename=output_path, fmt="xyz")
             print(f"Saved: {output_path}")
-        return FragmentResult(species=final_species, coords=final_coords)
+        return FragmentResult(species=final_species, coords=final_coords,
+                              capped_h=list(self._last_capped_h_indices))
 
     def _get_fragment(self, core_metals, initial_indices, supercell, sc_center_idx, is_infinite_sbu, nmetals, minimize, zif_mode=False):
         metals = self.METALS
@@ -3379,7 +3429,13 @@ class MOFFragmenter(BaseFragmenter):
                 d = np.linalg.norm(cpos - np.array(p2))
                 if sp2 == "C" and d < 1.8:
                     c_nbs.append(np.array(p2))
-                elif sp2 in ("O", "N", "S", "P", "F", "Cl", "Br", "I") and d < 1.8:
+                # A heteroatom neighbour counts by the same rule that kept the
+                # bond in this fragment. A fixed 1.8 A missed C-P (1.80-1.86),
+                # C-S, C-Br and C-I, so a phosphonate ring carbon (RAXCAW,
+                # XOJWID) looked two-coordinate and received an "aromatic" H
+                # placed 0.73-0.85 A from its own P. For O/N/F this is the
+                # same 1.8 A as before; metals are still not counted.
+                elif sp2 != "H" and self.is_valid_bond("C", sp2, d):
                     o_nbs.append(np.array(p2))
                 elif sp2 == "H" and d < 1.2:
                     h_nbs += 1
@@ -3637,6 +3693,7 @@ class COFFragmenter(BaseFragmenter):
         structures, only 6 of which any other rule catches, and a radical
         framework is a chemistry question rather than a modelling error.
         """
+        struct = _merge_symmetry_duplicates(struct)
         sym = [site.specie.symbol for site in struct]
         n = len(sym)
         if n == 0:
@@ -9799,7 +9856,13 @@ def _process_mof_file(args_tuple):
 
             res = frag.extract(cif_path, center_idx=center, nmetals=nmetals,
                                output_path=out_norm, minimize=False)
-            
+            # extract() resets extracted_linkers at its start, so the
+            # minimize pass below would otherwise replace (or erase) the
+            # linkers of the normal fragment. MECWEX lost its OnlyLinker this
+            # way and a later duplicate (NIFSED) emitted a broken one instead.
+            # Same snapshot as _process_cof_file.
+            extracted_linkers_snapshot = list(getattr(frag, "extracted_linkers", []) or [])
+
             norm_atoms = len(res.species) if res else 0
             norm_formula = _get_formula(res.species) if res else "N/A"
             
@@ -9815,9 +9878,9 @@ def _process_mof_file(args_tuple):
                     min_atoms = len(res_min.species)
                     min_formula = _get_formula(res_min.species)
             only_linker_res = []
-            if hasattr(frag, "extracted_linkers") and frag.extracted_linkers:
-                for idx, (lsp, lco) in enumerate(frag.extracted_linkers):
-                    lbl = f"{base}FragMofOnlyLinker{idx}" if len(frag.extracted_linkers) > 1 else f"{base}FragMofOnlyLinker"
+            if extracted_linkers_snapshot:
+                for idx, (lsp, lco) in enumerate(extracted_linkers_snapshot):
+                    lbl = f"{base}FragMofOnlyLinker{idx}" if len(extracted_linkers_snapshot) > 1 else f"{base}FragMofOnlyLinker"
                     try:
                         qm_linker = frag._make_qm_ready_linker(lsp, lco, label=lbl)
                         only_linker_res.append(qm_linker)
@@ -9946,6 +10009,8 @@ def main():
             
         csv_path = os.path.join(out_dir, "fragmentation_summary.csv")
         extxyz_path = os.path.join(out_dir, "fragments_collection.extxyz")
+        # Open-shell fragments the parity repair could not close are held here.
+        quarantine_path = os.path.join(out_dir, "fragments_quarantine.extxyz")
         
         seen_keys = set()
         _identity_key_fn = (
@@ -9982,6 +10047,9 @@ def main():
                     f.write("cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n")
                 if os.path.exists(extxyz_path):
                     os.remove(extxyz_path)
+                # A fresh run must not append to an old run's quarantine.
+                if os.path.exists(quarantine_path):
+                    os.remove(quarantine_path)
         else:
             if os.path.exists(extxyz_path):
                 seen_keys = _load_seen_keys_from_extxyz(
@@ -10013,7 +10081,8 @@ def main():
                     if base_name.endswith(".cif"): base_name = base_name[:-4]
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
                     frag_name = f"{clean_base}FragMof{suffix}"
-                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
+                                             res_obj.capped_h))
 
             if r.get("only_linker_res"):
                 for idx, res_obj in enumerate(r["only_linker_res"]):
@@ -10028,15 +10097,42 @@ def main():
                     # label.split("_")[0], so "X_0" and "X_1" would share one GBW.
                     suffix = f"{idx}" if len(r["only_linker_res"]) > 1 else ""
                     frag_name = f"{clean_base}FragMofOnlyLinker{suffix}"
-                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name))
+                    new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
+                                             res_obj.capped_h))
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
-            
+
+            # Every fragment must be closed-shell. One the parity repair could
+            # not close (it printed "could not automatically fix odd electron
+            # count") is held in the quarantine instead of the collection, as
+            # in _flush_cof_result, judged with the repair's own count. Its key
+            # is released so a later structure with the same skeleton can
+            # still provide a closed-shell copy.
+            clean_frags, odd_frags = [], []
+            for species, coords, frag_name, capped_h in new_extxyz_frags:
+                z = MOFFragmenter._parity_z_sum(species)
+                if z % 2:
+                    odd_frags.append((species, coords, frag_name, capped_h, z))
+                    seen_keys.discard(
+                        MOFFragmenter._chemical_identity_key(species, coords))
+                    print(f"  -> QUARANTINED '{frag_name}': odd electron count "
+                          f"(Z_sum={z}); held in fragments_quarantine.extxyz, "
+                          f"not written to the main collection.")
+                else:
+                    clean_frags.append((species, coords, frag_name, capped_h))
+
             if is_dir:
                 with open(csv_path, "a") as f:
                     f.write(csv_row)
-                for species, coords, frag_name in new_extxyz_frags:
-                    _write_extxyz(extxyz_path, species, coords, frag_name)
+                # capped_h records which atoms this code added, as for COF,
+                # so QA can tell them from the crystal's own atoms.
+                for species, coords, frag_name, capped_h in clean_frags:
+                    _write_extxyz(extxyz_path, species, coords, frag_name,
+                                  capped_h=capped_h)
+                for species, coords, frag_name, capped_h, z in odd_frags:
+                    _write_extxyz(quarantine_path, species, coords, frag_name,
+                                  extra=f"quarantine=odd_electron zsum={z}",
+                                  capped_h=capped_h)
             else:
                 base_name = r["cif"]
                 if base_name.endswith(".cif"): base_name = base_name[:-4]
@@ -10048,7 +10144,11 @@ def main():
                     [csv_row], 
                     "cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n"
                 )
-                _update_extxyz_collection(extxyz_path, clean_base, new_extxyz_frags)
+                _update_extxyz_collection(extxyz_path, clean_base, clean_frags)
+                if odd_frags or os.path.exists(quarantine_path):
+                    _update_extxyz_collection(
+                        quarantine_path, clean_base,
+                        [(sp, co, nm, ch) for sp, co, nm, ch, _z in odd_frags])
 
         if is_dir and args.nproc > 1:
             print(f"Processing {len(cif_files)} CIF files using {args.nproc} processes...")
@@ -10090,10 +10190,11 @@ def main():
 
         csv_path = os.path.join(out_dir, "fragmentation_summary.csv")
         extxyz_path = os.path.join(out_dir, "fragments_collection.extxyz")
+        # Open-shell fragments the parity repair could not close are held here.
+        quarantine_path = os.path.join(out_dir, "fragments_quarantine.extxyz")
         # Fragments that survive the parity repair with an odd electron count are
         # open-shell and would need multiplicity != 1, so they never enter the
-        # main collection; they are held here instead, labelled with why.
-        quarantine_path = os.path.join(out_dir, "fragments_quarantine.extxyz")
+        # main collection; they are held there instead, labelled with why.
         
         seen_keys = set()
         _identity_key_fn = _cof_collection_key
@@ -10125,6 +10226,9 @@ def main():
                     f.write("cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n")
                 if os.path.exists(extxyz_path):
                     os.remove(extxyz_path)
+                # A fresh run must not append to an old run's quarantine.
+                if os.path.exists(quarantine_path):
+                    os.remove(quarantine_path)
         else:
             if os.path.exists(extxyz_path):
                 seen_keys = _load_seen_keys_from_extxyz(
