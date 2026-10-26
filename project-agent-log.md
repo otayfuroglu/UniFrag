@@ -2556,3 +2556,11 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - **New defect found, not fixed (not in any issue):** in minimized MOF fragments with phosphorus, Min severs P-O bonds of phosphonates (RAXCAW, XOJWID) and P-C bonds of a triaryl-phosphine (ABEDAQ) and caps the P with H at 0.96 A - the O-H length; a P-H bond is ~1.42 A. Present in the committed code too.
 - Issue #3 note: in the reviewer's own run the NIFSED/VEJYUF radicals did NOT reach the collection - MECWEX's closed-shell linker came first and the H-blind MOF key treated them as duplicates; and MECWEX (49 atoms) never runs a minimize pass, so its linker was not lost that way. The three defects are real; the stated symptom needs a structure without an earlier clean copy (shown by running NIFSED alone).
 
+## [2026-10-26] GitHub issue #2 resolved as by design (no code change)
+- User chose: a minimized MOF fragment keeps one SBU. Recorded in project-decisions.md with the coordination check on the 23 affected Zn MOFs (all Min Zn coordination numbers also occur in the normal fragment; URENEM/VAZHOW normal fragments carry an under-coordinated second SBU). Commented on #2. The moffragmentor failure on the Zn sample is still open as a separate question.
+
+## [2026-10-26] GitHub issue #5: P/S oxygens kept in Min, P/S cap lengths, P/S-H bond perception (code change, see project-decisions.md)
+- `fragmentation_oop.py`: `_get_first_ring_keep_heavy` (keep O on kept P/S), `cap_bond_length` (P 1.42, S 1.34), `MOFFragmenter.is_valid_bond` (H on P/S bonded below 1.6 A).
+- First attempt changed only the cap length and the oxygen rule; the 614-MOF test showed the new caps disappearing. Traced locally on ABEDAQ: placed at 1.42 A, returned by `_get_fragment`, then deleted by `enforce_single_molecule` because the MOF bond rule capped any H bond at 1.2 A. The bond-perception change fixed it.
+- Found while validating, not fixed: **bio output is not reproducible run to run** - two runs of the committed code on `test_on_bio_mol` differ in every frame's H positions (PDBFixer); with `--no-pdbfixer` the output is byte-identical between runs and between old and new code.
+

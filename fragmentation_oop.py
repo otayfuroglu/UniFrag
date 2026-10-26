@@ -386,6 +386,12 @@ class BaseFragmenter:
             return 1.48
         if site_species == "B":
             return 1.19
+        # P-H and S-H are much longer than O-H; both used to fall through to
+        # the 0.96 A O-H length (#5: Min phosphine P capped at 0.96 A).
+        if site_species == "P":
+            return 1.42
+        if site_species == "S":
+            return 1.34
         return 0.96
 
     @staticmethod
@@ -1587,6 +1593,16 @@ class BaseFragmenter:
                         elif sp_nb == "H":
                             extra.add(nb)
             keep_atoms.update(extra)
+            # A kept P or S is the centre of a phosphonate/sulfonate: its
+            # oxygens belong to the same coordinating group, exactly as both O
+            # of a carboxylate do. The pass above only looked outward from
+            # C/Si/B, so Min kept the P of RAXCAW/XOJWID's phosphonates, cut
+            # their other oxygens, and capped the P with H instead.
+            _oxo_centres = {"P", "S"}
+            extra = {nb for u in keep_atoms if species_map.get(u) in _oxo_centres
+                     for nb in hadj.get(u, [])
+                     if nb not in keep_atoms and species_map.get(nb) == "O"}
+            keep_atoms.update(extra)
 
         return keep_atoms
 
@@ -1738,6 +1754,13 @@ class MOFFragmenter(BaseFragmenter):
                 return False
             return dist < 2.6
         if "H" in (s1_str, s2_str):
+            other = s2_str if s1_str == "H" else s1_str
+            # P-H (~1.42 A) and S-H (~1.34 A) are longer than the 1.2 A that
+            # suits C/N/O-H. At 1.2 a correctly placed P/S cap - and the real
+            # P-H of 12 CR parents (CIXCOC, the OGAG* family ...) - counted as
+            # unbonded, and enforce_single_molecule deleted the cap (#5).
+            if other in ("P", "S"):
+                return dist < 1.6
             return dist < 1.2
         if s1_str in self.LARGE_NON_METALS or s2_str in self.LARGE_NON_METALS:
             return dist < 2.2
