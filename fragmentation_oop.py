@@ -4066,8 +4066,8 @@ class COFFragmenter(BaseFragmenter):
                 # In-plane images only: the shift itself carries the stacking.
                 axes = sorted(
                     range(3),
-                    key=lambda k: abs(float(np.dot(lat[k] / np.linalg.norm(lat[k]),
-                                                   normal))),
+                    key=lambda k: round(abs(float(np.dot(lat[k] / np.linalg.norm(lat[k]),
+                                                         normal))), 3),
                 )[:2]
                 images = []
                 for ia in (-1, 0, 1):
@@ -4094,6 +4094,14 @@ class COFFragmenter(BaseFragmenter):
                     _crystal_contact_cache[key] = 0.0
                     return 0.0
                 best = float(dmat[i0, j0])
+                # Sites that land (almost) ON each other across this shift
+                # mean it maps the crystal onto itself: there is no contact to
+                # match, same as the bonded case above. Which coincident pair
+                # argsort reported first was noise - a bonded pair gave 0 and
+                # a rejection, an H-H pair (never "bonded" in a COF) gave
+                # ~1e-7 and an acceptance, so 413 stacked on some CPUs (#6).
+                if best < 0.5:
+                    best = 0.0
             except Exception:
                 best = 0.0
             _crystal_contact_cache[key] = best
@@ -4203,7 +4211,13 @@ class COFFragmenter(BaseFragmenter):
 
         if not candidates:
             return None
-        candidates.sort(key=lambda x: x[:3])
+        # Rank on ROUNDED keys (0.001 A, 0.1 degree). The layer above (+c) and
+        # the layer below (-c) are equally good partners whose |shift| agrees
+        # only to rounding noise, so on raw floats the choice between them
+        # changed with the CPU (#6: 1112's node). Exact ties now keep the
+        # deterministic enumeration order (+axis before -axis).
+        candidates.sort(key=lambda x: (round(x[0], 3), round(x[1], 1),
+                                       round(x[2], 3)))
         _, angle, neg_contact, R, t, sep, lateral, local = candidates[0]
         # Remember how close this stacking actually is, so the node and linker
         # blocks are judged against the same bar as the assembled fragment
@@ -4315,7 +4329,11 @@ class COFFragmenter(BaseFragmenter):
         contact = float(
             np.min(np.linalg.norm(a[:, None, :] - b[None, :, :], axis=-1))
         )
-        if contact < floor:
+        # `floor` is the contact the assembled fragment was accepted at, and a
+        # block's stacked copy often has that very same closest pair, so the
+        # two numbers agree to rounding noise. Compare at 0.001 A: an equal
+        # contact is an accepted contact on every CPU (#6: 131, 458, 522).
+        if round(contact, 3) < round(floor, 3):
             print(f"  -> COF dimer skipped for '{label}': stacked copy would "
                   f"clash at {contact:.2f} A (< {floor:.2f}); emitting the monomer.")
             return list(sp), [np.asarray(c, dtype=float) for c in co]
@@ -4739,7 +4757,12 @@ class COFFragmenter(BaseFragmenter):
                     if not only_parent_bonded(p_new, i):
                         continue
                     g = clearance(p_new, i)
-                    if g >= floor and (best is None or g > best[0]):
+                    # Compared at 0.001 A: symmetry-equivalent sites (1105's
+                    # N[29] and N[53]) have equal clearance up to rounding
+                    # noise, and the raw comparison picked between them by
+                    # CPU (#6). A tie keeps the first site in atom order.
+                    gr = round(g, 3)
+                    if gr >= floor and (best is None or gr > round(best[0], 3)):
                         best = (g, kind, i, p_new)
             if best is not None:
                 g, kind, i, p_new = best
@@ -5287,9 +5310,9 @@ class COFFragmenter(BaseFragmenter):
             order = sorted(
                 (h for h in capped_h_indices
                  if 0 <= h < len(species) and species[h] == "H"),
-                key=lambda h: min((float(np.linalg.norm(pos[h] - pos[j]))
-                                   for j in range(len(species)) if j != h),
-                                  default=float("inf")),
+                key=lambda h: (round(min((float(np.linalg.norm(pos[h] - pos[j]))
+                                         for j in range(len(species)) if j != h),
+                                        default=float("inf")), 3), h),
             )
             for h in order:
                 parent, best_d = None, float("inf")
@@ -6403,7 +6426,7 @@ class COFFragmenter(BaseFragmenter):
             fr = np.mean([np.array(supercell[i].frac_coords, dtype=float) for i in comps[k]], axis=0)
             return np.mod(fr, 1.0)
 
-        center_node = min(node_candidates, key=lambda k: float(np.linalg.norm(comp_center_cart(k) - ctr)))
+        center_node = min(node_candidates, key=lambda k: round(float(np.linalg.norm(comp_center_cart(k) - ctr)), 3))
 
         # Topology split: keep boroxine-like nodes for the stricter path below,
         # and use this graph fallback for other COF topologies (e.g., COF-66).
@@ -6498,7 +6521,7 @@ class COFFragmenter(BaseFragmenter):
             keep_atoms |= comps[k]
 
         # unwrap coordinates on full graph, then align kept components via cut edges
-        sc_center_idx = min(comps[center_node], key=lambda i: np.linalg.norm(supercell[i].coords - ctr))
+        sc_center_idx = min(comps[center_node], key=lambda i: round(float(np.linalg.norm(supercell[i].coords - ctr)), 3))
         unwrapped = [None] * len(supercell)
         unwrapped[sc_center_idx] = np.array(supercell[sc_center_idx].coords, dtype=float)
         q = deque([sc_center_idx])
@@ -6647,7 +6670,7 @@ class COFFragmenter(BaseFragmenter):
                 if self.is_valid_bond("B", "H", d):
                     h_nbs.append((d, j))
             if len(h_nbs) > 2:
-                h_nbs.sort(key=lambda x: x[0])
+                h_nbs.sort(key=lambda x: (round(x[0], 3), x[1]))
                 for _, hj in h_nbs[2:]:
                     remove_h.add(hj)
 
@@ -6759,7 +6782,7 @@ class COFFragmenter(BaseFragmenter):
         self._export_coffragmentor_library(result, Path(cif_path).stem)
 
         center = struct.lattice.get_cartesian_coords([0.5, 0.5, 0.5])
-        node = min(nodes, key=lambda sbu: float(np.linalg.norm(np.mean(sbu.molecule.cart_coords, axis=0) - center)))
+        node = min(nodes, key=lambda sbu: round(float(np.linalg.norm(np.mean(sbu.molecule.cart_coords, axis=0) - center)), 3))
         node_sp = [str(x) for x in node.molecule.species]
         node_co = [np.array(c, dtype=float) for c in node.molecule.cart_coords]
         # NOTE: do NOT cap severed-double-bond sites here, before merging.
@@ -6817,7 +6840,8 @@ class COFFragmenter(BaseFragmenter):
                     scored_images.append((score, idx, linker, image_shift, attach_sites))
         if not scored_images:
             return None
-        scored_images.sort(key=lambda x: x[0], reverse=True)
+        scored_images.sort(key=lambda x: tuple(round(v, 3) if isinstance(v, float) else v
+                                               for v in x[0]), reverse=True)
 
         # Select one linker image per node ATTACHMENT SITE, not one per distinct
         # linker SBU. A symmetric COF can be built from a single symmetry-unique
@@ -7126,7 +7150,7 @@ class COFFragmenter(BaseFragmenter):
                         bcount = sum(1 for x in comp if sc_sym[x] == "B")
                         ocount = sum(1 for x in comp if sc_sym[x] == "O")
                         return ccount, bcount, ocount
-                    center_probe = min(node_candidates, key=lambda k: float(np.linalg.norm(np.mean([supercell[i].coords for i in comps[k]], axis=0) - ctr)))
+                    center_probe = min(node_candidates, key=lambda k: round(float(np.linalg.norm(np.mean([supercell[i].coords for i in comps[k]], axis=0) - ctr)), 3))
                     cc, bb, oo = _node_sig(comps[center_probe])
                     is_boroxine_like = (bb >= 2 and 4 <= cc <= 12 and oo <= 2)
                     if not is_boroxine_like:
@@ -7156,7 +7180,7 @@ class COFFragmenter(BaseFragmenter):
                                     qcg.append(cb)
                             return keep
 
-                        center_node = min(node_candidates, key=lambda k: float(np.linalg.norm(comp_center(k) - ctr)))
+                        center_node = min(node_candidates, key=lambda k: round(float(np.linalg.norm(comp_center(k) - ctr)), 3))
                         # Build one chemically clean monomer first; for dimer mode
                         # we duplicate this validated monomer with a layer shift.
                         do_stack_dimer = (getattr(self, "layer_mode", "auto") != "monomer")
@@ -7189,7 +7213,7 @@ class COFFragmenter(BaseFragmenter):
                             keep_atoms |= comps[k]
 
                         # Build coordinates with unwrapping (existing routine below)
-                        sc_center_idx = min(comps[center_node], key=lambda i: np.linalg.norm(supercell[i].coords - ctr))
+                        sc_center_idx = min(comps[center_node], key=lambda i: round(float(np.linalg.norm(supercell[i].coords - ctr)), 3))
                         unwrapped = [None] * len(supercell)
                         unwrapped[sc_center_idx] = np.array(supercell[sc_center_idx].coords)
                         q = deque([sc_center_idx])
@@ -7305,7 +7329,7 @@ class COFFragmenter(BaseFragmenter):
 
                             if stack_vec is None:
                                 lat = np.array(supercell.lattice.matrix, dtype=float)
-                                stack_vec = min(lat, key=lambda v: float(np.linalg.norm(v)))
+                                stack_vec = min(lat, key=lambda v: round(float(np.linalg.norm(v)), 3))
 
                             self.partner_vec = stack_vec
                             base_species = list(species)
@@ -7363,7 +7387,7 @@ class COFFragmenter(BaseFragmenter):
             if h_cores:
                 def _ctr(core):
                     return np.mean([supercell[i].coords for i in core], axis=0)
-                center_core = min(h_cores, key=lambda c: np.linalg.norm(_ctr(c) - ctr))
+                center_core = min(h_cores, key=lambda c: round(float(np.linalg.norm(_ctr(c) - ctr)), 3))
                 core_nodes = set(center_core)
                 node_atoms = set().union(*h_cores)
                 node_species = {"Si"}
@@ -7372,7 +7396,7 @@ class COFFragmenter(BaseFragmenter):
                 else:
                     si_in_core = [i for i in center_core if sc_sym[i] == "Si"]
                     pool = si_in_core if si_in_core else list(center_core)
-                    sc_center_idx = min(pool, key=lambda i: np.linalg.norm(supercell[i].coords - ctr))
+                    sc_center_idx = min(pool, key=lambda i: round(float(np.linalg.norm(supercell[i].coords - ctr)), 3))
                 path_mode = "H"
                 print(f"  -> COF Path H (COF-105 Si-node SBU). cores: {len(h_cores)}, core size: {len(center_core)}")
 
@@ -7383,7 +7407,7 @@ class COFFragmenter(BaseFragmenter):
             if center_idx >= 0:
                 sc_center_idx = center_idx
             else:
-                sc_center_idx = min(node_atoms, key=lambda i: np.linalg.norm(supercell[i].coords - ctr))
+                sc_center_idx = min(node_atoms, key=lambda i: round(float(np.linalg.norm(supercell[i].coords - ctr)), 3))
 
             node_comps = []
             seen = set()
@@ -7454,7 +7478,7 @@ class COFFragmenter(BaseFragmenter):
                 if i_cores:
                     def _ctr(core):
                         return np.mean([supercell[ii].coords for ii in core], axis=0)
-                    center_core = min(i_cores, key=lambda c: np.linalg.norm(_ctr(c) - ctr))
+                    center_core = min(i_cores, key=lambda c: round(float(np.linalg.norm(_ctr(c) - ctr)), 3))
                     core_nodes = set(center_core)
                     node_atoms = set().union(*i_cores)
                     node_species = {"C"}
@@ -7463,7 +7487,7 @@ class COFFragmenter(BaseFragmenter):
                     else:
                         c_in_core = [ii for ii in center_core if sc_sym[ii] == "C"]
                         pool = c_in_core if c_in_core else list(center_core)
-                        sc_center_idx = min(pool, key=lambda ii: np.linalg.norm(supercell[ii].coords - ctr))
+                        sc_center_idx = min(pool, key=lambda ii: round(float(np.linalg.norm(supercell[ii].coords - ctr)), 3))
                     path_mode = "I"
                     print(f"  -> COF Path I (COF-108 tetra-C node SBU). cores: {len(i_cores)}, core size: {len(center_core)}")
 
@@ -7493,7 +7517,7 @@ class COFFragmenter(BaseFragmenter):
 
             layered_component_count = 1
             if path_mode == "A" and layered_candidates:
-                layered_candidates.sort(key=lambda x: x[0])
+                layered_candidates.sort(key=lambda x: round(x[0], 3))
                 best_d, best_comp, best_pair = layered_candidates[0]
                 if 1.0 <= best_d <= 4.5:
                     if best_pair is not None:
@@ -7537,7 +7561,7 @@ class COFFragmenter(BaseFragmenter):
                 if center_idx >= 0:
                     sc_center_idx = center_idx
                 else:
-                    sc_center_idx = min(c4_nodes, key=lambda i: np.linalg.norm(supercell[i].coords - ctr))
+                    sc_center_idx = min(c4_nodes, key=lambda i: round(float(np.linalg.norm(supercell[i].coords - ctr)), 3))
                 core_nodes = {sc_center_idx}
                 path_mode = "C"
                 print(f"  -> COF Path C (Tetra-C node). Node candidates: {len(c4_nodes)}")
@@ -7609,7 +7633,7 @@ class COFFragmenter(BaseFragmenter):
                         pool = [j for j in near[i] if j > i]
                         if len(pool) > 24:
                             pool = sorted(pool,
-                                          key=lambda j: float(np.linalg.norm(_mi(i, j))))[:24]
+                                          key=lambda j: (round(float(np.linalg.norm(_mi(i, j))), 3), j))[:24]
                         for trio in itertools.combinations(sorted(pool), 3):
                             quad = (i,) + trio
                             key = tuple(sorted(quad))
@@ -7668,12 +7692,12 @@ class COFFragmenter(BaseFragmenter):
                     # pick core nearest supercell center
                     def core_ctr(core):
                         return np.mean([supercell[i].coords for i in core], axis=0)
-                    core_nodes = min(porph_cores, key=lambda c: np.linalg.norm(core_ctr(c) - ctr))
+                    core_nodes = min(porph_cores, key=lambda c: round(float(np.linalg.norm(core_ctr(c) - ctr)), 3))
                     node_atoms = set().union(*porph_cores)
                     if center_idx >= 0:
                         sc_center_idx = center_idx
                     else:
-                        sc_center_idx = min(core_nodes, key=lambda i: np.linalg.norm(supercell[i].coords - ctr))
+                        sc_center_idx = min(core_nodes, key=lambda i: round(float(np.linalg.norm(supercell[i].coords - ctr)), 3))
                     path_mode = "D"
                     print(f"  -> COF Path D (Porphyrin core). N-rich cores: {len(porph_cores)}")
                 else:
@@ -7690,7 +7714,7 @@ class COFFragmenter(BaseFragmenter):
                     else:
                         sc_center_idx = min(
                             _metal_sites or (i for i in range(len(supercell)) if sc_sym[i] != "H"),
-                            key=lambda i: np.linalg.norm(supercell[i].coords - ctr),
+                            key=lambda i: (round(float(np.linalg.norm(supercell[i].coords - ctr)), 3), i),
                         )
                     core_nodes = {sc_center_idx}
                     print("  -> COF Path A (Fallback single-center mode"
@@ -7843,7 +7867,7 @@ class COFFragmenter(BaseFragmenter):
 
                 if best_comp:
                     carb = [i for i in best_comp if sc_sym[i] == "C"]
-                    carb.sort(key=lambda i: float(np.linalg.norm(np.array(unwrapped[i], dtype=float) - center_cart)))
+                    carb.sort(key=lambda i: round(float(np.linalg.norm(np.array(unwrapped[i], dtype=float) - center_cart)), 3))
                     ring = set(carb[:6])
 
                     # extend ring to connected carbons if needed
@@ -8001,7 +8025,7 @@ class COFFragmenter(BaseFragmenter):
 
                 v0_pos = np.array(unwrapped[v0], dtype=float)
                 carb2 = [i for i in comp2 if sc_sym[i] == "C"]
-                carb2.sort(key=lambda i: float(np.linalg.norm(np.array(unwrapped[i], dtype=float) - v0_pos)))
+                carb2.sort(key=lambda i: round(float(np.linalg.norm(np.array(unwrapped[i], dtype=float) - v0_pos)), 3))
                 ring2 = set(carb2[:6])
 
                 qext2 = deque(list(ring2))
@@ -8070,7 +8094,7 @@ class COFFragmenter(BaseFragmenter):
                 cand_pairs = nn_pairs if nn_pairs else boundary_pairs
                 cand_pairs = sorted(
                     cand_pairs,
-                    key=lambda uv: float(np.linalg.norm(np.array(unwrapped[uv[1]], dtype=float) - center_cart)),
+                    key=lambda uv: round(float(np.linalg.norm(np.array(unwrapped[uv[1]], dtype=float) - center_cart)), 3),
                 )
                 target_count = 1 if minimize else 3
                 selected_pairs = []

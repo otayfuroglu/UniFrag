@@ -2564,3 +2564,10 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - First attempt changed only the cap length and the oxygen rule; the 614-MOF test showed the new caps disappearing. Traced locally on ABEDAQ: placed at 1.42 A, returned by `_get_fragment`, then deleted by `enforce_single_molecule` because the MOF bond rule capped any H bond at 1.2 A. The bond-perception change fixed it.
 - Found while validating, not fixed: **bio output is not reproducible run to run** - two runs of the committed code on `test_on_bio_mol` differ in every frame's H positions (PDBFixer); with `--no-pdbfixer` the output is byte-identical between runs and between old and new code.
 
+## [2026-10-29] GitHub issue #2 closed; issue #6 fixed (code change, see project-decisions.md)
+- #2 closed as not planned (by design, Decision 2026-10-26).
+- #6: `fragmentation_oop.py` COFFragmenter - rounded comparisons/rankings at 29 sites listed in the decision. Tooling (scratchpad, not committed): `perturb_run.py` (seeded 1e-6 A coordinate noise via patched pymatgen loaders), `trace_run.py` (per-method discrete-result fingerprints to find the first divergence between two seeds), `ptest.sh` (6-run perturbation test on the 11 structures).
+- Progression of the local perturbation test on the 11: 8 unstable -> 7 (partner ranking + dimer contact) -> 4 (centre selections) -> 1 (sorts) -> 0 (fallback centre, pool trim, cap-relief order). Full 884 then exposed 413 (crystal-contact overlap), fixed and confirmed stable over 8 local seeds and the full-884 noise run.
+- ARF runs: v10_dbg 6861152, v10_smp 6861153, v10_p1 6861154, v10_p2 6861155, v11_dbg 6870959, v11_p2 6870960. All MUST passed, odd 0, frames 1808, bad caps 55, clashing 16.
+- Found on the way: the debug run's `run_*.out` from job 6830974 had lost every line for some structures (pool worker stdout), so ARF logs cannot be trusted for per-structure comparison; single-worker local logs were used instead.
+
