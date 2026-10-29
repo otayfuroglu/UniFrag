@@ -2571,3 +2571,10 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - ARF runs: v10_dbg 6861152, v10_smp 6861153, v10_p1 6861154, v10_p2 6861155, v11_dbg 6870959, v11_p2 6870960. All MUST passed, odd 0, frames 1808, bad caps 55, clashing 16.
 - Found on the way: the debug run's `run_*.out` from job 6830974 had lost every line for some structures (pool worker stdout), so ARF logs cannot be trusted for per-structure comparison; single-worker local logs were used instead.
 
+
+## [2026-10-30] Issue #6: stacking side made reproducible (code change, see project-decisions.md, #6 addendum)
+- `fragmentation_oop.py`: module helper `_tol_less`; `COFFragmenter._find_stacked_partner` - shift measured on the cap-free `probe` atoms, `lattice_reduce` and the final ranking compare with a 0.01 A / 0.5 degree tolerance, remaining ties go to the layer below (`side_of`, against the lattice vector most parallel to the normal).
+- Diagnosis: instrumented copy printing every candidate under 1e-6 A noise seeds (scratchpad `stk/`). 635: the 90-degree rotoinversion's image went above or below depending on the all-atom centroid (cap H). 927: exact +c/-c tie decided by noise in `lattice_reduce`.
+- ARF runs: v11b_dbg 6875338 / v11b_smp 6875339 (prefer above - 805 frames moved vs old code, rejected), v11c_dbg 6875475 / v11c_smp 6875566 (prefer below - committed). Numbers in the decision.
+- Mistake on the way, repaired: the first launch reused the existing `unifrag_884_v11_dbg` (the 2026-10-29 #6 validation run, job 6870959). The job was cancelled before it started, so its outputs are intact; its `code/fragmentation_oop.py` was overwritten and restored from `unifrag_884_v11_p2/code` (md5 equal to 6cc0a9a), and a stray `code/code` copy removed. The other half of that launch is `unifrag_884_v11_smp_ABORTED` (safe to delete). New run dirs are now checked for existence before creating.
+- Downstream: the 18 moved frames and the 3 changed labels need their QM inputs rebuilt; old GBW restarts for them will not match the geometry.

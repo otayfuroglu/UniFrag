@@ -230,6 +230,17 @@ def _natural_sort_key(path):
 _SYMMETRY_DUPLICATE_TOL = 0.10
 
 
+def _tol_less(a, b, tol):
+    """Lexicographic `a < b` where entries within `tol` count as equal, so
+    float noise never decides between geometrically equivalent choices."""
+    for x, y in zip(a, b):
+        if x < y - tol:
+            return True
+        if x > y + tol:
+            return False
+    return False
+
+
 def _merge_symmetry_duplicates(struct, tol=_SYMMETRY_DUPLICATE_TOL):
     """Copy of `struct` with same-element sites closer than `tol` merged
     (the higher index removed). Used only for judging a parent in the
@@ -4012,9 +4023,29 @@ class COFFragmenter(BaseFragmenter):
         else:
             probe_idx = list(range(len(coords)))
         probe = np.arange(len(coords))[probe_idx]
+        probe_centroid = pts[probe].mean(axis=0)
         hc = heavy.mean(axis=0)
         normal = np.linalg.svd(heavy - hc, full_matrices=False)[2][-1]
         lat = np.array(struct.lattice.matrix, dtype=float)
+        # The layer above and the layer below are equally good partners, and
+        # in an exactly symmetric stack nothing measured tells them apart -
+        # float noise did (#6: 927's +c/-c, 635's mirror image). Treat values
+        # within this tolerance as equal and settle such a tie on a fixed
+        # side: BELOW, i.e. against the lattice vector closest to the normal
+        # (the SVD normal's own sign is arbitrary). Below is the side the old
+        # enumeration order mostly landed on; preferring above moved 805 of
+        # 1808 frames by one interlayer step, below moves 18.
+        tie_tol = 0.01
+        k_up = max(
+            range(3),
+            key=lambda k: round(abs(float(np.dot(lat[k] / np.linalg.norm(lat[k]),
+                                                 normal))), 3),
+        )
+        up = lat[k_up]
+
+        def side_of(vec):
+            """0 (preferred) for the layer below (against `up`), 1 above."""
+            return 0 if float(np.dot(vec, up)) < 0 else 1
 
         def lattice_reduce(shift):
             """Slide a displacement LATERALLY by lattice vectors so the copy sits
@@ -4036,8 +4067,8 @@ class COFFragmenter(BaseFragmenter):
                         lateral = float(
                             np.linalg.norm(cand - np.dot(cand, normal) * normal)
                         )
-                        key = (round(lateral, 6), round(sep, 6))
-                        if best_key is None or key < best_key:
+                        key = (lateral, sep, side_of(cand))
+                        if best_key is None or _tol_less(key, best_key, tie_tol):
                             best_key, best = key, cand
             return shift if best is None else best
 
@@ -4116,7 +4147,12 @@ class COFFragmenter(BaseFragmenter):
                 moved = (pts - centroid_all) @ R.T + centroid_all + t
             else:
                 moved = pts @ R.T + t
-            raw = moved.mean(axis=0) - centroid_all
+            # Measure the shift on the crystal's own atoms. Under an improper
+            # operation (635: a 90-degree rotoinversion) the copy's height
+            # depends on where the centroid sits relative to the mirror plane,
+            # and with the capping hydrogens counted, rotating one cap by a
+            # few hundredths of an angstrom put the layer above or below.
+            raw = moved[probe].mean(axis=0) - probe_centroid
             delta = lattice_reduce(raw)
             t_fixed = t + (delta - raw)
             if local:
@@ -4145,7 +4181,7 @@ class COFFragmenter(BaseFragmenter):
             # without this tie-break different fragments of one structure can
             # pick different equivalent operations - then the roomiest contact.
             return (float(np.linalg.norm(delta)), rotation_angle(R), -contact,
-                    R, t_fixed, sep, lateral, local)
+                    R, t_fixed, sep, lateral, local, side_of(delta))
 
         candidates = []
         eye = np.eye(3)
@@ -4211,14 +4247,18 @@ class COFFragmenter(BaseFragmenter):
 
         if not candidates:
             return None
-        # Rank on ROUNDED keys (0.001 A, 0.1 degree). The layer above (+c) and
-        # the layer below (-c) are equally good partners whose |shift| agrees
-        # only to rounding noise, so on raw floats the choice between them
-        # changed with the CPU (#6: 1112's node). Exact ties now keep the
-        # deterministic enumeration order (+axis before -axis).
-        candidates.sort(key=lambda x: (round(x[0], 3), round(x[1], 1),
-                                       round(x[2], 3)))
-        _, angle, neg_contact, R, t, sep, lateral, local = candidates[0]
+        # Rank with a tolerance (0.01 A, 0.5 degree), never on raw floats. The
+        # layer above (+c) and the layer below (-c) are equally good partners
+        # whose |shift| agrees only to rounding noise, so on raw floats the
+        # choice between them changed with the CPU (#6: 1112's node), and
+        # rounding alone still split values that straddle a rounding step.
+        # A remaining tie goes to the layer below, then to enumeration order.
+        pool = candidates
+        for f, tol in ((lambda x: x[0], tie_tol), (lambda x: x[1], 0.5),
+                       (lambda x: x[2], tie_tol), (lambda x: x[8], 0)):
+            lo = min(f(x) for x in pool)
+            pool = [x for x in pool if f(x) <= lo + tol]
+        _, angle, neg_contact, R, t, sep, lateral, local, _side = pool[0]
         # Remember how close this stacking actually is, so the node and linker
         # blocks are judged against the same bar as the assembled fragment
         # rather than a flat 2.4 A they can never meet in a structure whose own
