@@ -2581,3 +2581,10 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 
 ## [2026-10-30] Issue #6 closed (docs only)
 - User decided the remaining cross-node capping-H orientation differences (~170 frames) are acceptable. `project-decisions.md` #6 addendum now says "accepted, not fixed"; #6 closed with a note. User had independently verified 6cc0a9a + 1cb2464 on 12 affected COFs (jobs 6875603 debug / 6875604 smp: 46/46 frames chemically identical, 0 heavy atoms moved). #5 was verified and closed by the user the same day.
+
+## [2026-10-30] Issues #7 and #8: sp2 cap direction and clash guard, no cap on saturated amine N (code change, see project-decisions.md)
+- `fragmentation_oop.py`: `BaseFragmenter.enforce_sp2_capped_h_geometry` (exactly two non-metal partners), new `BaseFragmenter._clear_sp2_cap` + `_SP2_CAP_CLEARANCE`, new hook `_drop_caps_on_saturated_n` called first in `fix_odd_electron_multiplicity` (no-op in base), `MOFFragmenter._drop_caps_on_saturated_n`.
+- User decision: skip the cap on a tertiary amine N (applied to any N with three non-metal partners).
+- Local: 21 issue structures (GUPBEF, OQIVUW, OQIWAD, TIRQER, UKAJUN not found under those names in the 1110 set), 61 frames, all issue frames fixed, 33 byte-identical.
+- ARF: `unifrag_zn1110_old` (6879505), `unifrag_zn1110_new` (6879522), `unifrag_884_v12_dbg` (6879523). Comparison script `reviewer_tmp/cmp78.py` (old vs new extxyz: cap contacts, H bonded to two heavy atoms, N with >3 non-metal partners, parity, per-frame change class). Numbers in the decision.
+- Follow-up: FIDMELFragMof is now quarantined (odd electron from the cut hydroxide chain); fixing it needs a MOF parity site on a bridging O and is not done. Downstream QM inputs for the 112 changed MOF frames (and COF 1112, 1234OnlyLinker) need regenerating.

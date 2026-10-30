@@ -641,10 +641,16 @@ class BaseFragmenter:
             if parent is None or species[parent] not in ("C", "N"):
                 continue
 
-            nbs = heavy_neighbors(parent)
-            if len(nbs) < 2:
+            # sp2 means exactly two sigma partners. With a third (a tertiary
+            # amine N, an sp3 bridgehead C) -(u0 + u1) points straight down
+            # that third bond: caps in ETIXIQ, PUWCUF, AMILUE landed 0.46-1.20 A
+            # from it (#7). Such a cap keeps its place_capping_h direction,
+            # which follows the cut bond. A metal contact is not a sigma
+            # partner, so it neither adds a third nor makes up a second.
+            nbs = [j for j in heavy_neighbors(parent) if species[j] not in self.METALS]
+            if len(nbs) != 2:
                 continue
-            
+
             h_nbs = 0
             ci = np.array(coords[parent], dtype=float)
             for j, spj in enumerate(species):
@@ -653,7 +659,7 @@ class BaseFragmenter:
                 d = np.linalg.norm(ci - np.array(coords[j], dtype=float))
                 if self.is_valid_bond(species[parent], "H", d):
                     h_nbs += 1
-            if len(nbs) == 2 and h_nbs >= 2:
+            if h_nbs >= 2:
                 continue
 
             p = np.array(coords[parent], dtype=float)
@@ -717,7 +723,63 @@ class BaseFragmenter:
             # ---------------------------------------------
 
             bl = self.cap_bond_length(species[parent])
-            coords[hidx] = p + bl * dvec
+            coords[hidx] = self._clear_sp2_cap(species, coords, hidx, parent, nbs, u, bl, dvec)
+
+    # An sp2 cap is moved off its ideal bisector only when that lands closer
+    # than this to an atom outside its own C(X)(Y)-H unit. Same 1.5 A that
+    # place_capping_h demands of a new H, so this pass never undoes it.
+    _SP2_CAP_CLEARANCE = 1.5
+
+    def _clear_sp2_cap(self, species, coords, hidx, parent, nbs, u, bl, dvec):
+        """Position for an sp2 cap: the ideal bisector, unless that is occupied.
+
+        The bisector used to be written unconditionally, over a position
+        place_capping_h had already deflected clear. Two cut carbons facing
+        across a cleft (CADCOD, 2.09 A apart) or a parent H on the bisector
+        (NUFBOH, QEWSAP) then put two hydrogens 0.50-0.66 A apart (#8).
+
+        A blocked cap first splays within its own sigma plane, up to 20
+        degrees and smallest turn first, so it stays planar (Decision
+        2026-05-12; the same search COF's _relieve_cap_clashes uses). Only if
+        no splay clears 1.2 A - a genuine collision - does it fall back to the
+        position it already had, and only when that one is roomier.
+        """
+        p = np.array(coords[parent], dtype=float)
+        skip = {hidx, parent, *nbs}
+        others = [np.asarray(coords[j], dtype=float) for j in range(len(species)) if j not in skip]
+
+        def gap(pos):
+            return min((float(np.linalg.norm(pos - q)) for q in others), default=float("inf"))
+
+        ideal = p + bl * dvec
+        best_pos, best_gap = ideal, gap(ideal)
+        if best_gap >= self._SP2_CAP_CLEARANCE:
+            return ideal
+        nrm = np.cross(u[0], u[1])
+        side = np.cross(nrm, dvec)
+        if np.linalg.norm(nrm) > 1e-6 and np.linalg.norm(side) > 1e-6:
+            side = side / np.linalg.norm(side)
+            for deg in range(2, 21, 2):
+                r = np.deg2rad(deg)
+                # Both signs at each angle, roomier first: which one is "+"
+                # depends on the order of two near-equal bond lengths, so it
+                # must not decide anything.
+                pair = []
+                for s in (1.0, -1.0):
+                    cand = p + bl * (np.cos(r) * dvec + s * np.sin(r) * side)
+                    pair.append((gap(cand), cand))
+                pair.sort(key=lambda x: -x[0])
+                g, cand = pair[0]
+                if g >= self._SP2_CAP_CLEARANCE:
+                    return cand
+                if g > best_gap + 1e-6:
+                    best_pos, best_gap = cand, g
+        if best_gap >= 1.2:
+            return best_pos
+        here = np.array(coords[hidx], dtype=float)
+        if abs(float(np.linalg.norm(here - p)) - bl) < 0.05 and gap(here) > best_gap + 1e-6:
+            return here
+        return best_pos
 
 
     def enforce_capped_oh_geometry(self, species, coords, capped_h_indices=None):
@@ -1088,7 +1150,15 @@ class BaseFragmenter:
         """
         return species, coords, capped_h_indices
 
+    def _drop_caps_on_saturated_n(self, species, coords, capped_h_indices, label=""):
+        """Hook: remove caps that over-fill a nitrogen. No-op here, so COF and
+        macromolecule output is unchanged; MOFFragmenter overrides it."""
+        return species, coords, capped_h_indices
+
     def fix_odd_electron_multiplicity(self, species, coords, capped_h_indices, label):
+        species, coords, capped_h_indices = self._drop_caps_on_saturated_n(
+            species, coords, capped_h_indices, label=label
+        )
         _n_before_dedupe = len(species)
         species, coords, capped_h_indices = self._dedupe_superimposed_atoms(
             species, coords, capped_h_indices, label=label
@@ -1776,6 +1846,71 @@ class MOFFragmenter(BaseFragmenter):
         if s1_str in self.LARGE_NON_METALS or s2_str in self.LARGE_NON_METALS:
             return dist < 2.2
         return dist < 1.8
+
+    def _drop_caps_on_saturated_n(self, species, coords, capped_h_indices, label=""):
+        """MOF: a nitrogen with three non-metal partners takes no cap (#7).
+
+        An amine donor that loses its metal bond is already a neutral,
+        closed-shell amine. Every capping path capped the cut anyway - the
+        DABCO N of AMILUE, the N(CH2PO3)3 of ELIYUU, FOXHAE, FULWAN, RUFRIV,
+        YASLOW - giving HN(C)3, an ammonium that is odd-electron when written
+        neutral. The same holds whenever the three partners include H
+        (secondary and primary amine donors), so partners are counted, not
+        heavy atoms. Metals do not count. Caps on the nitrogen beyond three
+        partners are removed, most crowded first; the parity repair that
+        follows settles the electron count.
+
+        Excluded: carbon (a fourth H on a three-coordinate C is a real sp3
+        C-H) and P/S (phosphonium/sulfonium caps are a separate open question,
+        #5). Imidazolate, pyrazolate and pyridine N have two partners and are
+        unaffected.
+        """
+        caps = [h for h in capped_h_indices if 0 <= h < len(species) and species[h] == "H"]
+        if not caps:
+            return species, coords, capped_h_indices
+        pos = np.array(coords, dtype=float)
+
+        def dist(i, j):
+            return float(np.linalg.norm(pos[i] - pos[j]))
+
+        caps_on = {}
+        for h in caps:
+            parent, best = None, float("inf")
+            for j, sp in enumerate(species):
+                if sp == "H" or sp in self.METALS:
+                    continue
+                d = dist(h, j)
+                if self.is_valid_bond("H", sp, d) and d < best:
+                    parent, best = j, d
+            if parent is not None and species[parent] == "N":
+                caps_on.setdefault(parent, []).append(h)
+
+        drop = set()
+        for n_idx, n_caps in sorted(caps_on.items()):
+            partners = [
+                j for j, sp in enumerate(species)
+                if j != n_idx and sp not in self.METALS
+                and self.is_valid_bond("N", sp, dist(n_idx, j))
+            ]
+            excess = len(partners) - 3
+            if excess <= 0:
+                continue
+
+            def crowding(h):
+                return min((dist(h, j) for j in range(len(species)) if j not in (h, n_idx)),
+                           default=float("inf"))
+
+            ranked = sorted(n_caps, key=lambda h: (round(crowding(h), 3), h))
+            drop.update(ranked[:min(excess, len(ranked))])
+
+        if not drop:
+            return species, coords, capped_h_indices
+        keep = [i for i in range(len(species)) if i not in drop]
+        remap = {old: new for new, old in enumerate(keep)}
+        print(f"  -> MOF caps: removed {len(drop)} capping H from saturated amine N "
+              f"in '{label}'.")
+        return ([species[i] for i in keep], [coords[i] for i in keep],
+                [remap[h] for h in capped_h_indices if h in remap])
 
     # ------------------------------------------------------------------
     # Parent pre-scan (MOF)
