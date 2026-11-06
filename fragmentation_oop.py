@@ -21,6 +21,15 @@ class FragmentResult:
     # carrying the list out to the extxyz lets the QA report say so instead of
     # judging every pair of atoms in the fragment.
     capped_h: list = None
+    # Closed-shell formal charge (metal oxidation states + organic charges),
+    # set by the MOF path; None means it could not be judged. The fragment is
+    # written charge=0, so the MOF writer quarantines anything but 0 (#9).
+    # COF and macromolecule results keep the default and are not judged.
+    formal_charge: object = 0
+    # Net formal charge of the parent cell (MOF only; None = cannot judge).
+    # Nonzero means this fragment was neutralised by caps, not by the parent's
+    # own protons; the writer records it as parent_charge=.
+    parent_charge: object = 0
 
 
 _EXTXYZ_Z = {
@@ -91,6 +100,197 @@ def _is_quaternary_ammonium(idx, species, coords):
     return len(near) == 4 and all(
         species[j] == "C" and 1.40 < d[j] < 1.60 for j in near
     )
+
+
+# ---------------------------------------------------------------------------
+# Closed-shell formal charge (#9)
+#
+# A fragment is written with charge=0, so its organic part must carry exactly
+# the charge that cancels the metals. These helpers find the formal charge of
+# each non-metal molecule from its bond graph alone: every heavy atom has a
+# neutral valence v, and its v - degree free valences must be paired into pi
+# bonds with bonded neighbours. An unpaired free valence is a lone pair, a -1
+# charge; N and P may take one extra bond as +1 (ammonium, pyridinium). The
+# pairing is a maximum-weight matching, solved per pi system, whose weights
+# make the structure minimise implausible charges (any charge on C/B/Si, or +
+# on O/halogen), then charged atoms, then prefer more pi bonds. RDKit's
+# DetermineBondOrders gives the same answer on clean molecules but needs hours
+# on a 900-atom frame and turns pyridinium into carbanions.
+# ---------------------------------------------------------------------------
+_FC_BAD = 1000000      # weight of one implausible charge
+_FC_CHG = 1000         # weight of one other charged atom
+_FC_BOND = 1           # bonus per pi bond
+# element -> (neutral valences, may take an onium bond, unpaired-valence class)
+_FC_VALENCE = {
+    "C": ((4,), False, "bad"), "Si": ((4,), False, "bad"), "B": ((3,), False, "bad"),
+    "N": ((3,), True, "chg"), "O": ((2,), False, "chg"),
+    "S": ((2, 4, 6), False, "chg"), "Se": ((2, 4, 6), False, "chg"),
+    "P": ((3, 5), True, "chg"),
+    "F": ((1,), False, "chg"), "Cl": ((1, 3, 5, 7), False, "chg"),
+    "Br": ((1, 3, 5, 7), False, "chg"), "I": ((1, 3, 5, 7), False, "chg"),
+}
+
+
+def _fc_states(species, adj, i):
+    """Valence states of atom i as [(free valences, fixed charge, onium)],
+    or None for an element with no closed-shell reading here."""
+    s = species[i]
+    if s not in _FC_VALENCE:
+        return None
+    d = len(adj[i])
+    vals, onium, _ = _FC_VALENCE[s]
+    if len(vals) > 1 and not any(
+            species[j] in ("O", "N") and len(adj[j]) == 1 for j in adj[i]):
+        # Expanded valence only toward a terminal O/N (S=O, P=O, Cl=O); a
+        # thioether or thiophene S is divalent.
+        vals = vals[:1]
+    # Onium (one bond more, +1) only from the normal valence: phosphonium,
+    # never a six-bonded P+.
+    out = [(v - d, 0, onium and v == vals[0]) for v in vals if d <= v]
+    if not out and d == vals[-1] + 1:
+        if s in ("N", "P", "S", "Se", "O"):
+            out = [(0, +1, False)]          # ammonium, sulfonium, oxonium
+        elif s == "B":
+            out = [(0, -1, False)]          # borate
+    return out or None
+
+
+def _fc_atom_flags(sym, q):
+    """(implausible, charged) for an atom of element sym with charge q."""
+    if not q:
+        return 0, 0
+    if sym in ("C", "Si", "B") and not (sym == "B" and q == -1):
+        return 1, 0
+    if q > 0 and sym in ("O", "F", "Cl", "Br", "I"):
+        return 1, 0
+    return 0, 1
+
+
+def _fc_solve(species, atoms, adj, pick):
+    """Best pairing of one pi system for fixed valence states.
+    Returns (charge, implausible, charged, {atom: charge})."""
+    import networkx as nx
+    inside = set(atoms)
+    slots, gain, base = {}, {}, {}
+    for i in atoms:
+        m, fq, onium = pick[i]
+        unf = _FC_BAD if _FC_VALENCE[species[i]][2] == "bad" else _FC_CHG
+        base[i] = fq - m
+        slots[i] = [(i, k) for k in range(m)]
+        for s in slots[i]:
+            gain[s] = unf
+        if onium:
+            s = (i, m)
+            slots[i].append(s)
+            gain[s] = -_FC_CHG
+    g = nx.Graph()
+    for i in atoms:
+        for j in adj[i]:
+            if j <= i or j not in inside:
+                continue
+            for a in slots[i]:
+                for b in slots[j]:
+                    w = gain[a] + gain[b] + _FC_BOND
+                    if w > 0:
+                        g.add_edge(a, b, weight=w)
+    charge = dict(base)
+    if g.number_of_edges():
+        for a, b in nx.max_weight_matching(g):
+            charge[a[0]] += 1
+            charge[b[0]] += 1
+    bad = chg = 0
+    for i, q in charge.items():
+        b, c = _fc_atom_flags(species[i], q)
+        bad += b
+        chg += c
+    return sum(charge.values()), bad, chg, charge
+
+
+def _fc_molecule(species, comp, adj, cache=None):
+    """(charge, implausible, charged, {atom: charge}) of the best closed-shell
+    structure of one molecule, or None when it has none (a bare or bridging
+    H, an element outside the table, too many S/P states to enumerate)."""
+    import itertools
+    for i in comp:
+        if species[i] == "H" and len(adj[i]) != 1:
+            return None
+    heavy = [i for i in comp if species[i] != "H"]
+    if not heavy:
+        return None
+    states = {}
+    for i in heavy:
+        st = _fc_states(species, adj, i)
+        if st is None:
+            return None
+        states[i] = st
+    pi_atoms = {i for i in heavy if any(m > 0 or on for m, _, on in states[i])}
+    q = bad = chg = 0
+    charges = {}
+    for i in heavy:
+        if i not in pi_atoms:
+            fq = states[i][0][1]
+            charges[i] = fq
+            b, c = _fc_atom_flags(species[i], fq)
+            q, bad, chg = q + fq, bad + b, chg + c
+    heavy_adj = {i: [j for j in adj[i] if j in pi_atoms] for i in pi_atoms}
+    for system in _fc_components(heavy_adj):
+        key = None
+        if cache is not None:
+            ring = set(system).union(*(adj[i] for i in system))
+            key = frozenset((i, len(adj[i])) for i in ring if species[i] != "H")
+            if key in cache:
+                res = cache[key]
+                if res is None:
+                    return None
+                sq, sb, sc, sch = res
+                q, bad, chg = q + sq, bad + sb, chg + sc
+                charges.update(sch)
+                continue
+        multi = [i for i in system if len(states[i]) > 1]
+        best = best_key = None
+        if len(multi) <= 8:
+            for choice in itertools.product(*[range(len(states[i])) for i in multi]):
+                pick = {i: states[i][0] for i in system}
+                for i, k in zip(multi, choice):
+                    pick[i] = states[i][k]
+                # The matching's pi-bond bonus cannot tell a nitro O=N+-O-
+                # (net 0) from a triazolate read as C=N+=C (net +1 instead of
+                # -1): both take one onium bond for one more pi bond. Solve
+                # with and without onium bonds and let |charge| decide; on a
+                # tie the anion wins.
+                variants = [pick]
+                if any(on for _, _, on in pick.values()):
+                    variants.append({i: (m, fq, False) for i, (m, fq, _) in pick.items()})
+                for onium_off, v in enumerate(variants):
+                    res = _fc_solve(species, system, adj, v)
+                    key = (res[1], res[2], abs(res[0]), 1 - onium_off if len(variants) > 1 else 0)
+                    if best_key is None or key < best_key:
+                        best, best_key = res, key
+        if cache is not None:
+            cache[key] = best
+        if best is None:
+            return None
+        q, bad, chg = q + best[0], bad + best[1], chg + best[2]
+        charges.update(best[3])
+    return q, bad, chg, charges
+
+
+def _fc_components(adj):
+    seen, comps = set(), []
+    for i in sorted(adj):
+        if i in seen:
+            continue
+        stack, comp = [i], []
+        seen.add(i)
+        while stack:
+            c = stack.pop()
+            comp.append(c)
+            for nb in adj[c]:
+                if nb not in seen:
+                    seen.add(nb)
+                    stack.append(nb)
+        comps.append(sorted(comp))
+    return comps
 
 
 def _write_extxyz(filepath, species, coords, label, extra="", capped_h=None,
@@ -1155,10 +1355,24 @@ class BaseFragmenter:
         macromolecule output is unchanged; MOFFragmenter overrides it."""
         return species, coords, capped_h_indices
 
+    def _balance_formal_charge(self, species, coords, capped_h_indices, label=""):
+        """Hook: make the fragment's formal charge zero. Returns (species,
+        coords, capped_h, balanced). No-op here, so COF and macromolecule
+        output is unchanged; MOFFragmenter overrides it (#9)."""
+        return species, coords, capped_h_indices, False
+
     def fix_odd_electron_multiplicity(self, species, coords, capped_h_indices, label):
         species, coords, capped_h_indices = self._drop_caps_on_saturated_n(
             species, coords, capped_h_indices, label=label
         )
+        species, coords, capped_h_indices, balanced = self._balance_formal_charge(
+            species, coords, capped_h_indices, label=label
+        )
+        if balanced:
+            # Net zero and closed-shell organic parts: any odd count left
+            # belongs to the metal (Cu(II) d9) and moving an H would only make
+            # the fragment charged again. The writer judges the parity.
+            return species, coords, capped_h_indices
         _n_before_dedupe = len(species)
         species, coords, capped_h_indices = self._dedupe_superimposed_atoms(
             species, coords, capped_h_indices, label=label
@@ -1911,6 +2125,327 @@ class MOFFragmenter(BaseFragmenter):
               f"in '{label}'.")
         return ([species[i] for i in keep], [coords[i] for i in keep],
                 [remap[h] for h in capped_h_indices if h in remap])
+
+    # ------------------------------------------------------------------
+    # Formal-charge balance (#9)
+    # ------------------------------------------------------------------
+    # Metals with one common oxidation state in MOFs. The others are read from
+    # the parent (see _metal_oxidation_states).
+    _OX_FIXED = {"Zn": 2, "Mg": 2, "Ni": 2, "Al": 3, "Zr": 4, "Ti": 4}
+    _OX_ALLOWED = {"Cu": (1, 2), "Co": (2, 3), "Mn": (2, 3, 4), "Fe": (2, 3),
+                   "Cr": (2, 3), "V": (3, 4)}
+
+    def _nonmetal_graph(self, species, coords):
+        """Bond graph of the non-metal atoms (is_valid_bond), plus the set of
+        non-metal atoms bonded to a metal in the same fragment."""
+        pos = np.asarray(coords, dtype=float)
+        n = len(species)
+        adj = {i: [] for i in range(n) if species[i] not in self.METALS}
+        bound = set()
+        if n < 2:
+            return adj, bound
+        D = np.linalg.norm(pos[:, None, :] - pos[None, :, :], axis=-1)
+        for i, j in zip(*np.where(np.triu(D < 2.7, 1))):
+            i, j = int(i), int(j)
+            mi, mj = species[i] in self.METALS, species[j] in self.METALS
+            if mi and mj:
+                continue
+            if not self.is_valid_bond(species[i], species[j], float(D[i, j])):
+                continue
+            if mi or mj:
+                bound.add(j if mi else i)
+            else:
+                adj[i].append(j)
+                adj[j].append(i)
+        return adj, bound
+
+    def _metal_oxidation_states(self, metals_present):
+        """{metal: oxidation state} for the metals of this structure, or None.
+
+        Zn, Mg, Ni, Al, Zr and Ti take their one common state. A metal with
+        several (Cu, Co, Mn, Fe, Cr, V) is read from the parent: the parent
+        cell is neutral, so its metals carry minus the formal charge of its
+        organic molecules. That works when the redox metal is the only one
+        whose state is open and the result is a whole, allowed state; a mixed-
+        valence or H-deficient parent gives None, and so does any metal
+        outside both tables.
+        """
+        open_metals = sorted(m for m in metals_present if m not in self._OX_FIXED)
+        ox = {m: self._OX_FIXED[m] for m in metals_present if m in self._OX_FIXED}
+        if not open_metals:
+            return ox
+        if len(open_metals) > 1 or open_metals[0] not in self._OX_ALLOWED:
+            return None
+        cache = getattr(self, "_parent_ox_cache", None)
+        struct = getattr(self, "structure", None)
+        if cache is not None and cache[0] is struct:
+            inferred = cache[1]
+        else:
+            inferred = self._infer_parent_metal_state(struct, open_metals[0])
+            self._parent_ox_cache = (struct, inferred)
+        if inferred is None:
+            return None
+        ox[open_metals[0]] = inferred
+        return ox
+
+    def _parent_organic_charge(self, struct):
+        """Formal charge of all non-metal molecules of the periodic parent, or
+        None when one has no closed-shell structure. Cached per structure."""
+        cache = getattr(self, "_parent_qorg_cache", None)
+        if cache is not None and cache[0] is struct:
+            return cache[1]
+        q_org = None
+        try:
+            species = [s.species_string for s in struct]
+            adj = {i: set() for i, s in enumerate(species) if s not in self.METALS}
+            centers, points, _images, dists = struct.get_neighbor_list(2.3)
+            for i, j, d in zip(centers, points, dists):
+                i, j = int(i), int(j)
+                if i == j or i not in adj or j not in adj:
+                    continue
+                if self.is_valid_bond(species[i], species[j], float(d)):
+                    adj[i].add(j)
+                    adj[j].add(i)
+            adj = {i: sorted(v) for i, v in adj.items()}
+            q_org = 0
+            for comp in _fc_components(adj):
+                res = _fc_molecule(species, comp, adj)
+                if res is None or res[1]:
+                    q_org = None
+                    break
+                q_org += res[0]
+        except Exception:
+            q_org = None
+        self._parent_qorg_cache = (struct, q_org)
+        return q_org
+
+    def parent_formal_charge(self):
+        """Net formal charge of the parent cell (metals + organic molecules).
+
+        Nonzero when the CIF is not charge-balanced as deposited: counter-ions
+        stripped from an ionic framework, or H missing. None when it cannot be
+        judged (an organic molecule without a closed-shell structure, a metal
+        outside the tables, or a redox metal whose state cannot be inferred).
+        A parent whose only open metal state was inferred is 0 by
+        construction. Recorded on every MOF fragment of such a parent
+        (parent_charge=), because its fragments were neutralised by caps
+        rather than by the parent's own protons (user decision 2026-11-06).
+        """
+        struct = getattr(self, "structure", None)
+        if struct is None:
+            return None
+        species = [s.species_string for s in struct]
+        ox = self._metal_oxidation_states({s for s in species if s in self.METALS})
+        q_org = self._parent_organic_charge(struct)
+        if ox is None or q_org is None:
+            return None
+        return sum(ox[s] for s in species if s in self.METALS) + q_org
+
+    def _infer_parent_metal_state(self, struct, metal):
+        if struct is None:
+            return None
+        try:
+            species = [s.species_string for s in struct]
+            q_org = self._parent_organic_charge(struct)
+            if q_org is None:
+                return None
+            n_open = sum(1 for s in species if s == metal)
+            q_fixed = sum(self._OX_FIXED[s] for s in species
+                          if s in self.METALS and s != metal and s in self._OX_FIXED)
+            if n_open == 0 or (-q_org - q_fixed) % n_open:
+                return None
+            state = (-q_org - q_fixed) // n_open
+            return state if state in self._OX_ALLOWED[metal] else None
+        except Exception:
+            return None
+
+    def formal_charge_of(self, species, coords):
+        """Closed-shell formal charge of a fragment: metal oxidation states
+        plus each non-metal molecule's charge. None when it cannot be judged
+        (unknown metal state, or a molecule with no closed-shell structure)."""
+        ox = self._metal_oxidation_states({s for s in species if s in self.METALS})
+        if ox is None:
+            return None
+        adj, _ = self._nonmetal_graph(species, coords)
+        total = sum(ox[s] for s in species if s in self.METALS)
+        for comp in _fc_components(adj):
+            res = _fc_molecule(species, comp, adj)
+            if res is None or res[1]:
+                return None
+            total += res[0]
+        return total
+
+    def _balance_formal_charge(self, species, coords, capped_h_indices, label=""):
+        """MOF: make the fragment's formal charge zero by removing or adding
+        capping H (#9). Returns (species, coords, capped_h, balanced).
+
+        Every metal a ligand loses is capped with one H, whatever charge that
+        ligand donated: CALF-20's triazolate N each took an H and left three
+        triazolium, so C8H13N9O4Zn sat at +4 while tagged charge=0, and a
+        carboxylate that lost metals from both O became C(OH)2, which has no
+        closed-shell structure at all.
+
+        Greedy, one H at a time. Each step takes the move that most improves
+        (implausible charges, |net charge|, charged atoms). Ties go to a move
+        on a molecule still bound to a metal (removal) or bound to none
+        (addition), then O before N before S/P, then the atom farthest from
+        any metal, then the lowest index. Moves:
+          - remove a capping H from N/O/S/P/Se (never a parent atom, never C);
+          - add an H to an N/O/S of a net-negative molecule, on an atom bonded
+            to no metal and carrying no H, placed and validated as the parity
+            repair does.
+        Success is net 0 with no implausible charge; the fragment is then
+        closed-shell whenever its metals are (Zn(II) d10), so the parity repair
+        must not move an H again. Anything short of that returns the input
+        unchanged and the writer quarantines the frame (charge).
+        """
+        metals_present = {s for s in species if s in self.METALS}
+        ox = self._metal_oxidation_states(metals_present)
+        if ox is None:
+            return species, coords, capped_h_indices, False
+        q_metal = sum(ox[s] for s in species if s in self.METALS)
+        sp = list(species)
+        co = [np.array(c, dtype=float) for c in coords]
+        caps = {h for h in capped_h_indices if 0 <= h < len(sp) and sp[h] == "H"}
+        adj, bound = self._nonmetal_graph(sp, co)
+        cache = {}
+        removed, added = set(), []
+        metal_pos = [co[i] for i in range(len(sp)) if sp[i] in self.METALS]
+
+        def evaluate(sp_, adj_):
+            tot_q, bad, chg = q_metal, 0, 0
+            comp_of, comp_q, charges = {}, {}, {}
+            for comp in _fc_components(adj_):
+                res = _fc_molecule(sp_, comp, adj_, cache)
+                if res is None:
+                    return None
+                tot_q, bad, chg = tot_q + res[0], bad + res[1], chg + res[2]
+                charges.update(res[3])
+                for i in comp:
+                    comp_of[i] = comp
+                    comp_q[i] = res[0]
+            return (bad, abs(tot_q), chg), tot_q, charges, comp_of, comp_q
+
+        def metal_dist(p):
+            if not metal_pos:
+                return 0.0
+            return round(min(float(np.linalg.norm(p - m)) for m in metal_pos), 3)
+
+        rank = {"O": 0, "N": 1}
+        max_h = {"O": 1, "S": 1, "N": 2}
+        for _step in range(2 * len(caps) + 50):
+            cur = evaluate(sp, adj)
+            if cur is None:
+                break
+            key, tot_q, charges, comp_of, comp_q = cur
+            if key[0] == 0 and tot_q == 0:
+                break
+            options = []
+            for h in sorted(caps):
+                if len(adj.get(h, [])) != 1:
+                    continue
+                p = adj[h][0]
+                if sp[p] not in ("N", "O", "S", "P", "Se"):
+                    continue
+                trial = {i: [j for j in v if j != h] for i, v in adj.items() if i != h}
+                res = evaluate(sp, trial)
+                if res is None:
+                    continue
+                on_metal = any(i in bound for i in comp_of[p])
+                options.append((res[0], 0 if on_metal else 1, rank.get(sp[p], 2),
+                                -metal_dist(co[h]), h, ("remove", h, trial)))
+            if tot_q < 0 or key[0]:
+                ghost = len(sp)
+                for a in sorted(charges):
+                    if comp_q[a] >= 0 or a in bound or sp[a] not in max_h:
+                        continue
+                    if len(adj[a]) > max_h[sp[a]] or any(sp[j] == "H" for j in adj[a]):
+                        continue
+                    trial = {i: list(v) for i, v in adj.items()}
+                    trial[a] = trial[a] + [ghost]
+                    trial[ghost] = [a]
+                    res = evaluate(sp + ["H"], trial)
+                    if res is None:
+                        continue
+                    on_metal = any(i in bound for i in comp_of[a])
+                    options.append((res[0], 1 if on_metal else 0, rank.get(sp[a], 2),
+                                    -metal_dist(co[a]), a, ("add", a, None)))
+            better = sorted((o for o in options if o[0] < key), key=lambda o: o[:5])
+            moved = False
+            for o in better:
+                kind, idx, trial = o[5]
+                if kind == "remove":
+                    adj = trial
+                    caps.discard(idx)
+                    removed.add(idx)
+                    moved = True
+                    break
+                new_h = self._place_balance_h(idx, sp, co, adj, removed)
+                if new_h is None:
+                    continue
+                adj[idx].append(new_h)
+                adj[new_h] = [idx]
+                caps.add(new_h)
+                added.append(new_h)
+                moved = True
+                break
+            if not moved:
+                break
+
+        final = evaluate(sp, adj)
+        if final is None or final[0][0] or final[1] != 0:
+            q = None if final is None else final[1]
+            print(f"  -> MOF charge: could not reach a neutral closed-shell structure "
+                  f"for '{label}' (formal charge {q}); left for quarantine.")
+            return species, coords, capped_h_indices, False
+        if not removed and not added:
+            return species, coords, capped_h_indices, True
+        keep = [i for i in range(len(sp)) if i not in removed]
+        new_index = {old: k for k, old in enumerate(keep)}
+        out_sp = [sp[i] for i in keep]
+        out_co = [co[i] for i in keep]
+        out_caps = sorted(new_index[h] for h in caps)
+        new_added = sorted(new_index[h] for h in added if h in new_index)
+        if new_added:
+            self.optimize_capped_h_geometry_only(out_sp, out_co, new_added)
+        print(f"  -> MOF charge: removed {len(removed)} and added {len(added)} "
+              f"capping H to make '{label}' neutral.")
+        return out_sp, out_co, out_caps, True
+
+    def _place_balance_h(self, a, species, coords, adj, ignore=()):
+        """Put one H on atom a, pointing away from its heavy neighbours, with
+        one bonded contact and >= 1.5 A to everything else. Returns its index
+        or None."""
+        pos = np.asarray(coords[a], dtype=float)
+        nbs = [j for j in adj[a] if species[j] != "H"]
+        if nbs:
+            vec = np.mean([pos - np.asarray(coords[j], dtype=float) for j in nbs], axis=0)
+        else:
+            vec = np.array([0.0, 0.0, 1.0])
+        if np.linalg.norm(vec) < 1e-9:
+            vec = np.array([0.0, 0.0, 1.0])
+        bl = self.cap_bond_length(species[a])
+        before = len(species)
+        for mhh in (1.5, 1.2):
+            self.place_capping_h(a, vec, bl, species, coords, min_hh=mhh, capped_h_flags=None)
+            if len(species) > before:
+                break
+        if len(species) == before:
+            return None
+        new = len(species) - 1
+        npos = np.asarray(coords[new], dtype=float)
+        contacts = sum(1 for j in range(new) if j not in ignore
+                       and self.is_valid_bond(species[j], "H",
+                                             float(np.linalg.norm(np.asarray(coords[j], dtype=float) - npos))))
+        nearest = min((float(np.linalg.norm(np.asarray(coords[j], dtype=float) - npos))
+                       for j in range(new) if j != a and j not in ignore),
+                      default=float("inf"))
+        if contacts != 1 or nearest < 1.5:
+            species.pop()
+            coords.pop()
+            return None
+        coords[new] = npos
+        return new
 
     # ------------------------------------------------------------------
     # Parent pre-scan (MOF)
@@ -3143,26 +3678,33 @@ class MOFFragmenter(BaseFragmenter):
                         minimize,
                         zif_mode,
                     )
+                    # _get_fragment records its caps on self; keep each
+                    # candidate's own list. Reading it after the loop gave the
+                    # chosen fragment the LAST candidate's indices (#9:
+                    # ADASOP's 300-atom pick inherited a 534-atom candidate's
+                    # list, so no cap was known to the parity repair or the
+                    # QA report).
+                    cand_caps = list(getattr(self, "_last_capped_h_indices", []))
                     sz = len(sp)
                     metal_ct = sum(1 for x in sp if x in metals)
                     dist_val = np.linalg.norm(candidate[2] - c1)
                     print(f"       Candidate {idx + 1} (dist {dist_val:.2f} A) -> {sz} atoms, {metal_ct} metals")
                     if sz < best_size or (sz == best_size and dist_val < best_dist):
                         best_size = sz
-                        best_result = (sp, co)
+                        best_result = (sp, co, cand_caps)
                         best_dist = dist_val
                     if metal_ct >= expected_metals:
                         if sz < best_valid_size or (sz == best_valid_size and dist_val < best_valid_dist):
                             best_valid_size = sz
-                            best_valid_result = (sp, co)
+                            best_valid_result = (sp, co, cand_caps)
                             best_valid_dist = dist_val
 
                 if best_valid_result is not None:
                     print(f"     Selected metal-complete SBU candidate yielding {best_valid_size} atoms.")
-                    final_species, final_coords = best_valid_result
+                    final_species, final_coords, self._last_capped_h_indices = best_valid_result
                 else:
                     print(f"     No metal-complete candidate found. Selected smallest candidate yielding {best_size} atoms.")
-                    final_species, final_coords = best_result
+                    final_species, final_coords, self._last_capped_h_indices = best_result
             else:
                 print("     Could not find adjacent SBU. Reverting to 1 SBU.")
                 core_metals = set(sbu_metals)
@@ -10108,7 +10650,23 @@ def _process_mof_file(args_tuple):
                         only_linker_res.append(qm_linker)
                     except Exception as e:
                         print(f"[{base}] Failed to generate QM-ready OnlyLinker fragment: {e}")
-                
+
+            # Judge every fragment's closed-shell formal charge here, where the
+            # parent (and so the metal oxidation states) is known; the writer
+            # quarantines anything that is not 0 (#9).
+            try:
+                _parent_q = frag.parent_formal_charge()
+            except Exception:
+                _parent_q = None
+            for _r in [res, res_min] + only_linker_res:
+                if _r is not None:
+                    _r.parent_charge = _parent_q
+                    try:
+                        _r.formal_charge = frag.formal_charge_of(_r.species, _r.coords)
+                    except Exception as _fc_err:
+                        print(f"[{base}] Formal-charge check failed: {_fc_err}")
+                        _r.formal_charge = None
+
         return {
             "cif": os.path.basename(cif_path),
             "norm_atoms": norm_atoms,
@@ -10304,7 +10862,8 @@ def main():
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
                     frag_name = f"{clean_base}FragMof{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
-                                             res_obj.capped_h))
+                                             res_obj.capped_h, res_obj.formal_charge,
+                                             res_obj.parent_charge))
 
             if r.get("only_linker_res"):
                 for idx, res_obj in enumerate(r["only_linker_res"]):
@@ -10320,7 +10879,8 @@ def main():
                     suffix = f"{idx}" if len(r["only_linker_res"]) > 1 else ""
                     frag_name = f"{clean_base}FragMofOnlyLinker{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
-                                             res_obj.capped_h))
+                                             res_obj.capped_h, res_obj.formal_charge,
+                                             res_obj.parent_charge))
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
 
@@ -10330,31 +10890,43 @@ def main():
             # in _flush_cof_result, judged with the repair's own count. Its key
             # is released so a later structure with the same skeleton can
             # still provide a closed-shell copy.
+            # A fragment is written charge=0, so its closed-shell formal
+            # charge (FragmentResult.formal_charge) must be 0 as well; one the
+            # charge balance could not neutralise, or could not judge (None),
+            # is held the same way (#9).
+            # parent_charge= marks a fragment of a parent that is not itself
+            # charge-balanced (written only then; "unknown" = cannot judge).
             clean_frags, odd_frags = [], []
-            for species, coords, frag_name, capped_h in new_extxyz_frags:
+            for species, coords, frag_name, capped_h, fq, pq in new_extxyz_frags:
+                ptag = "" if pq == 0 else f"parent_charge={'unknown' if pq is None else pq}"
                 z = MOFFragmenter._parity_z_sum(species)
                 if z % 2:
-                    odd_frags.append((species, coords, frag_name, capped_h, z))
-                    seen_keys.discard(
-                        MOFFragmenter._chemical_identity_key(species, coords))
-                    print(f"  -> QUARANTINED '{frag_name}': odd electron count "
-                          f"(Z_sum={z}); held in fragments_quarantine.extxyz, "
-                          f"not written to the main collection.")
+                    reason = f"quarantine=odd_electron zsum={z}"
+                    why = f"odd electron count (Z_sum={z})"
+                elif fq != 0:
+                    reason = f"quarantine=charge formal_charge={fq}"
+                    why = f"formal charge {fq}, not the written 0"
                 else:
-                    clean_frags.append((species, coords, frag_name, capped_h))
+                    clean_frags.append((species, coords, frag_name, capped_h, ptag))
+                    continue
+                reason = f"{reason} {ptag}".strip()
+                odd_frags.append((species, coords, frag_name, capped_h, reason))
+                seen_keys.discard(
+                    MOFFragmenter._chemical_identity_key(species, coords))
+                print(f"  -> QUARANTINED '{frag_name}': {why}; held in "
+                      f"fragments_quarantine.extxyz, not written to the main collection.")
 
             if is_dir:
                 with open(csv_path, "a") as f:
                     f.write(csv_row)
                 # capped_h records which atoms this code added, as for COF,
                 # so QA can tell them from the crystal's own atoms.
-                for species, coords, frag_name, capped_h in clean_frags:
+                for species, coords, frag_name, capped_h, ptag in clean_frags:
                     _write_extxyz(extxyz_path, species, coords, frag_name,
-                                  capped_h=capped_h)
-                for species, coords, frag_name, capped_h, z in odd_frags:
+                                  extra=ptag, capped_h=capped_h)
+                for species, coords, frag_name, capped_h, reason in odd_frags:
                     _write_extxyz(quarantine_path, species, coords, frag_name,
-                                  extra=f"quarantine=odd_electron zsum={z}",
-                                  capped_h=capped_h)
+                                  extra=reason, capped_h=capped_h)
             else:
                 base_name = r["cif"]
                 if base_name.endswith(".cif"): base_name = base_name[:-4]
@@ -10366,7 +10938,8 @@ def main():
                     [csv_row], 
                     "cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n"
                 )
-                _update_extxyz_collection(extxyz_path, clean_base, clean_frags)
+                _update_extxyz_collection(extxyz_path, clean_base,
+                                          [f[:4] for f in clean_frags])
                 if odd_frags or os.path.exists(quarantine_path):
                     _update_extxyz_collection(
                         quarantine_path, clean_base,

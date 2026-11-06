@@ -216,6 +216,13 @@ For each item:
 - Workaround:
 - Status:
 
+- ID: MOF-charge (GitHub #9)
+- Symptom: MOF fragments tagged `charge=0` whose closed-shell formal charge was not 0 (CALF-20 +4; C(OH)2 carboxylates in 905 of 1768 Zn frames).
+- Root cause: one cap per removed metal regardless of the charge the ligand donated; only parity was checked. Also the `_get_fragment` bridge-capping loop has no one-H-per-carboxylate guard.
+- Affected area: `MOFFragmenter` (all paths).
+- Workaround: none needed - fixed 2026-11-06: `_balance_formal_charge` neutralises by moving caps, the MOF writer quarantines `quarantine=charge`, `runUniFrag/check_mof_fragments.py` checks it. Fragments of parents that are not charge-balanced themselves carry `parent_charge=<q|unknown>`; filter on it if only neutral-parent chemistry is wanted.
+- Status: fixed; COF has 291/1809 frames with nonzero/undefined formal charge (not addressed, separate COF question).
+
 ## 9) Decisions Log (ADR-lite)
 
 ### Decision 2026-05-28: Heavy-Atom Formula-Only Chemical Identity Key for Robust Conformer Deduplication
