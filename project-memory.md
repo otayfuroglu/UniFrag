@@ -221,7 +221,19 @@ For each item:
 - Root cause: one cap per removed metal regardless of the charge the ligand donated; only parity was checked. Also the `_get_fragment` bridge-capping loop has no one-H-per-carboxylate guard.
 - Affected area: `MOFFragmenter` (all paths).
 - Workaround: none needed - fixed 2026-11-06: `_balance_formal_charge` neutralises by moving caps, the MOF writer quarantines `quarantine=charge`, `runUniFrag/check_mof_fragments.py` checks it. Fragments of parents that are not charge-balanced themselves carry `parent_charge=<q|unknown>`; filter on it if only neutral-parent chemistry is wanted.
-- Status: fixed; COF has 291/1809 frames with nonzero/undefined formal charge (not addressed, separate COF question).
+- Status: fixed; COF has 291/1809 frames with nonzero/undefined formal charge (not addressed, separate COF question, GitHub #11).
+
+- ID: MOF-carboxylate-caps (GitHub #10)
+- Symptom: a carboxylate cut on both O became R-C(OH)2; #9's charge check passed 279 such frames because two conjugated C(OH)2 ends read as a neutral quinoid.
+- Root cause: the `_get_fragment` bridge-capping and `bonds_by_ligand` loops capped every O that lost a metal, with no one-H-per-carboxylate guard.
+- Affected area: `MOFFragmenter` (all paths).
+- Workaround: none needed - fixed 2026-11-08: `_carboxylate_cap_veto` caps one O per carboxylate (by geometry), the balancer never makes C(OH)2 and deprotonates coordinated carboxylates first, `check_mof_fragments.py` [M3] fails any C(OH)2.
+- Status: fixed. Known limits: 7 frames keep an H on the free O of a coordinated carboxylate next to a free COO- (net already 0, so the balancer never acts); MOF duplicates are keyed on heavy formula only, so an isomer can be dropped as a "duplicate" (CUQRIR vs AFITEP linker, C16O4).
+
+- ID: MOF-alkyne-caps (not filed)
+- Symptom: C#C carbons capped (usually twice, CH=CH) in 19 frames from 8 structures (AFITEP, ETIXEM, ETIXIQ, FAHPOV, KEFBEE, MUDTAH, SEFLAT, TIFQUX); invisible to the charge and parity checks.
+- Root cause: the "C with two C/N neighbours and no H" capping rule in `_cap_open_oxygens` and the MOF equivalents does not exclude sp carbon.
+- Status: open.
 
 ## 9) Decisions Log (ADR-lite)
 

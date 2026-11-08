@@ -1355,6 +1355,12 @@ class BaseFragmenter:
         macromolecule output is unchanged; MOFFragmenter overrides it."""
         return species, coords, capped_h_indices
 
+    def _carboxylate_cap_veto(self, i, species, coords, pending=None):
+        """Hook: skip the cap on O `i` because its carboxylate sibling O takes
+        the one acid H. No-op here, so COF and macromolecule output is
+        unchanged; MOFFragmenter overrides it (#10)."""
+        return False
+
     def _balance_formal_charge(self, species, coords, capped_h_indices, label=""):
         """Hook: make the fragment's formal charge zero. Returns (species,
         coords, capped_h, balanced). No-op here, so COF and macromolecule
@@ -1640,6 +1646,8 @@ class BaseFragmenter:
             if self._carries_hydrogen(i, species, coords):
                 continue
             if sp == "O" and self._oxygen_protonated(i, species, coords):
+                continue
+            if sp == "O" and self._carboxylate_cap_veto(i, species, coords):
                 continue
 
             heavy_neighbors = []
@@ -2127,6 +2135,83 @@ class MOFFragmenter(BaseFragmenter):
                 [remap[h] for h in capped_h_indices if h in remap])
 
     # ------------------------------------------------------------------
+    # One acid H per carboxylate (#10)
+    # ------------------------------------------------------------------
+    def _carboxylate_sibling(self, i, species, coords):
+        """The other O of the carboxyl group O `i` belongs to, or None.
+
+        A carboxyl group here is a C bonded to exactly two O, each bonded to
+        no other heavy non-metal atom (H and metals do not count). Excluded:
+        carbonate/orthoester C (three or more O), esters and anhydrides (an O
+        with a second heavy partner), and P/S oxoacids, where two or more O-H
+        on one centre are a real closed-shell acid.
+        """
+        if species[i] != "O":
+            return None
+        pos = np.asarray(coords, dtype=float)
+
+        def heavy_nbs(k):
+            return [j for j, sj in enumerate(species)
+                    if j != k and sj != "H" and sj not in self.METALS
+                    and self.is_valid_bond(species[k], sj, float(np.linalg.norm(pos[k] - pos[j])))]
+
+        nb = heavy_nbs(i)
+        if len(nb) != 1 or species[nb[0]] != "C":
+            return None
+        c = nb[0]
+        oxy = [j for j in heavy_nbs(c) if species[j] == "O"]
+        if len(oxy) != 2 or i not in oxy:
+            return None
+        sib = oxy[0] if oxy[1] == i else oxy[1]
+        if heavy_nbs(sib) != [c]:
+            return None
+        return sib
+
+    def _carboxylate_cap_rank(self, o, species, coords):
+        """Which O of a carboxylate takes the acid H: smaller is preferred.
+
+        1. an O not bonded to a metal kept in the fragment: the metal-bound O
+           stays the donor (M-O-C(=O)-OH... rather than M-O(H)-C);
+        2. the longer C-O bond (C-OH ~1.31 A vs C=O ~1.21 A where the parent
+           resolves it), compared at 0.01 A so noise does not decide;
+        3. the lower atom index.
+        """
+        pos = np.asarray(coords, dtype=float)
+        bound = any(sj in self.METALS and self.is_valid_bond("O", sj, float(np.linalg.norm(pos[o] - pos[j])))
+                    for j, sj in enumerate(species))
+        c_len = max((float(np.linalg.norm(pos[o] - pos[j])) for j, sj in enumerate(species)
+                     if sj == "C" and self.is_valid_bond("O", "C", float(np.linalg.norm(pos[o] - pos[j])))),
+                    default=0.0)
+        return (1 if bound else 0, -round(c_len, 2), o)
+
+    def _carboxylate_cap_veto(self, i, species, coords, pending=None):
+        """MOF: a carboxylate that lost metals on both O takes ONE H (#10).
+
+        Every MOF capping site capped each O that lost a metal, so a
+        carboxylate cut on both sides became R-C(OH)2, which has no
+        closed-shell structure (905 of 1768 Zn frames before #9; the #9
+        charge balance then removed one H by its own tie order). The
+        2026-05-28 guard existed only in two other paths.
+
+        Skip O `i` when its sibling already carries an H, or when the sibling
+        will be capped too and ranks first (_carboxylate_cap_rank).
+        `pending` is the set of O the caller is about to cap; None means
+        "any H-free sibling will be capped", which holds for
+        _cap_open_oxygens, where every terminal O without H is capped.
+        """
+        sib = self._carboxylate_sibling(i, species, coords)
+        if sib is None:
+            return False
+        pos = np.asarray(coords, dtype=float)
+        if any(sj == "H" and float(np.linalg.norm(pos[sib] - pos[j])) < 1.2
+               for j, sj in enumerate(species)):
+            return True
+        if pending is not None and sib not in pending:
+            return False
+        return (self._carboxylate_cap_rank(sib, species, coords)
+                < self._carboxylate_cap_rank(i, species, coords))
+
+    # ------------------------------------------------------------------
     # Formal-charge balance (#9)
     # ------------------------------------------------------------------
     # Metals with one common oxidation state in MOFs. The others are read from
@@ -2288,8 +2373,9 @@ class MOFFragmenter(BaseFragmenter):
         Greedy, one H at a time. Each step takes the move that most improves
         (implausible charges, |net charge|, charged atoms). Ties go to a move
         on a molecule still bound to a metal (removal) or bound to none
-        (addition), then O before N before S/P, then the atom farthest from
-        any metal, then the lowest index. Moves:
+        (addition), then O before N before S/P, then an O of a carboxylate
+        whose other O is metal-bound (removed first, protonated last: #10),
+        then the atom farthest from any metal, then the lowest index. Moves:
           - remove a capping H from N/O/S/P/Se (never a parent atom, never C);
           - add an H to an N/O/S of a net-negative molecule, on an atom bonded
             to no metal and carrying no H, placed and validated as the parity
@@ -2331,6 +2417,15 @@ class MOFFragmenter(BaseFragmenter):
                 return 0.0
             return round(min(float(np.linalg.norm(p - m)) for m in metal_pos), 3)
 
+        def coordinated_carboxyl(o):
+            # O of a carboxylate whose other O is bound to a metal in the
+            # fragment (#10). Its H goes first and it is protonated last, so
+            # the group stays M-O2C-R and the acid H sits on a free end:
+            # Zn-O2C-C6H4-COOH, not Zn<-O=C(OH)-C6H4-COO-, which "farthest
+            # from any metal" alone gave in 73 Zn frames.
+            sib = self._carboxylate_sibling(o, sp, co)
+            return sib is not None and sib in bound
+
         rank = {"O": 0, "N": 1}
         max_h = {"O": 1, "S": 1, "N": 2}
         for _step in range(2 * len(caps) + 50):
@@ -2353,6 +2448,7 @@ class MOFFragmenter(BaseFragmenter):
                     continue
                 on_metal = any(i in bound for i in comp_of[p])
                 options.append((res[0], 0 if on_metal else 1, rank.get(sp[p], 2),
+                                0 if coordinated_carboxyl(p) else 1,
                                 -metal_dist(co[h]), h, ("remove", h, trial)))
             if tot_q < 0 or key[0]:
                 ghost = len(sp)
@@ -2360,6 +2456,11 @@ class MOFFragmenter(BaseFragmenter):
                     if comp_q[a] >= 0 or a in bound or sp[a] not in max_h:
                         continue
                     if len(adj[a]) > max_h[sp[a]] or any(sp[j] == "H" for j in adj[a]):
+                        continue
+                    # Never make R-C(OH)2 (#10): with conjugation it reads as
+                    # a closed-shell quinoid, so the charge alone would accept it.
+                    sib = self._carboxylate_sibling(a, sp, co)
+                    if sib is not None and any(sp[j] == "H" for j in adj.get(sib, [])):
                         continue
                     trial = {i: list(v) for i, v in adj.items()}
                     trial[a] = trial[a] + [ghost]
@@ -2369,11 +2470,12 @@ class MOFFragmenter(BaseFragmenter):
                         continue
                     on_metal = any(i in bound for i in comp_of[a])
                     options.append((res[0], 1 if on_metal else 0, rank.get(sp[a], 2),
+                                    1 if coordinated_carboxyl(a) else 0,
                                     -metal_dist(co[a]), a, ("add", a, None)))
-            better = sorted((o for o in options if o[0] < key), key=lambda o: o[:5])
+            better = sorted((o for o in options if o[0] < key), key=lambda o: o[:6])
             moved = False
             for o in better:
-                kind, idx, trial = o[5]
+                kind, idx, trial = o[6]
                 if kind == "remove":
                     adj = trial
                     caps.discard(idx)
@@ -4079,6 +4181,12 @@ class MOFFragmenter(BaseFragmenter):
                 if not any(np.linalg.norm(rc_arr - np.array(existing)) < 0.3 for existing in bridge_cap_map[ba_idx]):
                     bridge_cap_map[ba_idx].append(rc_arr)
 
+        # O this block is about to cap: a carboxylate whose two O both lost a
+        # metal takes ONE acid H (#10), so each O asks whether its sibling is
+        # also pending and ranks first.
+        pending_o = {local_index[k] for k in list(bridge_cap_map) + list(bonds_by_ligand)
+                     if k in local_index and supercell[k].species_string == "O"}
+
         for ba_idx, removed_coords in bridge_cap_map.items():
             ba_site = supercell[ba_idx]
             ba_pos = np.array(unwrapped_coords[ba_idx])
@@ -4089,6 +4197,8 @@ class MOFFragmenter(BaseFragmenter):
 
             if ba_site.species_string == "O":
                 if self.oxygen_already_protonated(parent_local_idx, species, coords):
+                    continue
+                if self._carboxylate_cap_veto(parent_local_idx, species, coords, pending_o):
                     continue
                 avg_vec = np.zeros(3)
                 for rc in removed_coords:
@@ -4122,6 +4232,9 @@ class MOFFragmenter(BaseFragmenter):
                 parent_local_idx = local_index.get(lid)
                 if parent_local_idx is not None:
                     if species[parent_local_idx] == "O" and self.oxygen_already_protonated(parent_local_idx, species, coords):
+                        continue
+                    if species[parent_local_idx] == "O" and self._carboxylate_cap_veto(
+                            parent_local_idx, species, coords, pending_o):
                         continue
                     self.place_capping_h(parent_local_idx, avg_vec, bl, species, coords, min_hh=1.5, capped_h_flags=capped_h_flags)
 

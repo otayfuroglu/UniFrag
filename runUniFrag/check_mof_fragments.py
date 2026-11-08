@@ -14,6 +14,9 @@ MUST
        (Cu, Co, Mn, Fe, Cr, V) is read from the parent CIF in <run_dir>; a
        fragment that cannot be judged (None) fails too.
   [M2] even electron count at the recorded charge.
+  [M3] no carboxyl C carrying two O-H, R-C(OH)2 (#10). Where the linker is
+       conjugated, the formal-charge check alone reads two such ends as a
+       closed-shell quinoid and passes them; 279 frames of the #9 output did.
 """
 import sys, os, re, glob, json, warnings
 import numpy as np
@@ -35,7 +38,7 @@ def main():
     frames = _parse_extxyz(xyz)
     frag = MOFFragmenter()
     parent_of = {}
-    charge_bad, odd = [], []
+    charge_bad, odd, gem = [], [], []
     for fr in frames:
         lab, sp = fr["label"], fr["species"]
         rec = int(fr.get("charge", 0) or 0)
@@ -56,15 +59,25 @@ def main():
             charge_bad.append((lab, fq, rec))
         if (MOFFragmenter._parity_z_sum(sp) - rec) % 2:
             odd.append(lab)
+        adj, _ = frag._nonmetal_graph(sp, np.asarray(fr["coords"], dtype=float))
+        for c in adj:
+            oxy = [j for j in adj[c] if sp[j] == "O"]
+            if sp[c] == "C" and len(oxy) == 2 and all(
+                    any(sp[k] == "H" for k in adj[o]) and sum(sp[k] != "H" for k in adj[o]) == 1
+                    for o in oxy):
+                gem.append(lab)
+                break
 
     report = {"frames": len(frames), "formal_charge_mismatch": len(charge_bad),
-              "odd_electron": len(odd)}
+              "odd_electron": len(odd), "gem_diol_carboxyl": len(gem)}
     fails = []
     if charge_bad:
         fails.append(f"[M1] {len(charge_bad)} fragments whose formal charge is not the "
                      f"recorded charge (label, formal, recorded): {charge_bad[:8]}")
     if odd:
         fails.append(f"[M2] {len(odd)} odd-electron fragments: {odd[:8]}")
+    if gem:
+        fails.append(f"[M3] {len(gem)} fragments with a carboxyl C carrying two O-H: {gem[:8]}")
     print("=" * 68)
     print("MOF FRAGMENT CHECK REPORT")
     print("=" * 68)
