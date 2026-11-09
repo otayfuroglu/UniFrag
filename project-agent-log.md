@@ -2611,3 +2611,10 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Local: 14-CIF sample (`scratchpad/i9/t10`), probe wrapper counting C(OH)2 at the balancer input (118 -> 0).
 - Follow-up risks: (1) 7 frames keep a cap on the free O of a coordinated carboxylate (balancer makes no move when the caps already sum to 0). (2) Alkyne C capped (19 frames, 8 structures), not filed yet. (3) Heavy-formula-only MOF dedupe can drop an isomer. (4) Path C's "fewest atoms" counts caps, so any capping change can switch the chosen second SBU; the distance tie-break there is a raw float (cf. #6). (5) Downstream QM inputs for changed frames need regenerating.
 - Not committed, not pushed, no GitHub comment (await user).
+
+## [2026-11-08] #10 committed (d5ff4bb) and pushed; #12 opened (docs only)
+- Comment on #10 with cause, fix, validation and known limits; #10 left open for the user to verify.
+- #12: MOF capping puts H on alkyne (sp) carbons. On d5ff4bb: 17 collection frames (8 structures) and 7 quarantined OnlyLinkers (adds KEFBOO); COF to be measured before any shared `_cap_open_oxygens` change.
+
+## [2026-11-09] Guest insertion parked on branch `guest-insertion` (not merged)
+- Code, tests, docs and the open-issues note (`docs/superpowers/specs/2026-11-09-guest-insertion-open-issues.md`) live on that branch; frame-size policy undecided. Nothing of it is on `main`.

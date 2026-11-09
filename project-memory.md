@@ -230,10 +230,10 @@ For each item:
 - Workaround: none needed - fixed 2026-11-08: `_carboxylate_cap_veto` caps one O per carboxylate (by geometry), the balancer never makes C(OH)2 and deprotonates coordinated carboxylates first, `check_mof_fragments.py` [M3] fails any C(OH)2.
 - Status: fixed. Known limits: 7 frames keep an H on the free O of a coordinated carboxylate next to a free COO- (net already 0, so the balancer never acts); MOF duplicates are keyed on heavy formula only, so an isomer can be dropped as a "duplicate" (CUQRIR vs AFITEP linker, C16O4).
 
-- ID: MOF-alkyne-caps (not filed)
+- ID: MOF-alkyne-caps (GitHub #12)
 - Symptom: C#C carbons capped (usually twice, CH=CH) in 19 frames from 8 structures (AFITEP, ETIXEM, ETIXIQ, FAHPOV, KEFBEE, MUDTAH, SEFLAT, TIFQUX); invisible to the charge and parity checks.
 - Root cause: the "C with two C/N neighbours and no H" capping rule in `_cap_open_oxygens` and the MOF equivalents does not exclude sp carbon.
-- Status: open.
+- Status: open (#12); measured on d5ff4bb: 17 collection frames + 7 quarantined OnlyLinkers. COF not yet measured.
 
 ## 9) Decisions Log (ADR-lite)
 
