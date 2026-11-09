@@ -1,0 +1,46 @@
+# UniFrag run configuration.
+#   python fragmentation_oop.py --config example/run.yaml       # fragment, then add guests
+#   python guest_insertion.py example/run.yaml                  # add guests to a finished run
+#   python runUniFrag/check_guest_fragments.py <run_dir>         # QA of the guest frames
+# A flag typed on the command line overrides the value here (e.g. --nproc 1).
+# Unknown keys are an error. Relative paths are relative to the working directory,
+# except guest `file:` paths, which are relative to this YAML file.
+
+fragmentation:                     # the fragmentation_oop.py flags, '-' written as '_'
+  input_path: example              # CIF/PDB file, or a folder of CIFs (outputs go there)
+  kind: mof                        # mof | cof | bio  (guests are not supported for bio)
+  radius: 4.0                      # A, sphere that picks the core metals
+  center: -1                       # index of the centre atom; -1 = automatic
+  nmetals: 3                       # core metals per fragment
+  nproc: 8                         # parallel processes (fragmentation and guests)
+  timeout: 300                     # s per structure; 0 = no limit
+  overwrite: false                 # true = start from scratch, false = resume
+  cof_layer: auto                  # cof only: auto | monomer | dimer
+  # output: fragment.xyz           # single-structure output name
+  # minimize: false
+  # bio only: window_size: 5, stride: 1, output_dir: null, chain: null, ph: 7.0, no_pdbfixer: false
+
+guests:                            # guest molecules for MLP training data
+  enabled: true                    # false = no guests; nothing below is read
+
+  single:                          # one gas per copy; one output file per gas
+    enabled: true                  #   -> fragments_guests_single_CO2.extxyz, ..._CH4.extxyz
+    species: [CO2, CH4]            # ase built-in names, or {name: CO2, file: geoms/co2.xyz}
+
+  mixture:                         # fixed integer molar ratio, trimmed to whole units
+    enabled: true                  #   -> fragments_guests_mixture_CO2-CH4_5-1.extxyz
+    species:
+      - {name: CO2, ratio: 5}
+      - {name: CH4, ratio: 1}
+
+  # shared by single and mixture
+  frames: [normal, min]            # which collection frames: normal, min, onlylinker, onlynode
+  copies_per_frame: 5              # independent loaded copies of each frame, per set
+  box_margin: -1.0                 # A added to each side of the fragment's bounding box (negative shrinks)
+  min_box_extent: 8.0              # A; a shorter box side is stretched to this (flat linkers, COF layers)
+  vdw_shift: 0.35                  # A subtracted from every vdW radius
+  vdw_scale: 1.0                   # multiplies every (radius - shift); deepMOF_dev's sf_vdw
+  vdw_radii: {}                    # per-element override in A, e.g. {Zr: 2.2}; default: ase, Alvarez where ase has none
+  full_after_failures: 1000        # the box is full when the next guest fails this many tries in a row
+  max_units: null                  # optional cap per copy: molecules (single) or ratio units (mixture)
+  seed: 12345                      # same seed + same input -> same output, for any nproc

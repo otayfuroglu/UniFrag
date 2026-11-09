@@ -15,6 +15,8 @@ UniFrag is a Python framework designed to cleanly and robustly extract chemicall
 Dependencies:
 ```bash
 pip install pymatgen numpy scipy networkx rdkit moffragmentor
+# config files (--config) and guest insertion:
+pip install pyyaml ase
 # biological macromolecules (--kind bio) only:
 conda install -c conda-forge pdbfixer openmm
 ```
@@ -37,6 +39,27 @@ Results are written to the folder that holds the input (for a single file, its f
 - `prescan_quarantine/` and `timed_out_structures/` - input files rejected by the parent pre-scan or stopped by `--timeout`.
 
 A folder run resumes where it stopped; pass `--overwrite` to start again from scratch.
+
+### Run from a config file, with guest molecules
+One YAML file can hold every setting of a run: the flags above under `fragmentation:` (written with `_` for `-`), and guest insertion under `guests:`. A flag typed on the command line overrides the file, and an unknown key is an error. [`example/run.yaml`](example/run.yaml) lists every key with a comment.
+
+```bash
+# Fragment, then load guests into every normal and Min fragment
+python fragmentation_oop.py --config example/run.yaml
+
+# Load guests into a run that is already fragmented (same YAML)
+python guest_insertion.py example/run.yaml
+
+# QA of the guest frames: host untouched, no vdW overlaps, rigid guests, exact ratio, closed shell
+python runUniFrag/check_guest_fragments.py <run_dir>
+```
+
+With `guests: enabled: true`, each selected fragment gets `copies_per_frame` independent copies per guest set. Each copy is filled until full: guests are placed at random positions and orientations in a box around the fragment, and a guest is rejected when any of its atoms comes closer to an existing atom than the sum of their vdW radii (`(R - vdw_shift) x vdw_scale`). A `mixture` is inserted in its ratio order (CO2 x5, CH4, CO2 x5, ...) and trimmed back to whole ratio units, so the written ratio is exact. Outputs, in the run folder:
+- `fragments_guests_single_<gas>.extxyz` and `fragments_guests_mixture_<A>-<B>_<a>-<b>.extxyz` - the fragment atoms first, unchanged, then the guests. The comment line carries `label=<parent>-<tag>-<copy>` (tag `CO2` for a single gas, `CO2x5CH4x1` for a 5:1 mixture), `charge=` (the parent's), `parent=`, `guests="CO2:10 CH4:2"`, `n_host=` and the parent's other tags.
+- `guests_summary.csv` - one row per copy, with counts and `written` or the reason it was skipped.
+- `guests_config.json` - the settings used. A resumed run with different guest settings stops before any work; `python guest_insertion.py <run.yaml> --overwrite` redoes only the guests (with `--config`, `overwrite: true` also redoes the fragmentation).
+
+Guest insertion is available for `mof` and `cof`; the same seed gives the same frames for any `nproc`. With a single CIF as input, only that structure's guests are redone and the other structures' guests in the folder are kept. Fill-until-full can add many more guest atoms than the fragment has (2-3x on the 20+20 ARF test set); set `max_units` to bound the frame size for DFT.
 
 ### Arguments
 - `input_path`: A `.cif` file (`.pdb` for `--kind bio`), or a folder of them.

@@ -158,6 +158,14 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 
 ### 5.3 Test
 ```bash
+# Guest insertion unit tests (synthetic hosts, no fragmentation, ~10 s)
+/Users/omert/miniconda3/bin/python runUniFrag/test_guest_insertion.py
+
+# Fragment + guest insertion from one YAML (every key: example/run.yaml); guests only on a finished run; QA
+/Users/omert/miniconda3/bin/python fragmentation_oop.py --config example/run.yaml
+/Users/omert/miniconda3/bin/python guest_insertion.py example/run.yaml
+/Users/omert/miniconda3/bin/python runUniFrag/check_guest_fragments.py <run_dir>
+
 # Run MOF family smoke tests
 ./run_mof_family.sh test_on_irmof_series 4.0
 

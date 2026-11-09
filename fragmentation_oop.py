@@ -399,6 +399,8 @@ def _parse_extxyz(filepath):
                 "coords": coords,
                 "capped_h": capped_h,
                 "charge": charge,
+                # the raw comment line, so guest_insertion can copy every tag
+                "comment": comment,
             })
         i += 2 + n_atoms
     return frames
@@ -10825,11 +10827,18 @@ def _process_mof_file(args_tuple):
 
 
 
-def main():
+def _build_parser():
     parser = argparse.ArgumentParser(
         description="OOP fragmenter core for MOF / COF / Bio-macromolecule"
     )
-    parser.add_argument("input_path", help="CIF/PDB file or folder containing CIF files")
+    parser.add_argument("input_path", nargs="?", default=None,
+                        help="CIF/PDB file or folder containing CIF files "
+                             "(or fragmentation: input_path in --config)")
+    parser.add_argument(
+        "--config", default=None,
+        help="Run YAML: fragmentation: holds these flags (with '_' for '-'), guests: the "
+             "guest insertion settings. A flag on the command line overrides the YAML.",
+    )
     parser.add_argument("--kind", choices=["mof", "cof", "bio"], default="mof")
     parser.add_argument("--nproc", type=int, default=1, help="Number of parallel processes for folder mode.")
     # MOF / COF shared
@@ -10877,7 +10886,92 @@ def main():
         "--timeout", type=float, default=300.0,
         help="Timeout in seconds for processing a single structure (default 300.0s / 5 min). Set to 0 to disable.",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def _parse_args_with_config(parser, argv=None):
+    """Parse the command line; with --config, the YAML's fragmentation: keys
+    become the flags' defaults (a flag typed on the command line still wins) and
+    its guests: section is validated. Any config error exits 2 before work starts.
+    Returns (args, GuestConfig or None)."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=None)
+    known, _ = pre.parse_known_args(argv)
+    if known.config is None:
+        args = parser.parse_args(argv)
+        if args.input_path is None:
+            parser.error("input_path must be given on the command line or in fragmentation:")
+        return args, None
+
+    import guest_insertion
+    try:
+        data = guest_insertion.load_run_yaml(known.config)
+    except (OSError, guest_insertion.GuestConfigError) as e:
+        parser.error(str(e))
+    frag = data.get("fragmentation") or {}
+    if not isinstance(frag, dict):
+        parser.error("fragmentation: must be a mapping")
+    actions = {a.dest: a for a in parser._actions if a.dest not in ("help", "config")}
+    unknown = sorted(set(frag) - set(actions))
+    if unknown:
+        parser.error(f"unknown fragmentation key(s) in {known.config}: {unknown}")
+    # argparse converts and checks only values typed on the command line, so a
+    # YAML value is checked here: a quoted "false" must not switch overwrite on.
+    for k, v in list(frag.items()):
+        act = actions[k]
+        if v is None:
+            continue
+        if isinstance(act, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+            if not isinstance(v, bool):
+                parser.error(f"fragmentation.{k} must be true or false, got {v!r}")
+        elif isinstance(v, bool):
+            parser.error(f"fragmentation.{k} takes a value, not {v!r}")
+        elif act.type is not None:
+            try:
+                frag[k] = act.type(str(v))
+            except (TypeError, ValueError):
+                parser.error(f"fragmentation.{k}: {v!r} is not a valid {act.type.__name__}")
+        elif not isinstance(v, str):
+            parser.error(f"fragmentation.{k} must be a string, got {v!r} (quote it)")
+        if act.choices is not None and frag[k] not in act.choices:
+            parser.error(f"fragmentation.{k}: {v!r} is not one of {list(act.choices)}")
+    parser.set_defaults(**frag)
+    args = parser.parse_args(argv)
+    if args.input_path is None:
+        parser.error("input_path must be given on the command line or in fragmentation:")
+    try:
+        guests = guest_insertion.parse_guests(
+            data.get("guests"), os.path.dirname(os.path.abspath(known.config)))
+    except guest_insertion.GuestConfigError as e:
+        parser.error(str(e))
+    if guests is not None and args.kind == "bio":
+        parser.error("guest insertion is not supported for kind: bio")
+    if guests is not None:
+        # a settings clash with an earlier guest run is reported now, not after
+        # hours of fragmentation
+        try:
+            guest_insertion.check_resume(guests, guest_insertion.run_dir_of(args.input_path),
+                                         args.input_path, args.overwrite)
+        except guest_insertion.GuestConfigError as e:
+            parser.error(str(e))
+    return args, guests
+
+
+def _run_guests(guests_cfg, out_dir, args):
+    """Guest insertion after the MOF/COF branch; a guest error ends the run with
+    exit 2 and a message, the fragmentation outputs already written stay."""
+    import sys
+    import guest_insertion
+    try:
+        guest_insertion.run(guests_cfg, out_dir, args.input_path, args.nproc, args.overwrite)
+    except guest_insertion.GuestConfigError as e:
+        print(f"guest insertion: error: {e}")
+        sys.exit(2)
+
+
+def main():
+    parser = _build_parser()
+    args, guests_cfg = _parse_args_with_config(parser)
 
     if args.kind == "mof":
         import os
@@ -11074,6 +11168,8 @@ def main():
         print(f"CSV summary updated at: {csv_path}")
         if os.path.exists(extxyz_path):
             print(f"ExtXYZ collection updated at: {extxyz_path}")
+        if guests_cfg is not None:
+            _run_guests(guests_cfg, out_dir, args)
 
     elif args.kind == "cof":
         import os
@@ -11271,6 +11367,8 @@ def main():
             n_q = len(_parse_extxyz(quarantine_path))
             print(f"QUARANTINE: {n_q} open-shell fragment(s) held at {quarantine_path} "
                   f"(odd electron count; excluded from the main collection).")
+        if guests_cfg is not None:
+            _run_guests(guests_cfg, out_dir, args)
 
     else:  # bio
         import os
