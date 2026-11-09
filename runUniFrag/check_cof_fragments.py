@@ -324,7 +324,7 @@ def main():
     frames=read_extxyz(xyz)
     report["frames"]=len(frames)
 
-    degenerate=[]; odd=[]; overv=[]; underv=[]; clashing=[]; multi=[]
+    degenerate=[]; odd=[]; overv=[]; underv=[]; clashing=[]; multi=[]; charged=[]
     stems=set()
     for fr in frames:
         m=re.match(r"(\d+)", fr["label"])
@@ -345,6 +345,10 @@ def main():
             clashing.append((lab, round(a["min_nonbonded"],2),
                              a["clash_pair"][3] if a["clash_pair"] else "?"))
         if a["pieces"] > 2: multi.append((lab, a["pieces"]))
+        # S7 formal charge: the closed-shell formal charge must be the
+        # charge= the frame is written with (#11); None = no plausible reading
+        fq = _F.cof_formal_charge_of(fr["species"], fr["coords"])
+        if fq != fr["charge"]: charged.append((lab, fq, fr["charge"]))
 
     report["unique_stems"]=len(stems)
     report["degenerate"]=degenerate
@@ -353,10 +357,13 @@ def main():
     report["bad_terminal_caps"]=len(underv)
     report["clashing"]=len(clashing)
     report["multi_piece"]=len(multi)
+    report["formal_charge_mismatch"]=len(charged)
 
     if degenerate: fails.append(f"[S2] {len(degenerate)} degenerate helper fragments: {degenerate[:6]}")
     if odd: fails.append(f"[S5] {len(odd)} odd-electron fragments (multiplicity != 1): {odd[:6]}")
     if overv: fails.append(f"[S3] {len(overv)} fragments with over-coordinated atoms: {overv[:4]}")
+    if charged: fails.append(f"[S7] {len(charged)} fragments whose formal charge is not their charge= "
+                             f"(label, formal, written): {charged[:6]}")
     if clashing:
         warns.append(f"[S4/S6] {len(clashing)} fragments where an added atom is too close "
                      f"(<0.9 A inside a molecule, <2.0 A between molecules): {clashing[:6]}")

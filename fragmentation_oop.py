@@ -22,11 +22,11 @@ class FragmentResult:
     # judging every pair of atoms in the fragment.
     capped_h: list = None
     # Closed-shell formal charge (metal oxidation states + organic charges),
-    # set by the MOF path; None means it could not be judged. The fragment is
-    # written charge=0, so the MOF writer quarantines anything but 0 (#9).
-    # COF and macromolecule results keep the default and are not judged.
+    # set by the MOF (#9) and COF (#11) paths; None means it could not be
+    # judged. The fragment is written charge=0, so both writers quarantine
+    # anything but 0. Macromolecule results keep the default and are not judged.
     formal_charge: object = 0
-    # Net formal charge of the parent cell (MOF only; None = cannot judge).
+    # Net formal charge of the parent cell (MOF and COF; None = cannot judge).
     # Nonzero means this fragment was neutralised by caps, not by the parent's
     # own protons; the writer records it as parent_charge=.
     parent_charge: object = 0
@@ -73,6 +73,28 @@ def _ligand_electron_count(species):
     d9, Co(II) d7) and is a spin state for the QM setup, not a defect.
     """
     return sum(_EXTXYZ_Z.get(s, 6) for s in species if s not in COFFragmenter.METALS)
+
+
+def _cof_frame_verdict(species, formal_charge, parent_charge):
+    """(quarantine reason or None, parent tag) of one COF frame (#11).
+
+    A frame is written charge=0, so it must be closed-shell (even ligand
+    electron count, checked first) and formally neutral; a formal charge of
+    None (no plausible closed-shell reading) is held too. parent_charge= is
+    put on every frame of a parent whose own net formal charge is not 0
+    ("unknown" when it cannot be judged), whether or not the frame is held.
+    """
+    ptag = "" if parent_charge == 0 else (
+        f"parent_charge={'unknown' if parent_charge is None else parent_charge}")
+    z = _ligand_electron_count(species)
+    if z % 2:
+        reason = f"quarantine=odd_electron zsum={z}"
+    elif formal_charge != 0:
+        reason = ("quarantine=charge formal_charge="
+                  f"{'unknown' if formal_charge is None else formal_charge}")
+    else:
+        return None, ptag
+    return f"{reason} {ptag}".strip(), ptag
 
 
 def _is_quaternary_ammonium(idx, species, coords):
@@ -5718,6 +5740,119 @@ class COFFragmenter(BaseFragmenter):
             bad += r[1]
         return q, bad
 
+    def cof_formal_charge_of(self, species, coords):
+        """Net closed-shell formal charge of a COF fragment, or None when it
+        has no plausible closed-shell reading (#11; the writer holds both)."""
+        r = self._fragment_formal_charge(species, coords)
+        if r is None or r[1]:
+            return None
+        return r[0]
+
+    def cof_parent_formal_charge(self, struct):
+        """Net formal charge of a COF parent cell as fragmented (discrete
+        guests stripped, metals counted M(II)), or None when it cannot be
+        judged (a molecule with no plausible closed-shell reading). Nonzero
+        means an ionic framework deposited without its counter-ions (or with
+        them stripped as guests), or H missing; recorded as parent_charge=
+        on every frame (#11)."""
+        try:
+            s = self._strip_discrete_guests(struct)
+        except Exception:
+            s = struct
+        syms = [site.species_string for site in s]
+        adj = {i: set() for i, x in enumerate(syms) if x not in self.METALS}
+        centers, points, _images, dists = s.get_neighbor_list(2.3)
+        for i, j, d in zip(centers, points, dists):
+            i, j = int(i), int(j)
+            if i != j and i in adj and j in adj and self.is_valid_bond(syms[i], syms[j], float(d)):
+                adj[i].add(j)
+                adj[j].add(i)
+        adj = {i: sorted(v) for i, v in adj.items()}
+        q = 2 * sum(1 for x in syms if x in self.METALS)
+        for comp in _fc_components(adj):
+            r = _fc_molecule(syms, comp, adj)
+            if r is None or r[1]:
+                return None
+            q += r[0]
+        return q
+
+    # A bare sp3 carbon: two single bonds (C-C >= 1.45, C-N >= 1.42,
+    # C-O >= 1.38 A), 100-118 deg, no H and no third partner, between two
+    # SATURATED atoms (C with four partners, N three, O two). No closed-shell
+    # reading exists without its two H; CoRE-COF 141/142/144/145 draw every
+    # CH2 of their bridges this way (C-C 1.53-1.54 A, 110-112 deg, partners
+    # sp3 C). The saturated-partner and angle rules exclude distorted models
+    # whose geometry only looks sp3: 160 (an alkyne C drawn with its triple
+    # bond at 1.52 A) and 860 (an sp2 C drawn C=C at 1.51 A, 124 deg).
+    _BARE_SP3_MIN = {"C": 1.45, "N": 1.42, "O": 1.38}
+    _SATURATED_PARTNERS = {"C": 4, "N": 3, "O": 2}
+
+    def _repair_bare_sp3_ch2(self, struct):
+        """Add the two H of every bare sp3 CH2 of a COF parent (#11).
+        Returns (structure, number of CH2 completed); the input is returned
+        unchanged when there is none. Parent atoms are never moved; a site
+        whose H would come closer than 0.9 A to any atom is left as drawn.
+        Excludes aromatic C (short bonds), alkyne C (linear), any C that has
+        an H or a third partner, C bonded to a metal, C wider than 118 deg and
+        C next to an unsaturated atom (sp2/sp partner: may itself be sp2/sp)."""
+        syms = [site.species_string for site in struct]
+        bl = self.cap_bond_length("C")
+        new_h = []
+
+        def partners(i):
+            return [n for n in struct.get_neighbors(struct[i], 2.3)
+                    if self.is_valid_bond(syms[i], n.species_string, float(n.nn_distance))]
+
+        for a, sym in enumerate(syms):
+            if sym != "C":
+                continue
+            nbs = partners(a)
+            if len(nbs) != 2 or any(n.species_string not in self._BARE_SP3_MIN for n in nbs):
+                continue
+            if any(float(n.nn_distance) < self._BARE_SP3_MIN[n.species_string] for n in nbs):
+                continue
+            if any(len(partners(n.index)) != self._SATURATED_PARTNERS[n.species_string]
+                   for n in nbs):
+                continue
+            pos = struct[a].coords
+            u = [(n.coords - pos) / float(n.nn_distance) for n in nbs]
+            ang = float(np.degrees(np.arccos(np.clip(np.dot(u[0], u[1]), -1.0, 1.0))))
+            if not 100.0 <= ang <= 118.0:
+                continue
+            b = -(u[0] + u[1])
+            b /= np.linalg.norm(b)
+            nrm = np.cross(u[0], u[1])
+            nrm /= np.linalg.norm(nrm)
+            hs = [pos + bl * (0.577 * b + sgn * 0.816 * nrm) for sgn in (1, -1)]
+            near = min(
+                (float(np.linalg.norm(m.coords - h)) for h in hs
+                 for m in struct.get_sites_in_sphere(h, 1.0) if m.index != a),
+                default=np.inf)
+            if near < 0.9:
+                continue
+            new_h.append(hs)
+        if not new_h:
+            return struct, 0
+        out = struct.copy()
+        for hs in new_h:
+            for h in hs:
+                out.append("H", h, coords_are_cartesian=True)
+        return out, len(new_h)
+
+    def cof_repair_parent(self, struct):
+        """The bare-CH2 repair, kept only when it turns a parent with no
+        closed-shell reading into a neutral one (#11). Otherwise - the parent
+        already had a reading, or still has none, or comes out charged - the
+        parent is fragmented as drawn. Returns (structure, number of CH2)."""
+        rep, n = self._repair_bare_sp3_ch2(struct)
+        if not n:
+            return struct, 0
+        if self.cof_parent_formal_charge(struct) is not None:
+            return struct, 0
+        if self.cof_parent_formal_charge(rep) != 0:
+            return struct, 0
+        return rep, n
+
     def _balance_formal_charge(self, species, coords, capped_h_indices, label=""):
         """COF (#11): when a finished fragment is not formally neutral, choose
         the H count of its cut imine-type N - =NH or -NH2, the two readings
@@ -10910,7 +11045,34 @@ def _process_cof_file(args_tuple):
                     "only_linker_res": [],
                 }
 
-            res = frag.extract(cif_path, center_idx=center, output_path=None, minimize=False)
+            # A parent drawn with bare sp3 carbons (CH2 without its two H) has
+            # no closed-shell reading; complete them before fragmenting, from
+            # a P1 copy so every path (coffragmentor reads the file itself)
+            # sees the same parent (#11). Nothing else of the parent changes.
+            work_path = cif_path
+            _repaired_parent = None
+            _loaded = None
+            try:
+                try:
+                    _loaded = Structure.from_file(cif_path, occupancy_tolerance=100.0)
+                except Exception:
+                    # extract()'s own fallback parser
+                    _loaded = CifParser(cif_path, occupancy_tolerance=2.1).get_structures(primitive=False)[0]
+                if _loaded.is_ordered:
+                    _rep, _n_ch2 = frag.cof_repair_parent(_loaded)
+                    if _n_ch2:
+                        import tempfile
+                        from pymatgen.io.cif import CifWriter
+                        _tmp_dir = tempfile.mkdtemp(prefix="unifrag_ch2_")
+                        work_path = os.path.join(_tmp_dir, os.path.basename(cif_path))
+                        CifWriter(_rep).write_file(work_path)
+                        _repaired_parent = _rep
+                        print(f"[{base}] -> COF parent: added 2 H on {_n_ch2} bare sp3 C "
+                              f"(CH2 drawn without H) before fragmenting.")
+            except Exception as _rep_err:
+                print(f"[{base}] Bare-CH2 check skipped: {_rep_err}")
+
+            res = frag.extract(work_path, center_idx=center, output_path=None, minimize=False)
             norm_atoms = len(res.species) if res else 0
             norm_formula = _get_formula(res.species) if res else "N/A"
             # Snapshot right after the normal-mode call: extract() resets
@@ -10931,7 +11093,7 @@ def _process_cof_file(args_tuple):
             res_min = None
             if res and len(res.species) > 50:
                 print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
-                candidate_min = frag.extract(cif_path, center_idx=center, output_path=None, minimize=True)
+                candidate_min = frag.extract(work_path, center_idx=center, output_path=None, minimize=True)
                 reduction = len(res.species) - len(candidate_min.species) if candidate_min else -1
                 if candidate_min and reduction < MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF:
                     # First-ring trimming cannot shrink this one (typical of
@@ -10939,7 +11101,7 @@ def _process_cof_file(args_tuple):
                     # keeping the node plus exactly one complete linker.
                     print(f"[{base}] Minimize only reduced size by {reduction} atoms "
                           f"(< {MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF}); retrying with node + one linker...")
-                    alt_min = frag.extract(cif_path, center_idx=center, output_path=None,
+                    alt_min = frag.extract(work_path, center_idx=center, output_path=None,
                                            minimize=True, single_linker=True)
                     alt_reduction = len(res.species) - len(alt_min.species) if alt_min else -1
                     if alt_min and alt_reduction > reduction:
@@ -10985,6 +11147,23 @@ def _process_cof_file(args_tuple):
                     except Exception as e:
                         print(f"[{base}] Failed to generate QM-ready OnlyNode fragment: {e}")
 
+            # Judge every frame's closed-shell formal charge, and the parent's
+            # own, here where the parent is at hand; the writer holds any frame
+            # that is not formally neutral and tags parent_charge= (#11).
+            _pstruct = _repaired_parent if _repaired_parent is not None else _loaded
+            try:
+                _parent_q = frag.cof_parent_formal_charge(_pstruct) if _pstruct is not None else None
+            except Exception:
+                _parent_q = None
+            for _r in [res, res_min] + only_linker_res + only_node_res:
+                if _r is not None:
+                    _r.parent_charge = _parent_q
+                    try:
+                        _r.formal_charge = frag.cof_formal_charge_of(_r.species, _r.coords)
+                    except Exception as _fc_err:
+                        print(f"[{base}] Formal-charge check failed: {_fc_err}")
+                        _r.formal_charge = None
+
         return {
             "cif": os.path.basename(cif_path),
             "norm_atoms": norm_atoms,
@@ -11024,6 +11203,11 @@ def _process_cof_file(args_tuple):
             "only_linker_res": [],
             "only_node_res": []
         }
+    finally:
+        _tmp = locals().get("_tmp_dir")
+        if _tmp:
+            import shutil
+            shutil.rmtree(_tmp, ignore_errors=True)
 
 
 def _process_bio_file(args_tuple):
@@ -11589,7 +11773,8 @@ def main():
                     clean_base = base_name.replace("[", "").replace("]", "").replace("_", "")
                     frag_name = f"{clean_base}FragCof{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
-                                             res_obj.capped_h))
+                                             res_obj.capped_h, res_obj.formal_charge,
+                                             res_obj.parent_charge))
 
             if r.get("only_linker_res"):
                 for idx, res_obj in enumerate(r["only_linker_res"]):
@@ -11603,7 +11788,8 @@ def main():
                     suffix = f"{idx}" if len(r["only_linker_res"]) > 1 else ""
                     frag_name = f"{clean_base}FragCofOnlyLinker{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
-                                             res_obj.capped_h))
+                                             res_obj.capped_h, res_obj.formal_charge,
+                                             res_obj.parent_charge))
 
             if r.get("only_node_res"):
                 for idx, res_obj in enumerate(r["only_node_res"]):
@@ -11617,21 +11803,25 @@ def main():
                     suffix = f"{idx}" if len(r["only_node_res"]) > 1 else ""
                     frag_name = f"{clean_base}FragCofOnlyNode{suffix}"
                     new_extxyz_frags.append((res_obj.species, res_obj.coords, frag_name,
-                                             res_obj.capped_h))
+                                             res_obj.capped_h, res_obj.formal_charge,
+                                             res_obj.parent_charge))
 
             csv_row = f"{r['cif']},{r['norm_atoms']},{r['norm_formula']},{norm_dup},{r['min_atoms']},{r['min_formula']},{min_dup}\n"
 
+            # Every frame is written charge=0: it must be closed-shell and
+            # formally neutral, or it is held in the quarantine (odd electron
+            # count, or quarantine=charge, #11). parent_charge= marks a frame
+            # of a parent that is not itself neutral (see _cof_frame_verdict).
             clean_frags, odd_frags = [], []
-            for species, coords, frag_name, capped_h in new_extxyz_frags:
-                z = _ligand_electron_count(species)
-                if z % 2:
-                    odd_frags.append((species, coords, frag_name, capped_h, z))
+            for species, coords, frag_name, capped_h, fq, pq in new_extxyz_frags:
+                reason, ptag = _cof_frame_verdict(species, fq, pq)
+                if reason:
+                    odd_frags.append((species, coords, frag_name, capped_h, reason))
                 else:
-                    clean_frags.append((species, coords, frag_name, capped_h))
-            for _sp, _co, frag_name, _ch, z in odd_frags:
-                print(f"  -> QUARANTINED '{frag_name}': odd electron count "
-                      f"(Z_sum={z}); held in fragments_quarantine.extxyz, "
-                      f"not written to the main collection.")
+                    clean_frags.append((species, coords, frag_name, capped_h, ptag))
+            for _sp, _co, frag_name, _ch, reason in odd_frags:
+                print(f"  -> QUARANTINED '{frag_name}': {reason}; held in "
+                      f"fragments_quarantine.extxyz, not written to the main collection.")
                 # A fragment that is being held back must not keep its
                 # duplicate key: it claimed the key above, before anyone knew
                 # it was an open shell, and a later structure with the same
@@ -11644,13 +11834,12 @@ def main():
             if is_dir:
                 with open(csv_path, "a") as f:
                     f.write(csv_row)
-                for species, coords, frag_name, capped_h in clean_frags:
+                for species, coords, frag_name, capped_h, ptag in clean_frags:
                     _write_extxyz(extxyz_path, species, coords, frag_name,
-                                  capped_h=capped_h)
-                for species, coords, frag_name, capped_h, z in odd_frags:
+                                  extra=ptag, capped_h=capped_h)
+                for species, coords, frag_name, capped_h, reason in odd_frags:
                     _write_extxyz(quarantine_path, species, coords, frag_name,
-                                  extra=f"quarantine=odd_electron zsum={z}",
-                                  capped_h=capped_h)
+                                  extra=reason, capped_h=capped_h)
             else:
                 base_name = r["cif"]
                 if base_name.endswith(".cif"): base_name = base_name[:-4]
@@ -11662,7 +11851,9 @@ def main():
                     [csv_row], 
                     "cif_file,normal_atoms,normal_formula,norm_duplicate,min_atoms,min_formula,min_duplicate\n"
                 )
-                _update_extxyz_collection(extxyz_path, clean_base, clean_frags)
+                _update_extxyz_collection(
+                    extxyz_path, clean_base,
+                    [(sp, co, nm, ch) for sp, co, nm, ch, _t in clean_frags])
                 if odd_frags:
                     _update_extxyz_collection(
                         quarantine_path, clean_base,
@@ -11687,8 +11878,8 @@ def main():
             print(f"ExtXYZ collection updated at: {extxyz_path}")
         if os.path.exists(quarantine_path):
             n_q = len(_parse_extxyz(quarantine_path))
-            print(f"QUARANTINE: {n_q} open-shell fragment(s) held at {quarantine_path} "
-                  f"(odd electron count; excluded from the main collection).")
+            print(f"QUARANTINE: {n_q} fragment(s) held at {quarantine_path} "
+                  f"(odd electron count or formal charge not 0; excluded from the main collection).")
 
     else:  # bio
         import os

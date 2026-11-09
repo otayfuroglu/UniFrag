@@ -437,7 +437,20 @@ Standing project constraint: **COF work must never alter MOF results.**
 ## 9. Parent structure caveats
 
 - [ ] **MUST — parent CIFs stay untouched.** Every structure remains original;
-      all repair happens on the extracted fragment.
+      all repair happens on the extracted fragment. One exception, in memory
+      only (#11): a bare sp3 carbon (two single bonds, 100-118 deg, no H, both
+      partners saturated; CoRE 141/142/144/145) gets its two H before
+      fragmenting, from a temporary P1 copy (`cof_repair_parent`), and only
+      when that turns a parent with no closed-shell reading into a neutral
+      one. Repaired, they fragment exactly like 140 (same framework drawn with
+      its H). Parent atoms are never moved or deleted.
+
+- [ ] **MUST — every frame in the collection is formally neutral (S7).** The
+      closed-shell formal charge (`cof_formal_charge_of`) must equal the
+      written `charge=` (0). Anything else is held in the quarantine as
+      `quarantine=charge formal_charge=<q|unknown>`. A frame of a parent that
+      is not itself neutral (ionic framework without counter-ions, H missing)
+      carries `parent_charge=<q|unknown>` wherever it is written.
 
 - [ ] **Know the parent's own quality before blaming the fragmenter.**
       **147 of 567 layered parents (26%)** have a genuine sub-2.0 Å *non-bonded*

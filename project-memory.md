@@ -161,6 +161,9 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # COF cut imine-N capping + fragment charge choice tests (#11; synthetic parents, ~15 s)
 /Users/omert/miniconda3/bin/python runUniFrag/test_cof_cut_n.py
 
+# COF parent charge: bare-CH2 parent repair, parent/fragment formal charge, quarantine verdict (#11; ~5 s)
+/Users/omert/miniconda3/bin/python runUniFrag/test_cof_parent_charge.py
+
 # MOF sp-atom capping unit tests (#12; synthetic molecules, ~2 s)
 /Users/omert/miniconda3/bin/python runUniFrag/test_sp_caps.py
 
@@ -230,7 +233,7 @@ For each item:
 - Root cause: one cap per removed metal regardless of the charge the ligand donated; only parity was checked. Also the `_get_fragment` bridge-capping loop has no one-H-per-carboxylate guard.
 - Affected area: `MOFFragmenter` (all paths).
 - Workaround: none needed - fixed 2026-11-06: `_balance_formal_charge` neutralises by moving caps, the MOF writer quarantines `quarantine=charge`, `runUniFrag/check_mof_fragments.py` checks it. Fragments of parents that are not charge-balanced themselves carry `parent_charge=<q|unknown>`; filter on it if only neutral-parent chemistry is wanted.
-- Status: fixed; COF: 291/1809 frames had nonzero/undefined formal charge (GitHub #11). Census 2026-11-09: 217 of them from neutral parents (UniFrag-made, cut imine N cap count), 48 from 35 charged parents, 19 from 21 implausible (H-deficient) parents. Partly fixed 2026-11-09 (#11 cut-N, uncommitted at time of writing): neutral-parent charged frames 217 -> 128; remaining: charged/implausible parents (quarantine or tag undecided), N-N hydrazone/azine cuts, interior keto-enamine readings.
+- Status: fixed; COF: 291/1809 frames had nonzero/undefined formal charge (GitHub #11). Census 2026-11-09: 217 of them from neutral parents (UniFrag-made, cut imine N cap count), 48 from 35 charged parents, 19 from 21 implausible (H-deficient) parents. Partly fixed 2026-11-09 (#11 cut-N, 9bb7c1a): neutral-parent charged frames 217 -> 128. Then (uncommitted at time of writing): COF frames not formally neutral go to the quarantine `quarantine=charge`, frames of non-neutral parents carry `parent_charge=<q|unknown>`, checker MUST S7; bare sp3 CH2 parents (141/142/144/145) get their H in memory (`cof_repair_parent`). v20: collection 1575 frames, 250 charge-held. Remaining (open, UniFrag-made, now held not mislabelled): N-N hydrazone/azine cuts, interior keto-enamine readings, fragments with no closed-shell pairing. Charged parents are ionic frameworks without counter-ions: tagged, not repaired.
 
 - ID: MOF-carboxylate-caps (GitHub #10)
 - Symptom: a carboxylate cut on both O became R-C(OH)2; #9's charge check passed 279 such frames because two conjugated C(OH)2 ends read as a neutral quinoid.
