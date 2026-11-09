@@ -254,9 +254,28 @@ def parent_justified(run, fr, i):
         return False
     _F._parent_struct = struct
     nbs = _F._parent_sigma_neighbours(i, sp, fr["coords"])
-    if nbs is None:
-        return False
     co = fr["coords"]
+    if nbs is None:
+        # An imine-type N (two C partners, no H in the parent): its kept
+        # bond's order comes from the parent's structure, as the fragmenter
+        # reads it (#11, _parent_cut_n_retained_order).
+        if sp[i] != "N":
+            return False
+        heavy = [j for j in range(len(sp)) if j != i and sp[j] != "H"
+                 and _F.is_valid_bond("N", sp[j], float(np.linalg.norm(co[i] - co[j])))]
+        if len(heavy) != 1:
+            return False
+        nh = sum(1 for j in range(len(sp)) if sp[j] == "H"
+                 and _F.is_valid_bond("N", "H", float(np.linalg.norm(co[i] - co[j]))))
+        order = _F._parent_cut_n_retained_order(i, heavy[0], sp, co)
+        if order is not None and nh == 3 - order:
+            return True
+        # The fragmenter may re-read a cut imine N as =NH or -NH2 to make the
+        # fragment neutral (COFFragmenter._balance_formal_charge); either
+        # reading is then justified by the fragment's own formal charge.
+        if nh in (1, 2) and _F._parent_cut_imine_n(i, heavy[0], sp, co) is not None:
+            return _F._fragment_formal_charge(sp, co) == (0, 0)
+        return False
     have = sum(1 for j in range(len(sp)) if j != i
                and _F.is_valid_bond(sp[i], sp[j], float(np.linalg.norm(co[i] - co[j]))))
     return have == len(nbs)

@@ -169,6 +169,19 @@ def _fc_atom_flags(sym, q):
 def _fc_solve(species, atoms, adj, pick):
     """Best pairing of one pi system for fixed valence states.
     Returns (charge, implausible, charged, {atom: charge})."""
+    charge, _pairs = _fc_match(species, atoms, adj, pick)
+    bad = chg = 0
+    for i, q in charge.items():
+        b, c = _fc_atom_flags(species[i], q)
+        bad += b
+        chg += c
+    return sum(charge.values()), bad, chg, charge
+
+
+def _fc_match(species, atoms, adj, pick, forbid=frozenset()):
+    """The matching behind _fc_solve: ({atom: charge}, {frozenset(i, j): n
+    pi bonds}). `forbid` holds atom pairs that may not share a pi bond, so a
+    caller can ask whether a pi bond is forced (#11)."""
     import networkx as nx
     inside = set(atoms)
     slots, gain, base = {}, {}, {}
@@ -188,22 +201,22 @@ def _fc_solve(species, atoms, adj, pick):
         for j in adj[i]:
             if j <= i or j not in inside:
                 continue
+            if forbid and frozenset((i, j)) in forbid:
+                continue
             for a in slots[i]:
                 for b in slots[j]:
                     w = gain[a] + gain[b] + _FC_BOND
                     if w > 0:
                         g.add_edge(a, b, weight=w)
     charge = dict(base)
+    pairs = {}
     if g.number_of_edges():
         for a, b in nx.max_weight_matching(g):
             charge[a[0]] += 1
             charge[b[0]] += 1
-    bad = chg = 0
-    for i, q in charge.items():
-        b, c = _fc_atom_flags(species[i], q)
-        bad += b
-        chg += c
-    return sum(charge.values()), bad, chg, charge
+            k = frozenset((a[0], b[0]))
+            pairs[k] = pairs.get(k, 0) + 1
+    return charge, pairs
 
 
 def _fc_molecule(species, comp, adj, cache=None):
@@ -5429,6 +5442,16 @@ class COFFragmenter(BaseFragmenter):
         target = {"O": 2, "N": 3, "C": 4}.get(species[idx])
         if target is None:
             return None
+        if species[idx] == "N":
+            # Same parent reading as _cap_severed_double_bond_sites (#11).
+            heavy = self._heavy_neighbours(idx, species, coords)
+            if len(heavy) == 1:
+                order = self._parent_cut_n_retained_order(idx, heavy[0], species, coords)
+                if order is not None:
+                    pos = np.asarray(coords[idx], dtype=float)
+                    n_h = sum(1 for j, sj in enumerate(species) if sj == "H" and self.is_valid_bond(
+                        "N", "H", float(np.linalg.norm(pos - np.asarray(coords[j], dtype=float)))))
+                    return max(0, target - order - n_h)
         return max(0, target - self._local_valence_used(idx, species, coords))
 
     # Valence at which an N/O is fully sigma-bonded. Used only to recognise a
@@ -5537,6 +5560,314 @@ class COFFragmenter(BaseFragmenter):
             return False
         return any(sym != "H" and not self._neighbour_present(sym, p, species, coords)
                    for sym, p in nbs)
+
+    def _parent_pi_graph(self):
+        """COF-only, cached per parent: the periodic parent's non-metal bond
+        graph (2.3 A neighbour list, is_valid_bond, H included), the non-metal
+        atoms bonded to a metal, and per-atom caches for ring membership and
+        pi partners. Indices are parent site indices."""
+        struct = getattr(self, "_parent_struct", None)
+        cached = getattr(self, "_parent_pi_cache", None)
+        if cached is not None and cached[0] is struct:
+            return cached[1]
+        _fracs, syms = self._parent_frac_coords()
+        adj = {i: set() for i, s in enumerate(syms) if s not in self.METALS}
+        on_metal = set()
+        centers, points, _images, dists = struct.get_neighbor_list(2.3)
+        for i, j, d in zip(centers, points, dists):
+            i, j = int(i), int(j)
+            if i == j or not self.is_valid_bond(syms[i], syms[j], float(d)):
+                continue
+            if i in adj and j in adj:
+                adj[i].add(j)
+                adj[j].add(i)
+            elif i in adj:
+                on_metal.add(i)
+        info = {"syms": syms, "adj": {i: sorted(v) for i, v in adj.items()},
+                "on_metal": on_metal, "ring": {}, "pi": {}, "systems": None}
+        self._parent_pi_cache = (struct, info)
+        return info
+
+    def _parent_in_small_ring(self, info, a, max_ring=8):
+        """Is parent heavy atom `a` in a ring of at most `max_ring` atoms?"""
+        if a in info["ring"]:
+            return info["ring"][a]
+        syms, adj = info["syms"], info["adj"]
+        heavy = lambda k: [j for j in adj.get(k, ()) if syms[j] != "H"]
+        found = False
+        nbs = heavy(a)
+        for x in range(len(nbs)):
+            for y in range(x + 1, len(nbs)):
+                seen, q = {a, nbs[x]}, deque([(nbs[x], 1)])
+                while q and not found:
+                    u, dist = q.popleft()
+                    if u == nbs[y]:
+                        found = True
+                        break
+                    if dist >= max_ring - 1:
+                        continue
+                    for v in heavy(u):
+                        if v not in seen:
+                            seen.add(v)
+                            q.append((v, dist + 1))
+                if found:
+                    break
+            if found:
+                break
+        info["ring"][a] = found
+        return found
+
+    @staticmethod
+    def _parent_is_carbonyl_c(info, c):
+        """Parent carbon bonded to a terminal O (no other partner, no H)."""
+        syms, adj = info["syms"], info["adj"]
+        return syms[c] == "C" and any(
+            syms[o] == "O" and adj.get(o) == [c] for o in adj.get(c, ()))
+
+    def _parent_n_pi_partner(self, info, n):
+        """(partner, forced) of parent N `n`'s pi bond in the parent's best
+        closed-shell structure (the #9 matching), or None when that structure
+        cannot be read here (an atom with several valence states or none,
+        no single pi partner). `forced`: forbidding that pi bond makes the
+        best structure worse, so no equally good Kekule structure puts it
+        elsewhere."""
+        if n in info["pi"]:
+            return info["pi"][n]
+        syms, adj = info["syms"], info["adj"]
+        if info["systems"] is None:
+            states = {i: _fc_states(syms, adj, i) for i in adj if syms[i] != "H"}
+            pi_atoms = {i for i, st in states.items()
+                        if st is not None and any(m > 0 or on for m, _q, on in st)}
+            hadj = {i: [j for j in adj[i] if j in pi_atoms] for i in pi_atoms}
+            systems = _fc_components(hadj)
+            info["systems"] = (states, {i: k for k, sysm in enumerate(systems) for i in sysm},
+                               systems, {})
+        states, sys_of, systems, solved = info["systems"]
+        result = None
+        k = sys_of.get(n)
+        if k is not None and all(states.get(i) is not None and len(states[i]) == 1
+                                 for i in systems[k]):
+            system = systems[k]
+            pick = {i: states[i][0] for i in system}
+
+            def key(charge, pairs):
+                bad = chg = 0
+                for i, q in charge.items():
+                    b, c = _fc_atom_flags(syms[i], q)
+                    bad += b
+                    chg += c
+                return (bad, chg, abs(sum(charge.values())), -sum(pairs.values()))
+
+            if k not in solved:
+                charge, pairs = _fc_match(syms, system, adj, pick)
+                solved[k] = (key(charge, pairs), pairs)
+            key0, pairs = solved[k]
+            partners = [j for j in adj[n] if syms[j] != "H" and pairs.get(frozenset((n, j)))]
+            if len(partners) == 1:
+                j = partners[0]
+                charge1, pairs1 = _fc_match(syms, system, adj, pick, forbid={frozenset((n, j))})
+                result = (j, key(charge1, pairs1) > key0)
+        info["pi"][n] = result
+        return result
+
+    def _parent_cut_imine_n(self, idx, anchor, species, coords):
+        """COF-only (#11): (parent info, parent N, parent anchor, parent
+        partners) when fragment atom `idx` is a cut imine-type N kept on
+        `anchor` - in the parent an open-chain N with exactly two C partners,
+        no H and no metal - else None."""
+        if species[idx] != "N" or getattr(self, "_parent_struct", None) is None:
+            return None
+        pn = self._parent_index_for_position(coords[idx])
+        px = self._parent_index_for_position(coords[anchor])
+        if pn is None or px is None:
+            return None
+        info = self._parent_pi_graph()
+        syms, adj = info["syms"], info["adj"]
+        if syms[pn] != "N" or pn not in adj or pn in info["on_metal"]:
+            return None
+        nbs = adj[pn]
+        # C-N-C only: a hydrazone/azine C=N-N has its own tautomers (the
+        # parent matching can read it as azo; 635, 637 got worse).
+        if len(nbs) != 2 or any(syms[j] != "C" for j in nbs) or px not in nbs:
+            return None
+        if self._parent_in_small_ring(info, pn):
+            return None
+        return info, pn, px, nbs
+
+    def _fragment_formal_charge(self, species, coords):
+        """(formal charge, implausible charges) of a COF fragment's non-metal
+        molecules (the #9 estimator, COF bond rules, metals counted M(II)),
+        or None when a molecule has no closed-shell reading here."""
+        pos = np.asarray(coords, dtype=float)
+        n = len(species)
+        adj = {i: [] for i in range(n) if species[i] not in self.METALS}
+        if n >= 2:
+            D = np.linalg.norm(pos[:, None, :] - pos[None, :, :], axis=-1)
+            for i, j in zip(*np.where(np.triu(D < 2.3, 1))):
+                i, j = int(i), int(j)
+                if i in adj and j in adj and self.is_valid_bond(species[i], species[j], float(D[i, j])):
+                    adj[i].append(j)
+                    adj[j].append(i)
+        q = 2 * sum(1 for s in species if s in self.METALS)
+        bad = 0
+        for comp in _fc_components(adj):
+            r = _fc_molecule(species, comp, adj)
+            if r is None:
+                return None
+            q += r[0]
+            bad += r[1]
+        return q, bad
+
+    def _balance_formal_charge(self, species, coords, capped_h_indices, label=""):
+        """COF (#11): when a finished fragment is not formally neutral, choose
+        the H count of its cut imine-type N - =NH or -NH2, the two readings
+        such an N has - so that it is.
+
+        `_parent_cut_n_retained_order` reads each cut from the parent, and
+        that is right wherever the parent's closed-shell structure is local.
+        Where it is not, the fragment cannot follow it: parents drawn without
+        an N-H at some imine sites (232, 778, 1018), whose only neutral reading
+        is a framework-wide quinoid, and fragments whose correct =NH caps leave
+        no closed-shell pairing (1171, 178, 1093). For those the fragment
+        decides, one cut N at a time, taking the move that most lowers
+        (implausible charges, |charge|); each N moves at most once, and the
+        moves are kept only if the fragment ends neutral (all or nothing).
+
+        Touches nothing else: only an N that the parent rule recognises as a
+        cut imine-type N, only cap H (added, or one of its own caps removed),
+        and only when the fragment is charged. Returns balanced=False always,
+        so the COF dedupe and parity steps still run.
+        """
+        start = self._fragment_formal_charge(species, coords)
+        if start is None or start == (0, 0):
+            return species, coords, capped_h_indices, False
+        start_species, start_coords = species, coords
+        species = list(species)
+        coords = [np.asarray(c, dtype=float) for c in coords]
+        caps = list(capped_h_indices)
+
+        def site(i):
+            if species[i] != "N":
+                return None
+            heavy = [j for j in range(len(species)) if j != i and species[j] != "H"
+                     and self.is_valid_bond("N", species[j], float(np.linalg.norm(coords[i] - coords[j])))]
+            if len(heavy) != 1:
+                return None
+            hs = [j for j in range(len(species)) if species[j] == "H"
+                  and self.is_valid_bond("N", "H", float(np.linalg.norm(coords[i] - coords[j])))]
+            if len(hs) not in (1, 2) or not set(hs) <= set(caps):
+                return None
+            if self._parent_cut_imine_n(i, heavy[0], species, coords) is None:
+                return None
+            return heavy[0], hs
+
+        sites = [i for i in range(len(species)) if site(i) is not None]
+        key = lambda fc: (fc[1], abs(fc[0]))
+        cur = start
+        moved = set()
+        while cur != (0, 0):
+            best = None
+            for i in sites:
+                if i in moved:
+                    continue
+                c, hs = site(i)
+                if len(hs) == 1:
+                    uc = coords[c] - coords[i]
+                    uh = coords[hs[0]] - coords[i]
+                    d = -(uc / np.linalg.norm(uc) + uh / np.linalg.norm(uh))
+                    if np.linalg.norm(d) < 1e-6:
+                        continue
+                    p = coords[i] + self.cap_bond_length("N") * d / np.linalg.norm(d)
+                    trial = (species + ["H"], coords + [p])
+                else:
+                    gone = max(hs)
+                    trial = ([s for k, s in enumerate(species) if k != gone],
+                             [x for k, x in enumerate(coords) if k != gone])
+                fc = self._fragment_formal_charge(*trial)
+                if fc is not None and key(fc) < key(cur) and (best is None or key(fc) < key(best[0])):
+                    best = (fc, i, hs)
+            if best is None:
+                break
+            fc, i, hs = best
+            moved.add(i)
+            if len(hs) == 1:
+                c, _ = site(i)
+                uc = coords[c] - coords[i]
+                uh = coords[hs[0]] - coords[i]
+                d = -(uc / np.linalg.norm(uc) + uh / np.linalg.norm(uh))
+                species.append("H")
+                coords.append(coords[i] + self.cap_bond_length("N") * d / np.linalg.norm(d))
+                caps.append(len(species) - 1)
+            else:
+                gone = max(hs)
+                species = [s for k, s in enumerate(species) if k != gone]
+                coords = [x for k, x in enumerate(coords) if k != gone]
+                caps = [k - (k > gone) for k in caps if k != gone]
+                sites = [k - (k > gone) for k in sites if k != gone]
+                moved = {k - (k > gone) for k in moved}
+            cur = fc
+        if cur != (0, 0):
+            # All or nothing: a part-way result (e.g. -2 -> -1) leaves an odd
+            # electron count that the parity repair would then pay for with
+            # an H somewhere unrelated. Keep the parent rule's caps instead.
+            return start_species, start_coords, list(capped_h_indices), False
+        if moved:
+            print(f"  -> COF charge: re-read {len(moved)} cut imine N (=NH/-NH2) for "
+                  f"'{label}': formal charge {start[0]} -> 0.")
+        return species, coords, caps, False
+
+    def _parent_cut_n_retained_order(self, idx, anchor, species, coords):
+        """COF-only (#11): order of the bond a cut N keeps to `anchor`, read
+        from the parent's structure instead of the bond's length, or None
+        (then the length decides, as before).
+
+        Applies to an imine-type N: in the parent it has exactly two heavy
+        partners, no H, no metal, and is not itself in a ring (a pyridinic
+        ring N is never a cut site and has no unique Kekule bond). One of its
+        two bonds carries the pi bond. The CoRE-COF models draw these lengths
+        without regard to order - C=N at 1.38-1.51 A, aryl C-N at 1.33-1.36 A,
+        in 1017/38 both bonds at 1.35 A - so the length rule capped an N left
+        on its ring carbon with one H (Ar-NH-, 147 atoms, 31 structures) and an
+        N left on its aldimine CH with two (CH=NH2+, 76 atoms, 13 structures).
+
+        The fragment stays closed-shell and neutral when every cut follows the
+        parent's own closed-shell structure, so:
+          * The parent's #9 matching, when N's pi partner is forced (no equally
+            good Kekule structure moves it): order 2 to that partner, 1 to the
+            other. This includes parents drawn without an amide/enamine N-H
+            (1017, 232, 1018), whose only closed-shell reading puts N=C on the
+            ring; following it keeps their fragments neutral, as before.
+          * Otherwise (the matching ties, e.g. through an alternating cycle of
+            a conjugated framework): a kept carbonyl carbon (amide) is order
+            1, its pi bond being the C=O; with exactly one partner in a ring,
+            the ring (aryl) C-N is single and the open-chain C=N double.
+          * Otherwise None.
+
+        Not covered (None, length decides): an N in a ring, on a metal, with
+        a parent H or three heavy partners (sigma-complete: handled by
+        _parent_unfilled_sigma_sites), an N with a non-carbon partner
+        (hydrazone, azine, N-N), a parent with several valence states in the
+        N's pi system (S, P, halogen oxo), and C cut sites.
+        """
+        site = self._parent_cut_imine_n(idx, anchor, species, coords)
+        if site is None:
+            return None
+        info, pn, px, nbs = site
+        pi = self._parent_n_pi_partner(info, pn)
+        if pi is not None and pi[1]:
+            return 2 if pi[0] == px else 1
+        if self._parent_is_carbonyl_c(info, px):
+            # Amide N-C(=O): the carbon's pi bond is its C=O (where the
+            # matching cannot decide: an amide drawn without its N-H scores
+            # N- and O- alike).
+            return 1
+        py = nbs[0] if nbs[1] == px else nbs[1]
+        rx, ry = self._parent_in_small_ring(info, px), self._parent_in_small_ring(info, py)
+        if rx and not ry:
+            return 1
+        if ry and not rx:
+            return 2
+        return None
 
     def _heteroatom_parity_repair(self, species, coords, capped_h_indices, label):
         """COF-only: pair the odd electron on a functional-group N/O.
@@ -6014,9 +6345,15 @@ class COFFragmenter(BaseFragmenter):
                 # two hydrogens here and came back as anilines.
                 anchor_order = 3
             else:
-                anchor_order = self._terminal_bond_order(
-                    sp, species[anchor], anchor_d, self._length_scale()
-                )
+                # An imine-type N reads its kept bond's order from the parent's
+                # structure, not its drawn length (#11); see
+                # _parent_cut_n_retained_order. None: the length decides.
+                anchor_order = (self._parent_cut_n_retained_order(i, anchor, species, coords)
+                                if sp == "N" else None)
+                if anchor_order is None:
+                    anchor_order = self._terminal_bond_order(
+                        sp, species[anchor], anchor_d, self._length_scale()
+                    )
             deficit = target_valence[sp] - (anchor_order + h_count)
             # NOTE: `anchor_order` is read from the retained bond's own length,
             # which for a heavy atom is the parent's length - the coordinates
