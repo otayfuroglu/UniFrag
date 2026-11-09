@@ -158,6 +158,12 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 
 ### 5.3 Test
 ```bash
+# MOF sp-atom capping unit tests (#12; synthetic molecules, ~2 s)
+/Users/omert/miniconda3/bin/python runUniFrag/test_sp_caps.py
+
+# MOF QA on a finished run dir (MUST M1-M4: charge, parity, no C(OH)2, no H on sp C / nitrile N)
+/Users/omert/miniconda3/bin/python runUniFrag/check_mof_fragments.py <run_dir>
+
 # Run MOF family smoke tests
 ./run_mof_family.sh test_on_irmof_series 4.0
 
@@ -228,12 +234,13 @@ For each item:
 - Root cause: the `_get_fragment` bridge-capping and `bonds_by_ligand` loops capped every O that lost a metal, with no one-H-per-carboxylate guard.
 - Affected area: `MOFFragmenter` (all paths).
 - Workaround: none needed - fixed 2026-11-08: `_carboxylate_cap_veto` caps one O per carboxylate (by geometry), the balancer never makes C(OH)2 and deprotonates coordinated carboxylates first, `check_mof_fragments.py` [M3] fails any C(OH)2.
-- Status: fixed. Known limits: 7 frames keep an H on the free O of a coordinated carboxylate next to a free COO- (net already 0, so the balancer never acts); MOF duplicates are keyed on heavy formula only, so an isomer can be dropped as a "duplicate" (CUQRIR vs AFITEP linker, C16O4).
+- Status: fixed. Known limits: 7 frames keep an H on the free O of a coordinated carboxylate next to a free COO- (net already 0, so the balancer never acts); MOF duplicates are keyed on heavy formula only, so a different molecule can be dropped as a "duplicate" (MAQBEO linker C18H18O8 vs KEFBEE C18H10O8 since #12). The CUQRIR vs AFITEP C16O4 case noted here before was not an isomer: it was the same linker, alkyne-mis-capped (#12).
 
 - ID: MOF-alkyne-caps (GitHub #12)
 - Symptom: C#C carbons capped (usually twice, CH=CH) in 19 frames from 8 structures (AFITEP, ETIXEM, ETIXIQ, FAHPOV, KEFBEE, MUDTAH, SEFLAT, TIFQUX); invisible to the charge and parity checks.
-- Root cause: the "C with two C/N neighbours and no H" capping rule in `_cap_open_oxygens` and the MOF equivalents does not exclude sp carbon.
-- Status: open (#12); measured on d5ff4bb: 17 collection frames + 7 quarantined OnlyLinkers. COF not yet measured.
+- Root cause: the "C with two C/N neighbours and no H" capping rules (`_cap_open_oxygens` for OnlyLinkers via the MOF `_skip_saturated_h_cap` hook, which returned False; the edge-C loop in `MOFFragmenter._get_fragment` for FragMof/Min) did not exclude sp carbon; the metal-cut loops in `_get_fragment` also capped a nitrile N that had donated to the cut metal (dicyanamide in FALROB, JIQCUK).
+- Workaround: none needed - fixed 2026-11-09: `BaseFragmenter._is_complete_sp_atom` (C with two non-metal partners within 15 deg of linear; N on such a C at the shorter of its two bonds) vetoes the cap at all three MOF sites; `check_mof_fragments.py` [M4] fails any H on such an atom. COF (own override since earlier) byte-identical.
+- Status: fixed (not yet committed at time of writing). 1110-Zn (`unifrag_zn1110_i12`): 23 frames changed (H only, all alkyne/nitrile), 4 dropped as heavy-formula duplicates; 6 quarantined alkyne OnlyLinkers now balance and enter the collection. Known limit: the heavy-formula dedupe now drops MAQBEO's (different) linker in favour of KEFBEE's.
 
 ## 9) Decisions Log (ADR-lite)
 

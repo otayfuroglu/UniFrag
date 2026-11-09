@@ -1598,6 +1598,71 @@ class BaseFragmenter:
         """
         return False
 
+    # A carbon whose two sigma bonds are within 15 deg of linear is sp.
+    _SP_COS = float(np.cos(np.deg2rad(165.0)))
+
+    def _is_complete_sp_atom(self, idx, species, coords):
+        """Is `idx` an sp atom whose valence is already complete (#12)?
+
+        * C with exactly two non-metal heavy partners, within 15 deg of
+          linear: alkyne (R-C#C-R), nitrile C (R-C#N) or cumulene C. Three
+          sigma-plus-pi valences to one partner and one to the other use all
+          four, so there is no site for an H.
+        * N whose only non-metal heavy partner is such a carbon, at the
+          shorter of that carbon's two bonds: nitrile N. A metal it donated
+          to is not a partner; losing that metal leaves a neutral nitrile,
+          not an N that lost a sigma bond.
+
+        Angles, not absolute lengths (like COFFragmenter's nitrile test;
+        only the nitrile N compares its carbon's two bonds): an aromatic edge C
+        that lost its H has the same two partners and no H, but at ~120 deg,
+        and disordered vinylene/imine CIFs draw C=C at 1.11-1.25 A with their
+        own H at 115-134 deg, so a length test would misread them. In the
+        1110-Zn output every alkyne C sits at 165-180 deg and nothing lies
+        between 134 and 165 deg.
+
+        Not covered: isonitrile N (R-N#C, two partners), cyanide bridges
+        (C and N with one partner each), allenes with H on the outer C.
+        """
+        sp = species[idx]
+        if sp not in ("C", "N"):
+            return False
+
+        def partners(k):
+            pk = np.asarray(coords[k], dtype=float)
+            return [j for j, sj in enumerate(species)
+                    if j != k and sj != "H" and sj not in self.METALS
+                    and self.is_valid_bond(species[k], sj,
+                                           float(np.linalg.norm(pk - np.asarray(coords[j], dtype=float))))]
+
+        def linear_c(k, nb):
+            if species[k] != "C" or len(nb) != 2:
+                return False
+            pk = np.asarray(coords[k], dtype=float)
+            u = np.asarray(coords[nb[0]], dtype=float) - pk
+            v = np.asarray(coords[nb[1]], dtype=float) - pk
+            cos = float(np.dot(u, v)) / (np.linalg.norm(u) * np.linalg.norm(v))
+            return round(cos, 9) <= self._SP_COS
+
+        nb = partners(idx)
+        if sp == "C":
+            return linear_c(idx, nb)
+        if len(nb) != 1:
+            return False
+        c = nb[0]
+        cnb = partners(c)
+        if not linear_c(c, cnb):
+            return False
+        # The triple bond is the shorter of the carbon's two. One arm of a
+        # cut dicyanamide, N-C#N (1.30 / 1.15 A, FALROB, JIQCUK), is linear
+        # too, but its central N lost a C and needs its cap; a symmetric
+        # N=C=N has no triple end at all. Comparing two bonds on one atom
+        # holds for models that draw the nitrile long (COF 903: 1.38 A).
+        pc = np.asarray(coords[c], dtype=float)
+        d = {j: round(float(np.linalg.norm(pc - np.asarray(coords[j], dtype=float))), 3) for j in cnb}
+        other = [j for j in cnb if j != idx][0]
+        return d[idx] < d[other]
+
     def _parent_unfilled_sigma_sites(self, idx, species, coords):
         """Hook: directions in which an N/O that lost a sigma bond to the cut
         needs a capping hydrogen, read from the periodic parent.
@@ -2137,6 +2202,12 @@ class MOFFragmenter(BaseFragmenter):
     # ------------------------------------------------------------------
     # One acid H per carboxylate (#10)
     # ------------------------------------------------------------------
+    def _skip_saturated_h_cap(self, idx, species, coords):
+        """MOF: never cap a complete sp atom (#12). Before this, the aromatic
+        edge rule in `_cap_open_oxygens` (two C/N partners, no H) capped
+        alkyne carbons, so C#C came out as CH=CH."""
+        return self._is_complete_sp_atom(idx, species, coords)
+
     def _carboxylate_sibling(self, i, species, coords):
         """The other O of the carboxyl group O `i` belongs to, or None.
 
@@ -4194,6 +4265,9 @@ class MOFFragmenter(BaseFragmenter):
             parent_local_idx = local_index.get(ba_idx)
             if parent_local_idx is None:
                 continue
+            # A nitrile N that donated to the cut metal is complete (#12).
+            if self._is_complete_sp_atom(parent_local_idx, species, coords):
+                continue
 
             if ba_site.species_string == "O":
                 if self.oxygen_already_protonated(parent_local_idx, species, coords):
@@ -4231,6 +4305,9 @@ class MOFFragmenter(BaseFragmenter):
                 bl = self.cap_bond_length(lsite.species_string)
                 parent_local_idx = local_index.get(lid)
                 if parent_local_idx is not None:
+                    # A nitrile N that donated to the cut metal is complete (#12).
+                    if self._is_complete_sp_atom(parent_local_idx, species, coords):
+                        continue
                     if species[parent_local_idx] == "O" and self.oxygen_already_protonated(parent_local_idx, species, coords):
                         continue
                     if species[parent_local_idx] == "O" and self._carboxylate_cap_veto(
@@ -4242,6 +4319,10 @@ class MOFFragmenter(BaseFragmenter):
         # where crystallographic Hydrogens were omitted) receive exactly 1 C-H capping Hydrogen.
         for i, sp in enumerate(species):
             if sp != "C":
+                continue
+            # An alkyne C also has two C partners and no H, but at ~180 deg it
+            # is complete; capping it turned C#C into CH=CH (#12).
+            if self._is_complete_sp_atom(i, species, coords):
                 continue
             cpos = np.array(coords[i])
             c_nbs = []

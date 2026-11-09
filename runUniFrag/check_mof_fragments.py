@@ -17,6 +17,13 @@ MUST
   [M3] no carboxyl C carrying two O-H, R-C(OH)2 (#10). Where the linker is
        conjugated, the formal-charge check alone reads two such ends as a
        closed-shell quinoid and passes them; 279 frames of the #9 output did.
+  [M4] no H on a complete sp atom (#12): a C with exactly two non-metal heavy
+       partners whose bonds are within 15 deg of linear (alkyne, nitrile C),
+       or an N whose only heavy partner is such a C, at the shorter of its two
+       bonds (nitrile N; the central N of a cut dicyanamide arm, N-C#N, is
+       not one). No absolute length is used: disordered vinylene/imine CIFs
+       draw C=C at 1.11-1.25 A with their own H at 115-134 deg, and those
+       stay legal.
 """
 import sys, os, re, glob, json, warnings
 import numpy as np
@@ -38,7 +45,8 @@ def main():
     frames = _parse_extxyz(xyz)
     frag = MOFFragmenter()
     parent_of = {}
-    charge_bad, odd, gem = [], [], []
+    charge_bad, odd, gem, sp_h = [], [], [], []
+    cos_sp = np.cos(np.deg2rad(165.0))
     for fr in frames:
         lab, sp = fr["label"], fr["species"]
         rec = int(fr.get("charge", 0) or 0)
@@ -67,9 +75,32 @@ def main():
                     for o in oxy):
                 gem.append(lab)
                 break
+        xyz_a = np.asarray(fr["coords"], dtype=float)
+        heavy_nb = {a: [j for j in adj[a] if sp[j] != "H"] for a in adj}
+
+        def linear_c(a):
+            nb = heavy_nb.get(a, [])
+            if sp[a] != "C" or len(nb) != 2:
+                return False
+            u, v = xyz_a[nb[0]] - xyz_a[a], xyz_a[nb[1]] - xyz_a[a]
+            return round(float(u @ v / (np.linalg.norm(u) * np.linalg.norm(v))), 9) <= cos_sp
+        def nitrile_n(a):
+            if sp[a] != "N" or len(heavy_nb[a]) != 1 or not linear_c(heavy_nb[a][0]):
+                return False
+            c = heavy_nb[a][0]
+            other = [j for j in heavy_nb[c] if j != a][0]
+            dist = lambda j: round(float(np.linalg.norm(xyz_a[j] - xyz_a[c])), 3)
+            return dist(a) < dist(other)
+        for a in adj:
+            if sp[a] == "H" or not any(sp[k] == "H" for k in adj[a]):
+                continue
+            if linear_c(a) or nitrile_n(a):
+                sp_h.append(lab)
+                break
 
     report = {"frames": len(frames), "formal_charge_mismatch": len(charge_bad),
-              "odd_electron": len(odd), "gem_diol_carboxyl": len(gem)}
+              "odd_electron": len(odd), "gem_diol_carboxyl": len(gem),
+              "h_on_sp_atom": len(sp_h)}
     fails = []
     if charge_bad:
         fails.append(f"[M1] {len(charge_bad)} fragments whose formal charge is not the "
@@ -78,6 +109,8 @@ def main():
         fails.append(f"[M2] {len(odd)} odd-electron fragments: {odd[:8]}")
     if gem:
         fails.append(f"[M3] {len(gem)} fragments with a carboxyl C carrying two O-H: {gem[:8]}")
+    if sp_h:
+        fails.append(f"[M4] {len(sp_h)} fragments with H on an sp C or a nitrile N: {sp_h[:8]}")
     print("=" * 68)
     print("MOF FRAGMENT CHECK REPORT")
     print("=" * 68)
