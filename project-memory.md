@@ -236,7 +236,7 @@ For each item:
 - Root cause: `_process_cof_file` decides the Min route on atoms(normal) - atoms(min) >= 20 counting cap H.
 - Affected area: COF Min route (now `MIN_HEAVY_ATOM_REDUCTION_FOR_MINIMIZE_COF`).
 - Workaround: none needed after the fix.
-- Status: fixed 2026-11-13 (heavy-atom reduction >= 15, `_choose_cof_min`); full-run validation v21 pending at time of writing.
+- Status: fixed 2026-11-13 in 2aa71cc (heavy-atom reduction >= 15, `_choose_cof_min`); v21 confirmed the prediction on 847/847, only Min frames changed, collection 1575 -> 1569.
 
 - ID: MOF-charge (GitHub #9)
 - Symptom: MOF fragments tagged `charge=0` whose closed-shell formal charge was not 0 (CALF-20 +4; C(OH)2 carboxylates in 905 of 1768 Zn frames).
