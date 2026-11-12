@@ -429,8 +429,14 @@ Standing project constraint: **COF work must never alter MOF results.**
       hasattr(MOFFragmenter, '_prune_duplicate_cof_helper_files')  # False
       ```
 
-- [ ] **MUST NOT apply COF-only heuristics to MOFs** — e.g. the reduction < 20
-      rule is COF-only by explicit decision.
+- [ ] **MUST NOT apply COF-only heuristics to MOFs** — e.g. the Min reduction
+      rule (`MIN_HEAVY_ATOM_REDUCTION_FOR_MINIMIZE_COF`) is COF-only by
+      explicit decision.
+
+- [ ] **MUST — the COF Min route is decided on heavy atoms (#13).** A Min is
+      kept when it removes at least 15 heavy atoms from the normal fragment
+      (first-ring trim, else node + one linker, whichever removes more).
+      Cap H never count, so a capping change can never switch the route.
 
 ---
 

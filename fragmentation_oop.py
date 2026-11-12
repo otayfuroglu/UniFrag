@@ -10989,16 +10989,50 @@ def _get_formula(species):
     return " ".join(f"{el}{c[el]}" for el in sorted(c))
 
 
-# COF ONLY. Minimum atom-count reduction a minimized COF fragment must achieve
-# over its normal counterpart to be worth keeping as a separate output; below
+# COF ONLY. Minimum number of HEAVY atoms a minimized COF fragment must remove
+# from its normal counterpart to be worth keeping as a separate output; below
 # this the minimized fragment is a near-duplicate and is discarded (after the
 # node+one-linker fallback has also been tried).
+#
+# Heavy atoms only (#13): a trim also adds a cap H at every new cut, so an
+# all-atom count mixed skeleton removed with cuts made. Cap-only changes then
+# switched the route (1043), and trims were judged by their H (1079: 8 heavy +
+# 16 H passed a 20-atom bar; 245: 16 heavy removed but 8 cap H added, counted
+# 8). The old bar was 20 atoms including H.
 #
 # Deliberately NOT applied to MOFs. Measured on the IRMOF series, 12 of 19
 # structures clear a 20-atom bar by exactly one atom (reduction == 21), so any
 # such threshold sits on a cliff edge there and would silently delete valid
 # minimized fragments. MOF minimize output must stay untouched.
-MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF = 20
+MIN_HEAVY_ATOM_REDUCTION_FOR_MINIMIZE_COF = 15
+
+
+def _heavy_atom_count(species):
+    return sum(1 for s in species if s != "H")
+
+
+def _choose_cof_min(normal, first_ring, one_linker,
+                    threshold=MIN_HEAVY_ATOM_REDUCTION_FOR_MINIMIZE_COF):
+    """Pick the COF minimized fragment (#13). `normal` and `first_ring` are
+    extract() results (or None); `one_linker` is a zero-argument callable that
+    builds the node + one linker variant, called only when the first-ring trim
+    removes fewer than `threshold` heavy atoms. The variant removing more heavy
+    atoms is kept if it reaches `threshold`.
+    Returns (chosen result or None, heavy-atom reduction, route) with route
+    "first_ring", "one_linker" or None."""
+    if not normal or not first_ring:
+        return None, -1, None
+    n_heavy = _heavy_atom_count(normal.species)
+    best, red, route = first_ring, n_heavy - _heavy_atom_count(first_ring.species), "first_ring"
+    if red < threshold:
+        alt = one_linker()
+        if alt:
+            alt_red = n_heavy - _heavy_atom_count(alt.species)
+            if alt_red > red:
+                best, red, route = alt, alt_red, "one_linker"
+    if red >= threshold:
+        return best, red, route
+    return None, red, None
 
 
 def _process_cof_file(args_tuple):
@@ -11094,25 +11128,24 @@ def _process_cof_file(args_tuple):
             if res and len(res.species) > 50:
                 print(f"[{base}] Normal size > 50. Auto-generating minimize version...")
                 candidate_min = frag.extract(work_path, center_idx=center, output_path=None, minimize=True)
-                reduction = len(res.species) - len(candidate_min.species) if candidate_min else -1
-                if candidate_min and reduction < MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF:
-                    # First-ring trimming cannot shrink this one (typical of
-                    # large-node COFs whose linkers are already small). Retry
+
+                def _one_linker_min():
+                    # First-ring trimming cannot shrink this one enough (typical
+                    # of large-node COFs whose linkers are already small). Retry
                     # keeping the node plus exactly one complete linker.
-                    print(f"[{base}] Minimize only reduced size by {reduction} atoms "
-                          f"(< {MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF}); retrying with node + one linker...")
-                    alt_min = frag.extract(work_path, center_idx=center, output_path=None,
-                                           minimize=True, single_linker=True)
-                    alt_reduction = len(res.species) - len(alt_min.species) if alt_min else -1
-                    if alt_min and alt_reduction > reduction:
-                        candidate_min, reduction = alt_min, alt_reduction
-                if candidate_min and reduction >= MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF:
-                    res_min = candidate_min
+                    print(f"[{base}] Minimize removed fewer than "
+                          f"{MIN_HEAVY_ATOM_REDUCTION_FOR_MINIMIZE_COF} heavy atoms; "
+                          f"retrying with node + one linker...")
+                    return frag.extract(work_path, center_idx=center, output_path=None,
+                                        minimize=True, single_linker=True)
+
+                res_min, reduction, _route = _choose_cof_min(res, candidate_min, _one_linker_min)
+                if res_min:
                     min_atoms = len(res_min.species)
                     min_formula = _get_formula(res_min.species)
                 elif candidate_min:
-                    print(f"[{base}] Minimize reduced size by only {reduction} atoms "
-                          f"(< {MIN_ATOM_REDUCTION_FOR_MINIMIZE_COF}); skipping minimized fragment.")
+                    print(f"[{base}] Minimize removed only {reduction} heavy atoms "
+                          f"(< {MIN_HEAVY_ATOM_REDUCTION_FOR_MINIMIZE_COF}); skipping minimized fragment.")
             only_linker_res = []
             if extracted_linkers_snapshot:
                 for idx, (lsp, lco) in enumerate(extracted_linkers_snapshot):

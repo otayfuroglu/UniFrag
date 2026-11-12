@@ -164,6 +164,9 @@ CSD_DATA_DIRECTORY=/Users/omert/CCDC/ccdc-data/csd /Users/omert/miniconda3/bin/p
 # COF parent charge: bare-CH2 parent repair, parent/fragment formal charge, quarantine verdict (#11; ~5 s)
 /Users/omert/miniconda3/bin/python runUniFrag/test_cof_parent_charge.py
 
+# COF Min route on heavy atoms (#13; ~1 s)
+/Users/omert/miniconda3/bin/python runUniFrag/test_cof_min_route.py
+
 # MOF sp-atom capping unit tests (#12; synthetic molecules, ~2 s)
 /Users/omert/miniconda3/bin/python runUniFrag/test_sp_caps.py
 
@@ -227,6 +230,13 @@ For each item:
 - Affected area:
 - Workaround:
 - Status:
+
+- ID: COF-min-route (GitHub #13)
+- Symptom: cap-only changes add, drop or swap COF Min fragments (1043 in #11 v17); some first-ring trims are judged by H, not skeleton.
+- Root cause: `_process_cof_file` decides the Min route on atoms(normal) - atoms(min) >= 20 counting cap H.
+- Affected area: COF Min route (now `MIN_HEAVY_ATOM_REDUCTION_FOR_MINIMIZE_COF`).
+- Workaround: none needed after the fix.
+- Status: fixed 2026-11-13 (heavy-atom reduction >= 15, `_choose_cof_min`); full-run validation v21 pending at time of writing.
 
 - ID: MOF-charge (GitHub #9)
 - Symptom: MOF fragments tagged `charge=0` whose closed-shell formal charge was not 0 (CALF-20 +4; C(OH)2 carboxylates in 905 of 1768 Zn frames).
