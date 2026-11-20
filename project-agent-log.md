@@ -2670,3 +2670,7 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 - Local tests: 8/8, 11/11, 15/15, 12/12. Offline replay of the probe predicts 49 route changes (decision entry). Full run v21 submitted (ARF `unifrag_884_v21_dbg`, new dir, job 6968112, `predict_check.py` checks each structure's Min size against the prediction, cmp vs v20); it was still pending in the queue when the user asked to commit.
 - Follow-up: report v21 on #13; changed Min frames need new QM inputs.
 - v21 result (posted on #13): Min size == prediction on 847/847 (`predict_check.py`), 1805 frames identical to v20, only Min frames changed (30 route changes, 5 collection Mins dropped, 903Min charge-held at -2 with twin 904, 363Min new but charge-held); MUST all passed; collection 1575 -> 1569, quarantine 266 -> 268. Doc updates with these numbers not yet committed.
+
+## [2026-11-20] Follow-ups filed as issues (no code change)
+- #14: MOF cross-structure dedupe key is the heavy-atom formula only (MAQBEO C18H18O8 dropped as a duplicate of KEFBEE C18H10O8 since #12); proposes measuring on 1110-Zn, then a graph + H key like COF's.
+- #15: regenerate downstream QM (OpenMLP GBW, keyed by label) for frames changed by #10-#13; most changed frames kept their label, so stale GBW would be reused silently. Per-fix change counts in the issue; open question to the user: which collection the existing QM data came from.
