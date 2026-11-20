@@ -250,7 +250,7 @@ For each item:
 - Root cause: the `_get_fragment` bridge-capping and `bonds_by_ligand` loops capped every O that lost a metal, with no one-H-per-carboxylate guard.
 - Affected area: `MOFFragmenter` (all paths).
 - Workaround: none needed - fixed 2026-11-08: `_carboxylate_cap_veto` caps one O per carboxylate (by geometry), the balancer never makes C(OH)2 and deprotonates coordinated carboxylates first, `check_mof_fragments.py` [M3] fails any C(OH)2.
-- Status: fixed. Known limits: 7 frames keep an H on the free O of a coordinated carboxylate next to a free COO- (net already 0, so the balancer never acts); MOF duplicates are keyed on heavy formula only, so a different molecule can be dropped as a "duplicate" (MAQBEO linker C18H18O8 vs KEFBEE C18H10O8 since #12; GitHub #14). The CUQRIR vs AFITEP C16O4 case noted here before was not an isomer: it was the same linker, alkyne-mis-capped (#12).
+- Status: fixed. Known limits: 7 frames keep an H on the free O of a coordinated carboxylate next to a free COO- (net already 0, so the balancer never acts); MOF duplicates were keyed on heavy formula only, so a different molecule was dropped as a "duplicate" (MAQBEO C18H18O8 vs KEFBEE C18H10O8; BDC vs cyclohexane-DCA) - fixed 2026-11-20 (GitHub #14, `_collection_key`). The CUQRIR vs AFITEP C16O4 case noted here before was not an isomer: it was the same linker, alkyne-mis-capped (#12).
 
 - ID: MOF-alkyne-caps (GitHub #12)
 - Symptom: C#C carbons capped (usually twice, CH=CH) in 19 frames from 8 structures (AFITEP, ETIXEM, ETIXIQ, FAHPOV, KEFBEE, MUDTAH, SEFLAT, TIFQUX); invisible to the charge and parity checks.

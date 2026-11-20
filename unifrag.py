@@ -490,12 +490,22 @@ def _merge_symmetry_duplicates(struct, tol=_SYMMETRY_DUPLICATE_TOL):
     return merged
 
 
-def _cof_collection_key(species, coords):
-    """Cross-structure duplicate key for the COF collection (H-aware).
+def _collection_key(species, coords):
+    """Cross-structure duplicate key of the MOF and COF collections (H-aware).
 
-    See COFFragmenter._chemical_identity_key(include_h=True). Kept as one
+    See COFFragmenter._chemical_identity_key(include_h=True): heavy-atom
+    formula + H count + a Weisfeiler-Lehman hash of the heavy-atom bond graph
+    (metal-N/O bonds up to 2.6 A) with each heavy atom labelled by its H
+    count. Two frames match only if they are the same molecule with the H in
+    the same places; conformers and lattice noise still collapse. Kept as one
     module function so the flush, the quarantine release and the resume
     loader can never disagree about what counts as the same fragment.
+
+    The MOF collection used the heavy-atom formula alone until #14, which
+    dropped different molecules as "duplicates": terephthalic acid (C8H6O4)
+    after cyclohexane-1,4-dicarboxylic acid (C8H12O4), MAQBEO's linker
+    (C18H18O8) after KEFBEE's (C18H10O8) - 573 of 1421 dropped frames on the
+    1110-Zn set. The heavy-formula key is still used WITHIN one structure.
     """
     return COFFragmenter._chemical_identity_key(species, coords, include_h=True)
 
@@ -534,7 +544,7 @@ def _load_seen_keys_from_extxyz(filepath, key_fn=None, exclude_base=None):
     """
     seen_keys = set()
     if key_fn is None:
-        key_fn = MOFFragmenter._chemical_identity_key
+        key_fn = _collection_key
     frames = _parse_extxyz(filepath)
     for frame in frames:
         if exclude_base is not None and _label_belongs_to(frame["label"], exclude_base):
@@ -1612,6 +1622,9 @@ class BaseFragmenter:
     @staticmethod
     def _chemical_identity_key(species, coords, decimals=1):
         """Chemical duplicate key based on heavy-atom formula only.
+        Used WITHIN one structure (repeated blocks, before capping). The
+        collections compare frames ACROSS structures with `_collection_key`
+        (#14): the heavy formula alone made different molecules collide.
         Hydrogen atoms are excluded so that minor H-capping differences
         do not make otherwise identical skeletons appear unique.
         Pairwise distances are intentionally not used because small
@@ -11541,11 +11554,9 @@ def main():
         quarantine_path = os.path.join(out_dir, "fragments_quarantine.extxyz")
         
         seen_keys = set()
-        _identity_key_fn = (
-            COFFragmenter._chemical_identity_key
-            if getattr(args, "kind", "mof") == "cof"
-            else MOFFragmenter._chemical_identity_key
-        )
+        # Same key as the writer below (#14), so a resumed run judges
+        # duplicates exactly as a fresh one.
+        _identity_key_fn = _collection_key
         if is_dir:
             if os.path.exists(csv_path) and not args.overwrite:
                 # Load completed files from CSV
@@ -11590,17 +11601,17 @@ def main():
             norm_dup = "no"
             min_dup = "no"
             if r['norm_res']:
-                ckey = MOFFragmenter._chemical_identity_key(r['norm_res'].species, r['norm_res'].coords)
+                ckey = _collection_key(r['norm_res'].species, r['norm_res'].coords)
                 if ckey in seen_keys: norm_dup = "yes"
             if r['min_res']:
-                ckey = MOFFragmenter._chemical_identity_key(r['min_res'].species, r['min_res'].coords)
+                ckey = _collection_key(r['min_res'].species, r['min_res'].coords)
                 if ckey in seen_keys: min_dup = "yes"
 
             new_extxyz_frags = []
             for key in ["norm_res", "min_res"]:
                 res_obj = r[key]
                 if res_obj:
-                    ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    ckey = _collection_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -11615,7 +11626,7 @@ def main():
 
             if r.get("only_linker_res"):
                 for idx, res_obj in enumerate(r["only_linker_res"]):
-                    ckey = MOFFragmenter._chemical_identity_key(res_obj.species, res_obj.coords)
+                    ckey = _collection_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -11660,7 +11671,7 @@ def main():
                 reason = f"{reason} {ptag}".strip()
                 odd_frags.append((species, coords, frag_name, capped_h, reason))
                 seen_keys.discard(
-                    MOFFragmenter._chemical_identity_key(species, coords))
+                    _collection_key(species, coords))
                 print(f"  -> QUARANTINED '{frag_name}': {why}; held in "
                       f"fragments_quarantine.extxyz, not written to the main collection.")
 
@@ -11740,7 +11751,7 @@ def main():
         # main collection; they are held there instead, labelled with why.
         
         seen_keys = set()
-        _identity_key_fn = _cof_collection_key
+        _identity_key_fn = _collection_key
         if is_dir:
             if os.path.exists(csv_path) and not args.overwrite:
                 # Load completed files from CSV
@@ -11781,22 +11792,22 @@ def main():
         pool_args = [(cif, args.radius, args.center, args.cof_layer, args.timeout) for cif in cif_files]
 
         def _flush_cof_result(r, seen_keys, csv_path, extxyz_path, is_dir):
-            # COF duplicate detection uses the H-aware, topology-aware collection
-            # key (see _cof_collection_key), not the MOF formula-only key.
+            # Duplicate detection uses the H-aware, topology-aware collection
+            # key (see _collection_key), as the MOF writer does since #14.
             norm_dup = "no"
             min_dup = "no"
             if r['norm_res']:
-                ckey = _cof_collection_key(r['norm_res'].species, r['norm_res'].coords)
+                ckey = _collection_key(r['norm_res'].species, r['norm_res'].coords)
                 if ckey in seen_keys: norm_dup = "yes"
             if r['min_res']:
-                ckey = _cof_collection_key(r['min_res'].species, r['min_res'].coords)
+                ckey = _collection_key(r['min_res'].species, r['min_res'].coords)
                 if ckey in seen_keys: min_dup = "yes"
 
             new_extxyz_frags = []
             for key in ["norm_res", "min_res"]:
                 res_obj = r[key]
                 if res_obj:
-                    ckey = _cof_collection_key(res_obj.species, res_obj.coords)
+                    ckey = _collection_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -11811,7 +11822,7 @@ def main():
 
             if r.get("only_linker_res"):
                 for idx, res_obj in enumerate(r["only_linker_res"]):
-                    ckey = _cof_collection_key(res_obj.species, res_obj.coords)
+                    ckey = _collection_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -11826,7 +11837,7 @@ def main():
 
             if r.get("only_node_res"):
                 for idx, res_obj in enumerate(r["only_node_res"]):
-                    ckey = _cof_collection_key(res_obj.species, res_obj.coords)
+                    ckey = _collection_key(res_obj.species, res_obj.coords)
                     if ckey in seen_keys:
                         continue
                     seen_keys.add(ckey)
@@ -11862,7 +11873,7 @@ def main():
                 # collection never received. 1049's node vanished exactly that
                 # way, suppressed by 1050's quarantined radical.
                 seen_keys.discard(
-                    _cof_collection_key(_sp, _co))
+                    _collection_key(_sp, _co))
 
             if is_dir:
                 with open(csv_path, "a") as f:
