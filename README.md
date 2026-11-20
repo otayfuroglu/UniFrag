@@ -20,14 +20,14 @@ conda install -c conda-forge pdbfixer openmm
 ```
 
 ## Usage
-The entry point is `fragmentation_oop.py`. Choose the structure class with `--kind` (`mof` is the default).
+The entry point is `unifrag.py`. Choose the structure class with `--kind` (`mof` is the default).
 
 ```bash
 # A folder of structures (batch mode), in parallel
-python fragmentation_oop.py <folder_with_cifs> --kind cof --nproc 8
+python unifrag.py <folder_with_cifs> --kind cof --nproc 8
 
 # One structure: (re)processes it into the collection in its own folder
-python fragmentation_oop.py <path_to_cif> --kind mof --radius 4.0
+python unifrag.py <path_to_cif> --kind mof --radius 4.0
 ```
 
 Results are written to the folder that holds the input (for a single file, its frames in the collection are replaced and the other structures' frames are kept):
@@ -54,7 +54,7 @@ A "minimized" fragment is produced automatically whenever the normal fragment ex
 ## Example
 If you want to extract a 4-linker, 3-Metal core out of an MOF-74 variant:
 ```bash
-python fragmentation_oop.py example/MgMOF74_clean_fromCORE.cif --kind mof --radius 4.0
+python unifrag.py example/MgMOF74_clean_fromCORE.cif --kind mof --radius 4.0
 ```
 The fragments are written to `example/fragments_collection.extxyz`.
 
@@ -74,7 +74,7 @@ Run the fragmentation script specifying `--kind bio`. You can process individual
 
 ```bash
 # Process a single PDB file with window size 5, stride 1, and pH 7.0
-python fragmentation_oop.py example_protein.pdb --kind bio --window-size 5 --stride 1 --ph 7.0
+python unifrag.py example_protein.pdb --kind bio --window-size 5 --stride 1 --ph 7.0
 
 # Process an entire directory of PDBs using the shell helper
 ./run_bio_family.sh test_on_bio_mol 5 1 7.0

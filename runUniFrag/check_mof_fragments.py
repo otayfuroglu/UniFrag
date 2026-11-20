@@ -29,7 +29,7 @@ import sys, os, re, glob, json, warnings
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from fragmentation_oop import MOFFragmenter, _parse_extxyz, _clean_base_of, _label_belongs_to
+from unifrag import MOFFragmenter, _parse_extxyz, _clean_base_of, _label_belongs_to
 
 
 def main():

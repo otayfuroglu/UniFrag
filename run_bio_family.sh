@@ -9,7 +9,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${PYTHON:-/Users/omert/miniconda3/bin/python}"
-SCRIPT="$ROOT/fragmentation_oop.py"
+SCRIPT="$ROOT/unifrag.py"
 FOLDER_ARG="${1:-}"
 WINDOW="${2:-5}"
 STRIDE="${3:-1}"

@@ -8,7 +8,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${PYTHON:-/Users/omert/miniconda3/bin/python}"
-SCRIPT="$ROOT/fragmentation_oop.py"
+SCRIPT="$ROOT/unifrag.py"
 FOLDER_ARG="${1:-}"
 RADIUS="${2:-4.0}"
 COF_LAYER="${3:-both}"
@@ -59,7 +59,7 @@ case "$COF_LAYER" in
 esac
 
 if [ "$SUPPORTS_COF_LAYER" -ne 1 ] && [ "$COF_LAYER" != "auto" ]; then
-    echo -e "${YELLOW}Warning:${NC} current fragmentation_oop.py does not support --cof-layer."
+    echo -e "${YELLOW}Warning:${NC} current unifrag.py does not support --cof-layer."
     echo "  Falling back to auto layer mode for compatibility."
     COF_LAYER="auto"
 fi

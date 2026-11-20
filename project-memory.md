@@ -400,7 +400,7 @@ Use this section only if you want this template to include a concrete reference 
 
 
 ### 2026-05-08 COF metallo-PC layer output
-- `fragmentation_oop.py --kind cof` accepts `--cof-layer auto|monomer|dimer` for layered COFs.
+- `unifrag.py --kind cof` accepts `--cof-layer auto|monomer|dimer` for layered COFs.
 - For metallo-PC Path J, `monomer` writes one coffragmentor node+linker layer and `dimer` duplicates along the shortest lattice vector.
 - For generic Path B layered COFs, `monomer` keeps one principal layer and `dimer`/`auto` keeps two principal layers.
 - `run_cof_family.sh <folder> [radius] both` writes separate `_monomer` and `_dimer` normal/minimized outputs for visual comparison.
@@ -419,7 +419,7 @@ Use this section only if you want this template to include a concrete reference 
 - 2026-05-11: COF Path J layered dimer rule added. For coffragmentor node+linker COFs, non-monomer output now duplicates the completed capped fragment along the shortest lattice vector when that vector is a plausible face-to-face layer spacing (2.5-5.0 A). Validated on COF-LZU1 (3.729 A) and COF-LZU8 (4.093 A), normal and min dimers.
 
 ### Decision 2026-06-24: Configurable Processing Timeout and Relocation of Timed-Out Structures
-- Context: Processing certain highly-connected, large, or topologically complex crystal structures using `fragmentation_oop.py` could hang indefinitely or consume excessive CPU time.
+- Context: Processing certain highly-connected, large, or topologically complex crystal structures using `unifrag.py` could hang indefinitely or consume excessive CPU time.
 - Decision: Introduced a configurable timeout parameter `--timeout` (default 300.0s / 5 minutes) using a Unix `SIGALRM` based context manager. If a structure execution exceeds this timeout, the worker process catches a custom `TimeoutError` (inheriting from `BaseException` to prevent swallowing by local `except Exception` blocks), moves the timed-out CIF or PDB file to a `timed_out_structures/` folder within its parent directory, logs the timeout event to the console, and updates the summary CSV with `"TIMEOUT"` values to gracefully proceed with the batch.
 - Consequences: Long-running or stuck structures are isolated automatically, preventing stalls in the batch execution pipeline.
 
@@ -435,7 +435,7 @@ Use this section only if you want this template to include a concrete reference 
 - Context: In guest cleaning and pre-processing, `CrystalNN` was causing severe framework truncation by failing to identify organic-organic covalent bonds (e.g. C-C, C-N, C-O) in molecular linkers, leading to framework fragmentation and silent deletion of linker cores. Furthermore, fallback linker extraction was outputting truncated linkers due to metal seeds stealing atoms and coordination shell atoms being skipped.
 - Decision:
   1. Prioritize `JmolNN` (covalent radii-based coordination model) over `CrystalNN` as the default framework component solver in `preprocess_dataset.py` and `remove_guests.py`. Trigger the `CrystalNN` fallback block only on runtime exceptions, rather than when zero guest atoms are isolated.
-  2. Refine `_fallback_export_mof_node_linker` in `fragmentation_oop.py` to exclude metals from being selected as organic linker seeds.
+  2. Refine `_fallback_export_mof_node_linker` in `unifrag.py` to exclude metals from being selected as organic linker seeds.
   3. Initialize `global_vis` as an empty set (instead of `expanded_node`) and remove `v in expanded_node` from the BFS skip condition to allow the coordinates of coordinating carboxylate and N-oxide oxygens to be completely collected.
 - Consequences: Truncated organic linkers are fully resolved to their complete chemical compositions (e.g., dipyridine N,N'-dioxide is restored from 6 atoms to the complete 22-atom `C10 H8 N2 O2` molecule; terephthalate is restored to 16-atom `C8 H4 O4`; and dobpdc is restored to 26-atom `C14 H6 O6`).
 - Alternatives considered: Manually capping and reconstructing missing atoms with geometry optimization; rejected because restoring correct extraction connectivity from the intact crystal is much more robust and preserves original bond lengths/angles.

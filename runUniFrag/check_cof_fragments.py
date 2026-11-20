@@ -12,7 +12,7 @@ import numpy as np
 # Bond perception and bond-order tables are taken from UniFrag itself so this
 # report and the fragmenter can never disagree about what is bonded.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from fragmentation_oop import COFFragmenter, _is_quaternary_ammonium
+from unifrag import COFFragmenter, _is_quaternary_ammonium
 _F = COFFragmenter()
 
 VALENCE = {"H":1,"B":3,"C":4,"N":3,"O":2,"F":1,"Si":4,"P":3,"S":2,"Cl":1,"Br":1,"I":1}

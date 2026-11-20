@@ -2674,3 +2674,8 @@ Chronological handoff log for agents working on UniFrag. Add newest entries at t
 ## [2026-11-20] Follow-ups filed as issues (no code change)
 - #14: MOF cross-structure dedupe key is the heavy-atom formula only (MAQBEO C18H18O8 dropped as a duplicate of KEFBEE C18H10O8 since #12); proposes measuring on 1110-Zn, then a graph + H key like COF's.
 - #15: regenerate downstream QM (OpenMLP GBW, keyed by label) for frames changed by #10-#13; most changed frames kept their label, so stale GBW would be reused silently. Per-fix change counts in the issue; open question to the user: which collection the existing QM data came from.
+
+## [2026-11-20] Core module renamed `fragmentation_oop.py` -> `unifrag.py` (see project-decisions.md)
+- `git mv`; references updated in `runUniFrag/check_cof_fragments.py`, `check_mof_fragments.py`, `test_cof_cut_n.py`, `test_cof_min_route.py`, `test_cof_parent_charge.py`, `test_sp_caps.py`, `run_cof_family.sh`, `run_bio_family.sh`, `run_mof_family.sh`, `README.md`, `project-memory.md`; untracked `runUniFrag/prepare_zn_cifs.py` and `runUniFrag/test_for_paper/irmof10/new_version/run_noprescan.py` updated with the user's approval. No shim.
+- Validation: tests 8/8, 11/11, 15/15, 12/12; both checkers import; `unifrag.py --help`; shell scripts pass `bash -n`; one-CIF COF run (COF-TpAzo, scratchpad copy) 4 frames, checker MUST all passed.
+- In flight: #14 probe job 7021832 (`unifrag_zn1110_i14probe`) was submitted before the rename with its own `code/fragmentation_oop.py` copy; its scripts import that name, unaffected. Future ARF runs must import `unifrag`.

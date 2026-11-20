@@ -7,7 +7,7 @@ set -u
 
 WORKDIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${PYTHON:-/Users/omert/miniconda3/bin/python}"
-SCRIPT="/Users/omert/Desktop/UniFrag_main/UniFrag/fragmentation_oop.py"
+SCRIPT="/Users/omert/Desktop/UniFrag_main/UniFrag/unifrag.py"
 FOLDER_ARG="${1:-}"
 RADIUS="${2:-4.0}"
 

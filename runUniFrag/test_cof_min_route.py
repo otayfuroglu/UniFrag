@@ -14,7 +14,7 @@ import sys
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from fragmentation_oop import (  # noqa: E402
+from unifrag import (  # noqa: E402
     MIN_HEAVY_ATOM_REDUCTION_FOR_MINIMIZE_COF, _choose_cof_min)
 
 
